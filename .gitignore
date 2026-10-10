@@ -41,3 +41,6 @@ htmlcov/
 # Runtime logs
 *.log
 logs/
+
+# Microsoft Office lock files (~$name.docx etc.)
+~$*
