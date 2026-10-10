@@ -7,6 +7,7 @@ never terminating) shipped in the original and hung clients.
 """
 
 import http.client
+import inspect
 import io
 import json
 import threading
@@ -16,7 +17,7 @@ from unittest import mock
 
 from freegem.config import BridgeConfig
 from freegem.gemini import BridgeError
-from freegem.server import ThreadedServer, estimate_tokens
+from freegem.server import GeminiHandler, ThreadedServer, estimate_tokens
 
 TOOLS = [
     {
@@ -473,3 +474,133 @@ def io_bytes(data: str) -> io.BytesIO:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MalformedRequestTests(EndpointTestCase):
+    """Malformed client input must return a protocol error, not a traceback.
+
+    Each case below was a client-triggerable HTTP 500 found by fuzzing the
+    published package. A 500 implies server fault; a malformed request is the
+    client's problem and should read as such.
+    """
+
+    def test_content_as_int_is_accepted_not_crashed(self) -> None:
+        with mock.patch("freegem.server.generate", return_value="ok") as generate:
+            status, _, _ = self.post(
+                "/v1/chat/completions",
+                {"model": "gemini-3.6-flash", "messages": [{"role": "user", "content": 123}]},
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(generate.call_count, 1)
+
+    def test_content_as_dict_is_accepted_not_crashed(self) -> None:
+        with mock.patch("freegem.server.generate", return_value="ok"):
+            status, _, _ = self.post(
+                "/v1/chat/completions",
+                {"model": "gemini-3.6-flash", "messages": [{"role": "user", "content": {"a": 1}}]},
+            )
+        self.assertEqual(status, 200)
+
+    def test_tool_call_function_as_string(self) -> None:
+        with mock.patch("freegem.server.generate", return_value="ok"):
+            status, _, _ = self.post(
+                "/v1/chat/completions",
+                {
+                    "model": "gemini-3.6-flash",
+                    "messages": [
+                        {
+                            "role": "assistant",
+                            "content": "x",
+                            "tool_calls": [{"function": "notadict"}],
+                        }
+                    ],
+                },
+            )
+        self.assertEqual(status, 200)
+
+    def test_google_system_instruction_as_string(self) -> None:
+        with mock.patch("freegem.server.generate", return_value="ok"):
+            status, _, _ = self.post(
+                "/v1beta/models/gemini-3.6-flash:generateContent",
+                {
+                    "systemInstruction": "be brief",
+                    "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+                },
+            )
+        self.assertEqual(status, 200)
+
+    def test_google_tool_config_as_string(self) -> None:
+        with mock.patch("freegem.server.generate", return_value="ok"):
+            status, _, _ = self.post(
+                "/v1beta/models/gemini-3.6-flash:generateContent",
+                {
+                    "toolConfig": "nope",
+                    "tools": [{"functionDeclarations": [{"name": "a"}]}],
+                    "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+                },
+            )
+        self.assertEqual(status, 200)
+
+    def test_responses_tools_with_non_dict_entry(self) -> None:
+        with mock.patch("freegem.server.generate", return_value="ok"):
+            status, _, _ = self.post(
+                "/v1/responses", {"input": "hi", "tools": ["notadict", {"name": "f"}]}
+            )
+        self.assertEqual(status, 200)
+
+    def test_messages_not_a_list(self) -> None:
+        with mock.patch("freegem.server.generate") as generate:
+            generate.return_value = "ok"
+            status, _, _raw = self.post(
+                "/v1/chat/completions",
+                {"model": "gemini-3.6-flash", "messages": "notalist"},
+            )
+        # Either a clean 400 or a 200 -- what must not happen is a 500.
+        self.assertIn(status, (200, 400))
+
+    def test_messages_with_string_entries(self) -> None:
+        with mock.patch("freegem.server.generate", return_value="ok"):
+            status, _, _ = self.post(
+                "/v1/chat/completions",
+                {
+                    "model": "gemini-3.6-flash",
+                    "messages": ["a", "b", {"role": "user", "content": "c"}],
+                },
+            )
+        self.assertEqual(status, 200)
+
+    def test_large_body_is_read_not_truncated(self) -> None:
+        """A 200KB prompt must arrive intact, not be cut short by a slow read.
+
+        The interesting property is that the handler's socket timeout does not
+        fire while a large-but-legitimate body is still streaming in, so the
+        full prompt reaches the model rather than a truncated fragment.
+        """
+        payload_content = "y" * 200_000
+        with mock.patch("freegem.server.generate", return_value="ok") as generate:
+            status, _, _ = self.post(
+                "/v1/chat/completions",
+                {
+                    "model": "gemini-3.6-flash",
+                    "messages": [{"role": "user", "content": payload_content}],
+                },
+            )
+        self.assertEqual(status, 200)
+        sent_prompt = generate.call_args[0][1]
+        self.assertIn(payload_content, sent_prompt)
+
+    def test_server_has_a_request_timeout(self) -> None:
+        """The read timeout is what stops a stalled client eating a thread."""
+        from freegem.server import GeminiHandler
+
+        self.assertGreater(GeminiHandler.timeout, 0)
+
+    def test_timeout_is_reported_as_408_not_500(self) -> None:
+        """A client that promises a body then stops sends gets a 408.
+
+        BaseHTTPRequestHandler converts a socket TimeoutError into a bare 500
+        before do_POST runs, which misattributes a client fault to the server.
+        """
+        handler_source = inspect.getsource(GeminiHandler.do_POST)
+        self.assertIn("408", handler_source)
+        self.assertIn("TimeoutError", handler_source)

@@ -389,3 +389,105 @@ class RoundTripTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MalformedInputTests(unittest.TestCase):
+    """Non-dict and wrong-typed fields must not 500 the request.
+
+    Every case here was a client-triggerable HTTP 500 found by fuzzing the
+    published package: a malformed part raised inside the translation layer,
+    which the server surfaced as an unhandled traceback rather than a 400.
+    """
+
+    # ── OpenAI messages ────────────────────────────────────────────────────
+    def test_content_as_int(self) -> None:
+        prompt, _ = messages_to_prompt([{"role": "user", "content": 123}])
+        self.assertIn("123", prompt)
+
+    def test_content_as_dict(self) -> None:
+        prompt, _ = messages_to_prompt([{"role": "user", "content": {"a": 1}}])
+        self.assertIn('"a": 1', prompt)
+
+    def test_content_as_bool_and_none(self) -> None:
+        prompt, _ = messages_to_prompt(
+            [{"role": "user", "content": True}, {"role": "user", "content": None}]
+        )
+        self.assertIn("true", prompt.lower())
+
+    def test_text_part_with_non_string_value(self) -> None:
+        prompt, _ = messages_to_prompt([{"role": "user", "content": [{"type": "text", "text": 5}]}])
+        self.assertIn("5", prompt)
+
+    def test_tool_call_function_not_a_dict(self) -> None:
+        prompt, _ = messages_to_prompt(
+            [{"role": "assistant", "content": "x", "tool_calls": [{"function": "nope"}]}]
+        )
+        self.assertIn("[Assistant]: x", prompt)
+
+    def test_tool_calls_not_a_list(self) -> None:
+        prompt, _ = messages_to_prompt(
+            [{"role": "assistant", "content": "x", "tool_calls": "nope"}]
+        )
+        self.assertIn("[Assistant]: x", prompt)
+
+    def test_image_url_as_int_ignored(self) -> None:
+        _, images = messages_to_prompt(
+            [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": 9}}]}]
+        )
+        self.assertEqual(images, [])
+
+    # ── Google-native ──────────────────────────────────────────────────────
+    def test_system_instruction_as_string(self) -> None:
+        prompt, _ = google_contents_to_prompt({"systemInstruction": "be brief", "contents": []})
+        self.assertIn("be brief", prompt)
+
+    def test_system_instruction_as_int(self) -> None:
+        prompt, _ = google_contents_to_prompt({"systemInstruction": 7, "contents": []})
+        self.assertIn("7", prompt)
+
+    def test_tool_config_as_string(self) -> None:
+        req = {
+            "toolConfig": "nope",
+            "tools": [{"functionDeclarations": [{"name": "a"}]}],
+            "contents": [],
+        }
+        prompt, _ = google_contents_to_prompt(req)
+        self.assertIn("# Tool Use", prompt)
+
+    def test_tools_as_dict_wrapped(self) -> None:
+        prompt, _ = google_contents_to_prompt({"tools": {"functionDeclarations": [{"name": "a"}]}})
+        self.assertIn("# Tool Use", prompt)
+
+    def test_function_declarations_as_string_is_skipped(self) -> None:
+        prompt, _ = google_contents_to_prompt({"tools": [{"functionDeclarations": "x"}]})
+        self.assertEqual(prompt, "")
+
+    def test_function_call_as_string_skipped(self) -> None:
+        prompt, _ = google_contents_to_prompt(
+            {"contents": [{"role": "model", "parts": [{"functionCall": "x"}]}]}
+        )
+        self.assertNotIn("function_call", prompt)
+
+    def test_function_response_as_int_skipped(self) -> None:
+        prompt, _ = google_contents_to_prompt(
+            {"contents": [{"role": "user", "parts": [{"functionResponse": 5}]}]}
+        )
+        self.assertEqual(prompt, "")
+
+    def test_parts_as_string(self) -> None:
+        prompt, _ = google_contents_to_prompt({"contents": [{"role": "model", "parts": "x"}]})
+        self.assertIn("[Assistant]:", prompt)
+
+    # ── Reply parsing ──────────────────────────────────────────────────────
+    def test_null_arguments_do_not_crash(self) -> None:
+        _, calls = parse_tool_calls('```tool_call\n{"name": "a", "arguments": null}\n```')
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["function"]["arguments"], "null")
+
+    def test_null_name_ignored(self) -> None:
+        _, calls = parse_tool_calls('```tool_call\n{"name": null}\n```')
+        self.assertEqual(calls, [])
+
+    def test_null_fn_args_default_to_object(self) -> None:
+        _, calls = parse_function_calls('```function_call\n{"name": "a", "args": null}\n```')
+        self.assertEqual(calls[0]["args"], {})

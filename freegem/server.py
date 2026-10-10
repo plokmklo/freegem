@@ -75,7 +75,30 @@ class GeminiHandler(BaseHTTPRequestHandler):
     server_version = f"freegem/{__version__}"
     protocol_version = "HTTP/1.1"
 
+    # Bound how long a connection may idle while we read its request. Without
+    # this, a client that declares Content-Length: 99999 and sends 36 bytes
+    # leaves this handler blocked in rfile.read() forever. Under ThreadingMixIn
+    # each such connection permanently consumes a worker thread, so a handful of
+    # half-open sockets exhausts the server. Also stops a client that opens a
+    # stream and never reads from stalling the thread that is writing to it.
+    timeout = 65
+
     # ── plumbing ─────────────────────────────────────────────────────────────
+
+    def handle(self) -> None:
+        """Serve one connection, with a timeout applied to the socket."""
+        if self.timeout:
+            with contextlib.suppress(OSError):
+                self.connection.settimeout(self.timeout)
+        try:
+            super().handle()
+        except TimeoutError:
+            # The socket read timed out: the client went quiet mid-request.
+            # BaseHTTPRequestHandler would turn this into a bare 500 with an
+            # empty body, which looks like a server fault rather than a client
+            # that stopped sending. Report it as what it is.
+            with contextlib.suppress(Exception):
+                self.send_error_json("request timed out waiting for the client", 408)
 
     @property
     def cfg(self) -> BridgeConfig:
@@ -262,6 +285,15 @@ class GeminiHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception as exc:
+            # BaseHTTPRequestHandler.handle_one_request already converts a
+            # socket TimeoutError into a 500 with the bare message "timed out"
+            # before this frame runs, so a client that promises a body and goes
+            # quiet surfaces as a server fault. Re-report it as 408.
+            if isinstance(exc, TimeoutError):
+                log(self.cfg, "client stopped sending mid-request")
+                with contextlib.suppress(Exception):
+                    self.send_error_json("client stopped sending the request", 408)
+                return
             log(self.cfg, f"POST error: {exc}")
             with contextlib.suppress(Exception):
                 self.send_error_json(str(exc), 500)
@@ -278,11 +310,11 @@ class GeminiHandler(BaseHTTPRequestHandler):
         if not name:
             log(self.cfg, f"unknown model {requested!r}; using {self.cfg.default_model}")
         # resolve_model's contract: no error means every field is populated.
-        # Its Optional return type cannot express that; a violation must fail
-        # loudly here rather than as int(None) downstream.
-        assert name is not None and mode_id is not None and think_mode is not None, (
-            "resolve_model broke its contract"
-        )
+        # Its Optional return type cannot express that. This is a hard failure
+        # rather than an assert because asserts are stripped under `python -O`,
+        # which would turn a contract break into a baffling int(None) TypeError.
+        if name is None or mode_id is None or think_mode is None:
+            raise RuntimeError("resolve_model returned no error but left fields unset")
         return name, int(mode_id), int(think_mode), extra or {}
 
     def _generation_error(self, exc: Exception) -> None:
@@ -460,9 +492,11 @@ class GeminiHandler(BaseHTTPRequestHandler):
                     messages.append(self._responses_item_to_message(item))
 
         tools = req.get("tools")
-        if tools:
+        if tools and isinstance(tools, list):
             normalised = []
             for tool in tools:
+                if not isinstance(tool, dict):
+                    continue
                 if tool.get("type") == "function" and "function" not in tool:
                     normalised.append(
                         {
@@ -477,6 +511,8 @@ class GeminiHandler(BaseHTTPRequestHandler):
                 else:
                     normalised.append(tool)
             tools = normalised
+        else:
+            tools = None
 
         tool_choice = req.get("tool_choice", "auto")
         prompt, images = messages_to_prompt(messages, tools, tool_choice)
@@ -661,9 +697,15 @@ class GeminiHandler(BaseHTTPRequestHandler):
             return
         model_name, model_id, think_mode, extra_fields = resolved
 
-        tool_config = req.get("toolConfig") or {}
-        fc_mode = (tool_config.get("functionCallingConfig") or {}).get("mode", "AUTO")
-        has_tools = bool(req.get("tools")) and fc_mode != "NONE"
+        tool_config = req.get("toolConfig")
+        if not isinstance(tool_config, dict):
+            tool_config = {}
+        fc_config = tool_config.get("functionCallingConfig")
+        if not isinstance(fc_config, dict):
+            fc_config = {}
+        fc_mode = fc_config.get("mode", "AUTO")
+        tools_present = req.get("tools")
+        has_tools = bool(tools_present) and fc_mode != "NONE"
 
         prompt, images = google_contents_to_prompt(req)
         if not prompt.strip():

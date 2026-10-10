@@ -86,6 +86,41 @@ from that project.
 - Unknown model names falling back silently without any log line, making a
   typo indistinguishable from a routing decision.
 
+### Fixed
+
+- **Malformed client input returned HTTP 500 with a traceback instead of a
+  protocol error.** Fuzzing the published package found six client-triggerable
+  500s: `messages[].content` as an int or dict raised inside `" ".join`,
+  `systemInstruction` as a string raised on `.get`, `toolConfig` and
+  `toolCall.function` as non-dicts raised AttributeError, and
+  `functionDeclarations` as a string silently dropped every tool while still
+  returning 200. All now coerce or skip and return a valid response. A
+  malformed request is the client's problem and should not read as a server
+  fault.
+- **A client that declared `Content-Length: 99999` and sent 36 bytes hung a
+  worker thread forever.** No socket timeout was set, so `rfile.read()`
+  blocked indefinitely; under `ThreadingMixIn` each such connection
+  permanently consumed a thread. Requests now time out after 65s and return
+  HTTP 408 with a JSON body. Detected live: the connection used to block
+  indefinitely with no response at all.
+- **`"name": null` in a model-emitted tool call was forwarded as a null name.**
+  OpenAI's schema requires a string, so a strict client rejected the entire
+  completion over one malformed call. Blocks without a string name are now
+  dropped, and `"args": null` is coerced to `{}` so the emitted
+  `functionCall` part is always schema-valid.
+- **`tools` sent as an unwrapped dict dropped every declaration.** Google's
+  schema says an array; a dict-shaped `tools` meant the client sent one group
+  unwrapped, and it was silently discarded.
+
+### Changed
+
+- `resolve_model`'s contract check is a `RuntimeError` rather than an `assert`,
+  which `python -O` strips — a contract break would otherwise surface as
+  `int(None) TypeError` in production and nowhere in development.
+- SHA1 in `make_sapisidhash` is marked `usedforsecurity=False`. It is mandated
+  by Google's `SAPISIDHASH` scheme; the marker records that the hash choice is
+  a protocol constant so a future reader does not "fix" it into a broken login.
+
 ### Security
 
 - **The image upload no longer sends the session cookie to an arbitrary host.**

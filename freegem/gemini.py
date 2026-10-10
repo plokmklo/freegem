@@ -130,9 +130,17 @@ def load_cookie(cfg: BridgeConfig) -> tuple[str, str | None]:
 
 
 def make_sapisidhash(sapisid: str) -> str:
-    """Google's Authorization header format: ``SAPISIDHASH <ts>_<sha1>``."""
+    """Google's Authorization header format: ``SAPISIDHASH <ts>_<sha1>``.
+
+    SHA1 is mandated by Google's scheme -- substituting a stronger hash makes
+    every authenticated request fail. ``usedforsecurity=False`` records that
+    intent so a future reader does not "fix" it into a broken login.
+    """
     ts = int(time.time())
-    digest = hashlib.sha1(f"{ts} {sapisid} https://gemini.google.com".encode()).hexdigest()
+    digest = hashlib.sha1(
+        f"{ts} {sapisid} https://gemini.google.com".encode(),
+        usedforsecurity=False,
+    ).hexdigest()
     return f"SAPISIDHASH {ts}_{digest}"
 
 

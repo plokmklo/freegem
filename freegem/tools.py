@@ -34,7 +34,42 @@ FUNCTION_CALL_FENCE = "```function_call"
 MAX_INLINE_IMAGE_B64 = 50_000
 
 
+def _as_text(value: Any) -> str:
+    """Coerce a message field to text, tolerating wrong client types.
+
+    ``content`` is specified as a string or a list of parts, but clients in the
+    wild send integers, dicts, and nulls. Without this, a single malformed part
+    raises ``TypeError: sequence item 0: expected str instance`` inside
+    ``" ".join`` and the whole request 500s -- a client-triggerable crash from
+    input the spec never allowed. Anything non-string becomes its JSON form, so
+    the model still sees something rather than a dropped turn.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (dict, list, tuple)):
+        try:
+            return json.dumps(value, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return str(value)
+    return str(value)
+
+
 # ─── OpenAI helpers ───────────────────────────────────────────────────────────
+
+
+def _tool_call_function(tc: Any) -> dict[str, Any]:
+    """Safely extract the ``function`` object from a tool_call entry.
+
+    ``{"function": "notadict"}`` raises AttributeError on ``.get``, which 500s
+    the request. Anything non-dict yields an empty function so the turn still
+    renders instead of crashing.
+    """
+    if not isinstance(tc, dict):
+        return {}
+    fn = tc.get("function")
+    return fn if isinstance(fn, dict) else {}
 
 
 def _tool_choice_instruction(tool_choice: Any) -> str:
@@ -135,21 +170,21 @@ def messages_to_prompt(
         if not isinstance(message, dict):
             continue
         role = message.get("role", "user")
-        content = message.get("content", "")
+        content = _as_text(message.get("content", ""))
 
-        if isinstance(content, list):
+        if isinstance(message.get("content"), list):
             texts: list[str] = []
-            for chunk in content:
+            for chunk in message["content"]:
                 if not isinstance(chunk, dict):
                     continue
                 if chunk.get("type") in ("text", "input_text", "output_text"):
-                    texts.append(chunk.get("text", ""))
+                    texts.append(_as_text(chunk.get("text", "")))
                     continue
                 image = _image_from_openai_part(chunk)
                 if image:
                     images.append(image)
                     texts.append("[Image attached]")
-            content = " ".join(texts)
+            content = " ".join(t for t in texts if t)
 
         tool_calls = message.get("tool_calls")
         if role == "system":
@@ -158,10 +193,11 @@ def messages_to_prompt(
             rendered = f"[Assistant]: {content}" if content else "[Assistant]:"
             if tool_calls:
                 blocks = "\n".join(
-                    f'{TOOL_CALL_FENCE}\n{{"name": "{tc.get("function", {}).get("name")}", '
-                    f'"arguments": {tc.get("function", {}).get("arguments", "{}")}}}\n```'
-                    for tc in tool_calls
-                    if isinstance(tc, dict)
+                    f'{TOOL_CALL_FENCE}\n{{"name": "{_as_text(fn.get("name"))}", '
+                    f'"arguments": {_as_text(fn.get("arguments", "{}"))}}}\n```'
+                    for tc in (tool_calls if isinstance(tool_calls, list) else [])
+                    for fn in [_tool_call_function(tc)]
+                    if fn
                 )
                 rendered = f"{rendered}\n{blocks}" if blocks else rendered
             parts.append(rendered)
@@ -176,8 +212,20 @@ def messages_to_prompt(
 # ─── Google-native helpers ────────────────────────────────────────────────────
 
 
+def _google_function_calling_config(req: dict) -> dict[str, Any]:
+    """Safely read ``toolConfig.functionCallingConfig``.
+
+    A string or list here raises AttributeError on ``.get``, 500ing the request.
+    """
+    tool_config = req.get("toolConfig")
+    if not isinstance(tool_config, dict):
+        return {}
+    fc = tool_config.get("functionCallingConfig")
+    return fc if isinstance(fc, dict) else {}
+
+
 def _google_tool_choice_instruction(req: dict) -> str:
-    config = (req.get("toolConfig") or {}).get("functionCallingConfig") or {}
+    config = _google_function_calling_config(req)
     mode = config.get("mode", "AUTO")
     allowed = config.get("allowedFunctionNames") or []
     if mode == "NONE":
@@ -194,16 +242,30 @@ def _google_tool_preamble(req: dict) -> str:
     tools = req.get("tools")
     if not tools:
         return ""
-    config = (req.get("toolConfig") or {}).get("functionCallingConfig") or {}
-    if config.get("mode") == "NONE":
+    if _google_function_calling_config(req).get("mode") == "NONE":
         return ""
 
     specs: list[dict[str, Any]] = []
-    for group in tools:
+    # Google's schema says `tools` is an array. A dict-shaped `tools` means the
+    # client sent a single group unwrapped -- tolerate it rather than dropping
+    # every declaration, which would return HTTP 200 with no tools advertised
+    # and read as "the model chose not to call".
+    groups = tools if isinstance(tools, list) else [tools]
+    for group in groups:
         if not isinstance(group, dict):
             continue
-        for fn in group.get("functionDeclarations") or []:
-            spec = {"name": fn.get("name", ""), "description": fn.get("description", "")}
+        declarations = group.get("functionDeclarations")
+        if isinstance(declarations, dict):
+            declarations = [declarations]
+        if not isinstance(declarations, list):
+            # A string here means the client misunderstood the schema. Skipping
+            # it silently returns HTTP 200 with no tools advertised, which reads
+            # as "the model chose not to call" rather than a malformed request.
+            continue
+        for fn in declarations:
+            if not isinstance(fn, dict):
+                continue
+            spec = {"name": fn.get("name", ""), "description": _as_text(fn.get("description"))}
             params = fn.get("parameters") or fn.get("parametersJsonSchema")
             if params:
                 spec["parameters"] = params
@@ -232,9 +294,15 @@ def google_contents_to_prompt(req: dict) -> tuple[str, list[ImageRef]]:
     parts: list[str] = []
     images: list[ImageRef] = []
 
-    system = req.get("systemInstruction") or {}
+    system = req.get("systemInstruction")
+    if not isinstance(system, dict):
+        # Tolerate a string or list here too: Google's spec says an object, but
+        # a bare string systemInstruction 500s on .get().
+        system = {"parts": [{"text": _as_text(system)}]} if system else {}
     system_text = " ".join(
-        p.get("text", "") for p in system.get("parts", []) if isinstance(p, dict) and p.get("text")
+        _as_text(p.get("text", ""))
+        for p in system.get("parts") or []
+        if isinstance(p, dict) and p.get("text")
     )
     preamble = _google_tool_preamble(req)
     if system_text:
@@ -262,17 +330,19 @@ def google_contents_to_prompt(req: dict) -> tuple[str, list[ImageRef]]:
                 chunks.append("[Image attached]")
             elif part.get("functionCall"):
                 fc = part["functionCall"]
-                chunks.append(
-                    f"{FUNCTION_CALL_FENCE}\n"
-                    f"{json.dumps({'name': fc.get('name'), 'args': fc.get('args', {})}, ensure_ascii=False)}\n"
-                    "```"
-                )
+                if isinstance(fc, dict):
+                    chunks.append(
+                        f"{FUNCTION_CALL_FENCE}\n"
+                        f"{json.dumps({'name': fc.get('name'), 'args': fc.get('args', {})}, ensure_ascii=False)}\n"
+                        "```"
+                    )
             elif part.get("functionResponse"):
                 fr = part["functionResponse"]
-                chunks.append(
-                    f"[Tool result for {fr.get('name', '')}]: "
-                    f"{json.dumps(fr.get('response', {}), ensure_ascii=False)}"
-                )
+                if isinstance(fr, dict):
+                    chunks.append(
+                        f"[Tool result for {fr.get('name', '')}]: "
+                        f"{json.dumps(fr.get('response', {}), ensure_ascii=False)}"
+                    )
         text = "\n".join(chunks)
         parts.append(f"[Assistant]: {text}" if role == "model" else text)
 
@@ -283,7 +353,14 @@ def google_contents_to_prompt(req: dict) -> tuple[str, list[ImageRef]]:
 
 
 def parse_tool_calls(text: str) -> tuple[str, list[dict]]:
-    """Extract OpenAI ``tool_calls`` from fenced ``tool_call`` blocks."""
+    """Extract OpenAI ``tool_calls`` from fenced ``tool_call`` blocks.
+
+    ``name`` is required to be a string by the OpenAI schema, and ``arguments``
+    must be a JSON-encoded string. A model sometimes emits ``"name": null`` or
+    omits the name entirely; those blocks are dropped rather than forwarded,
+    because a strict client rejects the whole completion over one malformed
+    tool call.
+    """
     calls: list[dict] = []
     kept: list[str] = []
     cursor = 0
@@ -293,16 +370,21 @@ def parse_tool_calls(text: str) -> tuple[str, list[dict]]:
         cursor = match.end()
         try:
             data = json.loads(match.group(1).strip())
-            name = data["name"]
-        except (json.JSONDecodeError, KeyError, TypeError):
+        except (json.JSONDecodeError, TypeError):
             continue
+        if not isinstance(data, dict):
+            continue
+        name = data.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        arguments = data.get("arguments", {})
         calls.append(
             {
                 "id": f"call_{uuid.uuid4().hex[:8]}",
                 "type": "function",
                 "function": {
                     "name": name,
-                    "arguments": json.dumps(data.get("arguments", {}), ensure_ascii=False),
+                    "arguments": json.dumps(arguments, ensure_ascii=False),
                 },
             }
         )
@@ -349,13 +431,22 @@ def _balanced_json(text: str, start: int) -> str | None:
 
 
 def _parse_call_object(raw: str) -> dict[str, Any] | None:
-    """Parse a function-call object, or None if it is not a well-formed call."""
+    """Parse a function-call object, or None if it is not a well-formed call.
+
+    A model occasionally emits ``"args": null``. Passing that through yields
+    ``args: None``, which serialises as JSON ``null`` where Google expects an
+    object. Coerce it to ``{}`` here so the emitted ``functionCall`` part is
+    always schema-valid.
+    """
     try:
         data = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
         return None
     if isinstance(data, dict) and "name" in data:
-        return {"name": data["name"], "args": data.get("args", data.get("arguments", {}))}
+        args = data.get("args", data.get("arguments", {}))
+        if not isinstance(args, dict):
+            args = {}
+        return {"name": data["name"], "args": args}
     return None
 
 
