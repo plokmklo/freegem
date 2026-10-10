@@ -70,6 +70,11 @@ DEFAULT_MAX_CHARS = 20_000
 #: call stuffing megabytes of page text into one prompt is its own accident.
 _MAX_CHARS_HARD_LIMIT = 200_000
 
+#: Minimum extracted characters for a <main>/role=main region to be
+#: preferred over the whole-page text. A tiny "main" (breadcrumbs, a
+#: one-line teaser) must not win over the full page.
+_MAIN_CONTENT_MIN_CHARS = 200
+
 #: Honest User-Agent: scraping with a spoofed browser UA is somebody else's
 #: decision to make; sites that block non-browser agents stay blocked.
 _UA = "freegem-web-scraper/2.1 (+https://github.com/plokmklo/freegem)"
@@ -328,6 +333,28 @@ _SKIP_TAGS = frozenset(
         "textarea",
     }
 )
+#: HTML void elements: they never take an end tag. A void element that is
+#: also skipped ("input") must NOT go on the skip stack -- there is no
+#: ``</input>`` to pop it, so one checkbox in a page header suppressed the
+#: ENTIRE article on MediaWiki skins (the "Jump to content" bug: 1.8 MB of
+#: HTML extracted to 15 characters).
+_VOID_TAGS = frozenset(
+    {
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "source",
+        "track",
+        "wbr",
+    }
+)
 _BLOCK_TAGS = frozenset(
     {
         "article",
@@ -406,7 +433,9 @@ class _TextExtractor(HTMLParser):
             self._in_title = True
             return
         if tag in _SKIP_TAGS:
-            self._skip_stack.append(tag)
+            # Void elements never close; pushing one would jam the stack.
+            if tag not in _VOID_TAGS:
+                self._skip_stack.append(tag)
             return
         if self._skip_stack:
             return
@@ -451,6 +480,53 @@ def _clean_text(parts: list[str]) -> str:
     text = re.sub(r"[ \t]+\n", "\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+#: Substrings that mark where a page's real content region starts. Checked in
+#: order: MediaWiki skins first (the language lists and tool tabs that drown
+#: wiki articles live OUTSIDE these), then the generic HTML landmarks.
+_MAIN_ANCHORS = (
+    'id="mw-content-text"',
+    "id='mw-content-text'",
+    'id="bodyContent"',
+    "id='bodyContent'",
+    'class="mw-parser-output"',
+    "class='mw-parser-output'",
+    "<main",
+    'role="main"',
+)
+
+
+def _main_region(html: str) -> tuple[int, int] | None:
+    """A (start, end) slice of ``html`` holding just the content region.
+
+    String-level anchoring on purpose: div soup makes it unreliable to track
+    "am I inside the main region?" with a parser stack (a mis-nested end tag
+    flips the flag). The anchor is an attribute substring, so the slice is
+    found with ``find`` and ends at ``</body>`` (or ``</main>``). Returns
+    None when no anchor exists -- the caller then uses the whole page.
+    """
+    for marker in _MAIN_ANCHORS:
+        idx = html.find(marker)
+        if idx == -1:
+            continue
+        tag_end = html.find(">", idx)
+        if tag_end == -1:
+            continue
+        start = tag_end + 1
+        end = html.rfind("</main>") if marker == "<main" else html.rfind("</body>")
+        if end <= start:
+            end = len(html)
+        return start, end
+    return None
+
+
+def _extract_title_fallback(html: str) -> str:
+    """<title> text via regex, for slices that cut the head off."""
+    match = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+    if not match:
+        return ""
+    return _WS.sub(" ", match.group(1)).strip()
 
 
 def _decode_body(raw: bytes, content_type: str) -> str:
@@ -552,10 +628,11 @@ def _mediawiki_article(url: str) -> tuple[str, str] | None:
 def _mediawiki_extract(cfg: BridgeConfig, url: str, max_chars: int) -> ScrapeResult | None:
     """Fetch a MediaWiki article through the site's own Action API.
 
-    Returns None when ``url`` is not a recognized article URL (the caller
-    falls back to the plain HTML path). Raises ScrapeError when the URL IS
-    an article but the API path fails -- a failing adapter must look like
-    any other failed source, not silently become a scrape.
+    Returns None when ``url`` is not a recognized article URL, or when the
+    site's robots.txt disallows its API to us (Wikimedia's does for generic
+    agents -- it welcomes article pages instead), in which case the caller
+    falls back to the guarded HTML path. Raises ScrapeError when the URL IS
+    an article, robots allows the API, and the API call still fails.
     """
     hit = _mediawiki_article(url)
     if hit is None:
@@ -572,10 +649,16 @@ def _mediawiki_extract(cfg: BridgeConfig, url: str, max_chars: int) -> ScrapeRes
             "titles": title,
         }
     )
-    # robots.txt is honored for the API URL exactly as for any page. If the
-    # site disallows its API to us, the adapter refuses -- it does not
-    # quietly downgrade to HTML scraping to dodge the rule.
-    _check_robots(cfg, api_url)
+    # robots.txt is honored for the API URL exactly as for any page. When
+    # the site disallows its API to generic agents -- Wikimedia wikis do:
+    # their robots.txt says "friendly, low-speed bots are welcome viewing
+    # ARTICLE pages" and disallows /w/ and /api/ -- fall back to the plain
+    # HTML path, which robots explicitly allows. That is not dodging the
+    # rule; it is using the URL the rule points us at.
+    try:
+        _check_robots(cfg, api_url)
+    except ScrapeError:
+        return None
     response = _fetch(cfg, api_url)
     try:
         data = json.loads(
@@ -609,6 +692,17 @@ def _mediawiki_extract(cfg: BridgeConfig, url: str, max_chars: int) -> ScrapeRes
 # ─── public surface ───────────────────────────────────────────────────────────
 
 
+def _parse_html(cfg: BridgeConfig, url: str, html: str) -> _TextExtractor:
+    """Feed one HTML document (or a slice of it) to a fresh extractor."""
+    extractor = _TextExtractor(url)
+    try:
+        extractor.feed(html)
+        extractor.close()
+    except Exception as exc:  # malformed markup: keep what was parsed so far
+        log(cfg, f"parse truncated by malformed markup: {exc}")
+    return extractor
+
+
 def scrape_page(
     cfg: BridgeConfig,
     url: str,
@@ -637,12 +731,25 @@ def scrape_page(
         raise ScrapeError(f"refusing content type {mime!r}; only HTML and text are fetched")
 
     html = _decode_body(_read_capped(response), content_type)
-    extractor = _TextExtractor(url)
-    try:
-        extractor.feed(html)
-        extractor.close()
-    except Exception as exc:  # malformed markup: keep what was parsed so far
-        log(cfg, f"parse truncated by malformed markup: {exc}")
+
+    # Main-content anchoring: when the page marks a content region
+    # (MediaWiki's mw-content-text / bodyContent / mw-parser-output, a
+    # generic <main>, or role="main"), extract from THAT slice only. On
+    # chrome-heavy pages -- Wikipedia's interlanguage list alone is longer
+    # than most articles -- the surrounding junk otherwise drowns the text.
+    # Falls back to the whole page when the region yields too little.
+    extractor: _TextExtractor | None = None
+    region = _main_region(html)
+    if region is not None:
+        start, end = region
+        sliced = _parse_html(cfg, url, html[start:end])
+        if len(_clean_text(sliced.text_parts)) >= _MAIN_CONTENT_MIN_CHARS:
+            extractor = sliced
+            # The slice starts below <head>, so <title> is not in it.
+            if not extractor.title:
+                extractor.title = _extract_title_fallback(html)
+    if extractor is None:
+        extractor = _parse_html(cfg, url, html)
 
     text = _clean_text(extractor.text_parts)
     truncated = False

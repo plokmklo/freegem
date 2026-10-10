@@ -897,18 +897,31 @@ class MediaWikiAdapterTests(unittest.TestCase):
                 scrape_page(self.cfg, "https://en.wikipedia.org/wiki/No_Such_Article_Xyz")
         self.assertIn("no article named", str(caught.exception))
 
-    def test_robots_refusal_blocks_the_api_path(self) -> None:
+    def test_robots_blocked_api_falls_back_to_the_article_page(self) -> None:
+        """Wikimedia's robots allows ARTICLE pages and disallows its API.
+
+        The adapter must then yield to the HTML path -- using the URL robots
+        points us at, never the disallowed one.
+        """
+        html_response = _FakeBytesResponse(
+            b"<html><head><title>Alex</title></head><body><p>article body text</p></body></html>",
+            {"Content-Type": "text/html; charset=utf-8", "Content-Encoding": ""},
+        )
+
+        def robots(cfg: BridgeConfig, url: str) -> None:
+            if "/w/api.php" in url:
+                raise ScrapeError("robots.txt disallows scraping the api")
+
         with (
-            mock.patch(
-                "freegem.web_scraper._check_robots",
-                side_effect=ScrapeError("robots.txt disallows scraping ..."),
-            ) as robots,
-            mock.patch("freegem.web_scraper._fetch") as fetch,
+            mock.patch("freegem.web_scraper._check_robots", side_effect=robots) as robots,
+            mock.patch("freegem.web_scraper._fetch", return_value=html_response) as fetch,
         ):
-            with self.assertRaises(ScrapeError):
-                scrape_page(self.cfg, "https://en.wikipedia.org/wiki/Alexander_the_Great")
-        robots.assert_called_once()
-        fetch.assert_not_called()  # never dodge the robots rule
+            result = scrape_page(self.cfg, "https://en.wikipedia.org/wiki/Alexander_the_Great")
+        self.assertEqual(result.via, "html")  # fell back to the allowed page
+        self.assertIn("article body text", result.text)
+        self.assertEqual(robots.call_count, 2)  # page url + api url
+        fetched_url = fetch.call_args[0][1]
+        self.assertEqual(fetched_url, "https://en.wikipedia.org/wiki/Alexander_the_Great")
 
     def test_non_wiki_url_still_uses_html_path(self) -> None:
         response = _FakeBytesResponse(
@@ -941,3 +954,33 @@ class ExtractionQualityTests(unittest.TestCase):
         self.assertEqual(extraction_quality("   \n  "), "empty")
         self.assertEqual(extraction_quality("Jump to content\nLog in\nDonate"), "nav_only")
         self.assertEqual(extraction_quality("word " * 200), "ok")
+
+
+class VoidElementSkipTests(unittest.TestCase):
+    """A void <input> in a page header must not suppress the whole article.
+
+    Regression: Wikipedia skins open <input type="checkbox"> inside <nav>
+    for CSS-only menus. <input> is a void element -- no </input> exists --
+    so pushing it on the skip stack jammed the stack and 1.8 MB of article
+    extracted to "Jump to content".
+    """
+
+    def test_void_input_does_not_jam_the_skip_stack(self) -> None:
+        html = (
+            "<html><head><title>T</title></head><body>"
+            "<nav><input type='checkbox' id='menu'><label>Menu</label></nav>"
+            "<h1>Real heading</h1><p>Real paragraph content.</p>"
+            "</body></html>"
+        )
+        response = _FakeBytesResponse(
+            html.encode(), {"Content-Type": "text/html; charset=utf-8", "Content-Encoding": ""}
+        )
+        with (
+            mock.patch("freegem.web_scraper._check_robots"),
+            mock.patch("freegem.web_scraper._fetch", return_value=response),
+        ):
+            result = scrape_page(BridgeConfig(log_requests=False), "https://example.org/page")
+        self.assertEqual(result.title, "T")
+        self.assertIn("Real heading", result.text)
+        self.assertIn("Real paragraph content.", result.text)
+        self.assertNotIn("Menu", result.text)  # nav itself still skipped
