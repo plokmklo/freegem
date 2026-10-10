@@ -14,6 +14,12 @@ Under the hood it talks to the same free Gemini web session your browser uses.
 Outwardly it looks like OpenAI, so existing clients and code work by changing
 one base URL.
 
+> **Based on [`Sophomoresty/gemini-web2api`](https://github.com/Sophomoresty/gemini-web2api).**
+> This project started as a rebuild of that codebase. The protocol knowledge —
+> the `StreamGenerate` wire format, the `[79]` model field, the `wrb.fr`
+> response shape, the Scotty upload flow — and the bundled cookie-sync
+> extension all come from it. See [Credits](#credits).
+
 ---
 
 ## Contents
@@ -27,6 +33,9 @@ one base URL.
 - [How it works](#how-it-works)
 - [Limitations](#limitations)
 - [Development](#development)
+- [Credits](#credits)
+- [License](#license)
+- [Disclaimer](#disclaimer)
 
 ---
 
@@ -377,9 +386,53 @@ docs/
 
 ---
 
+## Credits
+
+**This project is derived from [`Sophomoresty/gemini-web2api`](https://github.com/Sophomoresty/gemini-web2api)**
+(MIT, © 2026 Sophomoresty), and is published under the same licence.
+
+What came from upstream unchanged or nearly so:
+
+- **The Gemini Web protocol implementation** — the `StreamGenerate`
+  positional-array wire format, `[79]` as the model selector, `[17]` as the
+  thinking depth, `SAPISIDHASH` authentication, and the `wrb.fr`
+  progressive-snapshot response shape.
+- **The model registry** — the `MODE_CATEGORY` mapping
+  (1=FAST, 2=THINKING, 3=PRO, 4=AUTO, 5=DYNAMIC_THINKING, 6=FLASH_LITE) and the
+  `gemini-*` model ids.
+- **The multimodal path** — Gemini's Scotty resumable-upload protocol and the
+  page-token scraping it depends on.
+- **The cookie-sync extension** — `gemini-cookie-sync-extension/` is a lightly
+  adapted copy of upstream's, with the export filename and project name
+  updated.
+- **The Cloudflare Workers port** — upstream's `cloudflare/worker.js` informed
+  the request-scoped-config design, which was itself the fix for a
+  cookie-cross-contamination bug under concurrent warm-isolate requests.
+
+What this project adds:
+
+- A layered package layout (`config` / `models` / `gemini` / `multimodal` /
+  `tools` / `server` / `mcp_tools` / `cli`) in place of the single-file
+  original.
+- Immutable, request-safe configuration instead of a module-global mutable dict.
+- A unified CLI running the HTTP, MCP, and one-shot faces.
+- `gemini_advisor` and the `gemini_deep_think` output contract.
+- A 177-test suite that runs offline with no credentials.
+
+Upstream's own README credits its development agent capability to
+[GenericAgent](https://github.com/lsdefine/GenericAgent), originally shared via
+the [linux.do](https://linux.do) community — credit passed along here.
+
+Also worth knowing: an unrelated Go implementation publishes under the same
+name ([`ikhsan3adi/gemini-web2api`](https://github.com/ikhsan3adi/gemini-web2api)).
+It is a separate project; this one derives only from the Python original.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+Upstream's MIT copyright notice is retained in the spirit required by that
+licence, and the files derived from it remain under the same terms.
 
 ## Disclaimer
 

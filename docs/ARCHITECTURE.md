@@ -2,6 +2,18 @@
 
 How the layers fit together, and the decisions behind them.
 
+## Provenance
+
+Derived from [`Sophomoresty/gemini-web2api`](https://github.com/Sophomoresty/gemini-web2api)
+(MIT). The protocol details documented below — wire-format field positions,
+response parsing, auth derivation, the model registry — were reverse-engineered
+upstream and carried over. Where this project departs from upstream, this
+document says so and gives the reason.
+
+The single-file original was ~1,100 lines with a module-global config dict. This
+is the same behaviour, layered so that protocol knowledge is confined to one
+file and translation is testable without a credential.
+
 ## Layer map
 
 ```

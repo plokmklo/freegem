@@ -7,6 +7,10 @@ project: you need cookies, an XSRF token, a build tag, and an account index,
 all of which have to come from the live signed-in page. This extension collects
 all four in one click.
 
+> Adapted from the cookie-sync extension in
+> [`Sophomoresty/gemini-web2api`](https://github.com/Sophomoresty/gemini-web2api)
+> (MIT). Changes are limited to the export filename and project references.
+
 ## What it exports
 
 Saved as `gemini-auth.json`:
