@@ -8,9 +8,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
-__all__ = ["MODELS", "ModelSpec", "resolve_model", "model_ids", "parse_think_override"]
+__all__ = ["MODELS", "ModelSpec", "model_ids", "parse_think_override", "resolve_model"]
 
 
 @dataclass(frozen=True)
@@ -19,16 +19,14 @@ class ModelSpec:
     think: int
     desc: str
     requires_cookie: bool = False
-    extra: Optional[Dict[int, Any]] = None
+    extra: dict[int, Any] | None = None
 
 
-MODELS: Dict[str, ModelSpec] = {
+MODELS: dict[str, ModelSpec] = {
     "gemini-3.7-flash": ModelSpec(
         mode=1, think=4, desc="Latest all-around model (Gemini 3.7 Flash)"
     ),
-    "gemini-3.6-flash": ModelSpec(
-        mode=1, think=4, desc="All-around model (Gemini 3.6 Flash)"
-    ),
+    "gemini-3.6-flash": ModelSpec(mode=1, think=4, desc="All-around model (Gemini 3.6 Flash)"),
     "gemini-3.5-flash": ModelSpec(
         mode=1, think=4, desc="Alias for gemini-3.6-flash (backend upgraded)"
     ),
@@ -54,19 +52,17 @@ MODELS: Dict[str, ModelSpec] = {
         extra={31: 2, 80: 3},
     ),
     "gemini-auto": ModelSpec(mode=4, think=4, desc="Auto model selection"),
-    "gemini-flash-lite": ModelSpec(
-        mode=6, think=4, desc="Lightweight fast model"
-    ),
+    "gemini-flash-lite": ModelSpec(mode=6, think=4, desc="Lightweight fast model"),
 }
 
 DEFAULT_MODEL = "gemini-3.6-flash"
 
 
-def model_ids() -> Tuple[str, ...]:
+def model_ids() -> tuple[str, ...]:
     return tuple(MODELS.keys())
 
 
-def parse_think_override(name: str) -> Tuple[str, Optional[int], Optional[str]]:
+def parse_think_override(name: str) -> tuple[str, int | None, str | None]:
     """Split ``model@think=N`` into (base_name, override, error).
 
     Returns the error string instead of raising so callers can map it to a
@@ -87,7 +83,7 @@ def parse_think_override(name: str) -> Tuple[str, Optional[int], Optional[str]]:
 
 def resolve_model(
     model_name: str, default: str = DEFAULT_MODEL
-) -> Tuple[Optional[str], Optional[int], Optional[int], Optional[str], Optional[Dict[int, Any]]]:
+) -> tuple[str | None, int | None, int | None, str | None, dict[int, Any] | None]:
     """Resolve a client-supplied model name.
 
     Returns ``(name, mode_id, think_mode, error, extra_fields)``.

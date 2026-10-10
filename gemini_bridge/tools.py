@@ -16,18 +16,18 @@ import binascii
 import json
 import re
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 __all__ = [
     "ImageRef",
-    "messages_to_prompt",
     "google_contents_to_prompt",
-    "parse_tool_calls",
+    "messages_to_prompt",
     "parse_function_calls",
+    "parse_tool_calls",
 ]
 
 # An image is either decoded bytes or a URL the multimodal layer must fetch.
-ImageRef = Tuple[Any, str]
+ImageRef = tuple[Any, str]
 
 TOOL_CALL_FENCE = "```tool_call"
 FUNCTION_CALL_FENCE = "```function_call"
@@ -50,10 +50,10 @@ def _tool_choice_instruction(tool_choice: Any) -> str:
     return ""
 
 
-def _tool_preamble(tools: Optional[List[dict]], tool_choice: Any) -> str:
+def _tool_preamble(tools: list[dict] | None, tool_choice: Any) -> str:
     if not tools or tool_choice == "none":
         return ""
-    specs: List[Dict[str, Any]] = []
+    specs: list[dict[str, Any]] = []
     for tool in tools:
         fn = tool.get("function", tool) if tool.get("type") == "function" else tool
         specs.append(
@@ -76,7 +76,7 @@ def _tool_preamble(tools: Optional[List[dict]], tool_choice: Any) -> str:
     )
 
 
-def _image_from_openai_part(part: dict) -> Optional[ImageRef]:
+def _image_from_openai_part(part: dict) -> ImageRef | None:
     """Extract an image from one OpenAI content part, or None if it is not one."""
     kind = part.get("type")
     if kind == "image_url":
@@ -105,7 +105,7 @@ def _image_from_openai_part(part: dict) -> Optional[ImageRef]:
     return None
 
 
-def _image_from_url(url: Any, mime: Optional[str] = None) -> Optional[ImageRef]:
+def _image_from_url(url: Any, mime: str | None = None) -> ImageRef | None:
     if not isinstance(url, str) or not url:
         return None
     if url.startswith("data:"):
@@ -116,11 +116,16 @@ def _image_from_url(url: Any, mime: Optional[str] = None) -> Optional[ImageRef]:
 
 
 def messages_to_prompt(
-    messages: List[dict], tools: Optional[List[dict]] = None, tool_choice: Any = "auto"
-) -> Tuple[str, List[ImageRef]]:
-    """Flatten OpenAI messages into (prompt, images)."""
-    parts: List[str] = []
-    images: List[ImageRef] = []
+    messages: list[Any], tools: list[dict] | None = None, tool_choice: Any = "auto"
+) -> tuple[str, list[ImageRef]]:
+    """Flatten OpenAI messages into (prompt, images).
+
+    Accepts ``list[Any]`` rather than ``list[dict]`` because the loop below
+    deliberately skips non-dict entries -- real clients (and the tests) do send
+    junk, and dropping it silently is the documented behaviour.
+    """
+    parts: list[str] = []
+    images: list[ImageRef] = []
 
     preamble = _tool_preamble(tools, tool_choice)
     if preamble:
@@ -133,7 +138,7 @@ def messages_to_prompt(
         content = message.get("content", "")
 
         if isinstance(content, list):
-            texts: List[str] = []
+            texts: list[str] = []
             for chunk in content:
                 if not isinstance(chunk, dict):
                     continue
@@ -193,7 +198,7 @@ def _google_tool_preamble(req: dict) -> str:
     if config.get("mode") == "NONE":
         return ""
 
-    specs: List[Dict[str, Any]] = []
+    specs: list[dict[str, Any]] = []
     for group in tools:
         if not isinstance(group, dict):
             continue
@@ -222,10 +227,10 @@ def _google_tool_preamble(req: dict) -> str:
     )
 
 
-def google_contents_to_prompt(req: dict) -> Tuple[str, List[ImageRef]]:
+def google_contents_to_prompt(req: dict) -> tuple[str, list[ImageRef]]:
     """Flatten Google ``contents`` / ``systemInstruction`` into (prompt, images)."""
-    parts: List[str] = []
-    images: List[ImageRef] = []
+    parts: list[str] = []
+    images: list[ImageRef] = []
 
     system = req.get("systemInstruction") or {}
     system_text = " ".join(
@@ -241,7 +246,7 @@ def google_contents_to_prompt(req: dict) -> Tuple[str, List[ImageRef]]:
         if not isinstance(content, dict):
             continue
         role = content.get("role", "user")
-        chunks: List[str] = []
+        chunks: list[str] = []
         for part in content.get("parts") or []:
             if not isinstance(part, dict):
                 continue
@@ -277,10 +282,10 @@ def google_contents_to_prompt(req: dict) -> Tuple[str, List[ImageRef]]:
 # ─── Reply parsing ────────────────────────────────────────────────────────────
 
 
-def parse_tool_calls(text: str) -> Tuple[str, List[dict]]:
+def parse_tool_calls(text: str) -> tuple[str, list[dict]]:
     """Extract OpenAI ``tool_calls`` from fenced ``tool_call`` blocks."""
-    calls: List[dict] = []
-    kept: List[str] = []
+    calls: list[dict] = []
+    kept: list[str] = []
     cursor = 0
     pattern = re.compile(r"```tool_call\s*\n(.*?)\n```", re.DOTALL)
     for match in pattern.finditer(text):
@@ -305,7 +310,7 @@ def parse_tool_calls(text: str) -> Tuple[str, List[dict]]:
     return "".join(kept).strip(), calls
 
 
-def _balanced_json(text: str, start: int) -> Optional[str]:
+def _balanced_json(text: str, start: int) -> str | None:
     """Return the balanced ``{...}`` substring beginning at ``text[start]``.
 
     Brace matching is done by counting while respecting string literals, so a
@@ -343,7 +348,7 @@ def _balanced_json(text: str, start: int) -> Optional[str]:
     return None
 
 
-def _parse_call_object(raw: str) -> Optional[Dict[str, Any]]:
+def _parse_call_object(raw: str) -> dict[str, Any] | None:
     """Parse a function-call object, or None if it is not a well-formed call."""
     try:
         data = json.loads(raw)
@@ -354,7 +359,7 @@ def _parse_call_object(raw: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def parse_function_calls(text: str) -> Tuple[str, List[dict]]:
+def parse_function_calls(text: str) -> tuple[str, list[dict]]:
     """Extract Google ``functionCall`` parts from fenced ``function_call`` blocks.
 
     Handles three shapes a model may emit: a proper fence, the fence keyword
@@ -366,7 +371,7 @@ def parse_function_calls(text: str) -> Tuple[str, List[dict]]:
     rather than up front -- removing all backticks first desynchronises the
     offsets and drops every call after the first.
     """
-    calls: List[dict] = []
+    calls: list[dict] = []
     remaining = text
 
     # Shapes 1 and 2: with or without backticks. Find the keyword, take the
@@ -379,7 +384,7 @@ def parse_function_calls(text: str) -> Tuple[str, List[dict]]:
             break
         payload = _balanced_json(remaining, match.end())
         parsed = _parse_call_object(payload) if payload else None
-        if parsed is None:
+        if payload is None or parsed is None:
             search_from = match.end()
             continue
         calls.append(parsed)

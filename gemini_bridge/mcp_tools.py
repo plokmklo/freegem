@@ -15,14 +15,14 @@ without it, and only fails when :func:`build_server` is called.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from . import __version__
 from .config import BridgeConfig
 from .gemini import BridgeError, generate
-from .models import MODELS, describe_model, resolve_model
+from .models import MODELS, resolve_model
 
-__all__ = ["build_server", "TOOL_SPECS", "run_tool"]
+__all__ = ["TOOL_SPECS", "build_server", "run_tool"]
 
 # Default model per tool. Any tool also accepts an explicit `model` override.
 DEFAULTS = {
@@ -32,7 +32,7 @@ DEFAULTS = {
     "advisor": "gemini-3.5-flash-thinking",
 }
 
-TOOL_SPECS: List[Dict[str, Any]] = [
+TOOL_SPECS: list[dict[str, Any]] = [
     {
         "name": "gemini_search",
         "summary": "Web-grounded search with sources",
@@ -90,13 +90,17 @@ TOOL_SPECS: List[Dict[str, Any]] = [
 ]
 
 
-def _run(cfg: BridgeConfig, prompt: str, model: Optional[str] = None) -> str:
+def _run(cfg: BridgeConfig, prompt: str, model: str | None = None) -> str:
     """Resolve a model name, run one generation, and normalise failures."""
-    name, mode_id, think_mode, err, extra = resolve_model(
+    _name, mode_id, think_mode, err, extra = resolve_model(
         model or cfg.default_model, cfg.default_model
     )
     if err:
         raise ValueError(err)
+    # resolve_model's contract: no error means every field is populated.
+    # Its Optional return type cannot express that, so guard explicitly --
+    # a contract violation here must fail loudly, not as int(None).
+    assert mode_id is not None and think_mode is not None, "resolve_model broke its contract"
     text = generate(cfg, prompt, int(mode_id), int(think_mode), None, extra)
     if not text:
         raise BridgeError(
@@ -106,7 +110,7 @@ def _run(cfg: BridgeConfig, prompt: str, model: Optional[str] = None) -> str:
     return text
 
 
-def run_tool(cfg: BridgeConfig, name: str, arguments: Dict[str, Any]) -> str:
+def run_tool(cfg: BridgeConfig, name: str, arguments: dict[str, Any]) -> str:
     """Execute one tool by name. Pure dispatch, usable without the mcp package."""
     arguments = arguments or {}
 
@@ -132,9 +136,7 @@ def run_tool(cfg: BridgeConfig, name: str, arguments: Dict[str, Any]) -> str:
         return _run(cfg, prompt, arguments.get("model") or DEFAULTS["ask"])
 
     if name == "gemini_deep_think":
-        return _run(
-            cfg, arguments.get("problem", ""), arguments.get("model") or DEFAULTS["think"]
-        )
+        return _run(cfg, arguments.get("problem", ""), arguments.get("model") or DEFAULTS["think"])
 
     if name == "gemini_advisor":
         context = arguments.get("context")
@@ -163,7 +165,7 @@ def run_tool(cfg: BridgeConfig, name: str, arguments: Dict[str, Any]) -> str:
         messages = arguments.get("messages") or []
         if not isinstance(messages, list):
             raise ValueError("messages must be a list")
-        rendered: List[str] = []
+        rendered: list[str] = []
         for message in messages:
             if not isinstance(message, dict):
                 continue
@@ -195,7 +197,7 @@ def run_tool(cfg: BridgeConfig, name: str, arguments: Dict[str, Any]) -> str:
     raise ValueError(f"unknown tool: {name}")
 
 
-def build_server(cfg: BridgeConfig, name: str = "gemini-bridge"):
+def build_server(cfg: BridgeConfig, name: str = "gemini-bridge") -> Any:
     """Create a FastMCP server wired to this config.
 
     Raises ImportError with an actionable message if the optional ``mcp``
@@ -217,7 +219,7 @@ def build_server(cfg: BridgeConfig, name: str = "gemini-bridge"):
     server._mcp_server.version = __version__
 
     @server.tool()
-    def gemini_search(query: str, recency: str = None, model: str = None) -> str:
+    def gemini_search(query: str, recency: str | None = None, model: str | None = None) -> str:
         """Web-grounded search. Answers a question using current internet
         information, with sources listed.
 
@@ -234,7 +236,7 @@ def build_server(cfg: BridgeConfig, name: str = "gemini-bridge"):
         return run_tool(cfg, "gemini_search", {"query": query, "recency": recency, "model": model})
 
     @server.tool()
-    def gemini_ask(question: str, system: str = None, model: str = None) -> str:
+    def gemini_ask(question: str, system: str | None = None, model: str | None = None) -> str:
         """Fast, direct answer or explanation. No web grounding, no long reasoning.
 
         Use for quick factual questions, definitions, short explanations, and
@@ -249,7 +251,7 @@ def build_server(cfg: BridgeConfig, name: str = "gemini-bridge"):
         return run_tool(cfg, "gemini_ask", {"question": question, "system": system, "model": model})
 
     @server.tool()
-    def gemini_deep_think(problem: str, model: str = None) -> str:
+    def gemini_deep_think(problem: str, model: str | None = None) -> str:
         """Deep reasoning on a hard or ambiguous problem. Long-form output using
         the extended-thinking model.
 
@@ -265,7 +267,10 @@ def build_server(cfg: BridgeConfig, name: str = "gemini-bridge"):
 
     @server.tool()
     def gemini_advisor(
-        topic: str, context: str = None, constraints: str = None, model: str = None
+        topic: str,
+        context: str | None = None,
+        constraints: str | None = None,
+        model: str | None = None,
     ) -> str:
         """Independent second opinion on a decision, with structured output:
         options, tradeoffs, a concrete recommendation, and risks.
@@ -287,7 +292,7 @@ def build_server(cfg: BridgeConfig, name: str = "gemini-bridge"):
         )
 
     @server.tool()
-    def gemini_chat(messages: list, model: str = None) -> str:
+    def gemini_chat(messages: list, model: str | None = None) -> str:
         """Raw multi-turn chat. Send a full message history.
 
         Use when you need control over the conversation shape, few-shot examples,
@@ -318,8 +323,7 @@ def model_help(cfg: BridgeConfig) -> str:
     lines = [f"gemini-bridge v{__version__}", ""]
     for model_name, spec in MODELS.items():
         lines.append(
-            f"  {model_name:<30} {spec.desc}"
-            f"{' [needs cookie]' if spec.requires_cookie else ''}"
+            f"  {model_name:<30} {spec.desc}{' [needs cookie]' if spec.requires_cookie else ''}"
         )
     lines += [
         "",

@@ -16,24 +16,27 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from collections.abc import Iterator
+from typing import Any
 
 from .config import BridgeConfig
 
 __all__ = [
+    "HAS_HTTPX",
     "BridgeError",
-    "has_httpx",
-    "log",
-    "make_sapisidhash",
+    "account_prefix",
+    "clean_text",
     "generate",
     "generate_stream",
     "load_cookie",
-    "account_prefix",
-    "clean_text",
+    "log",
+    "make_sapisidhash",
 ]
 
 try:  # optional: only needed for true token-by-token streaming
-    import httpx  # type: ignore
+    # No ignore needed: [tool.mypy.overrides] sets ignore_missing_imports
+    # for httpx.*, so this resolves whether httpx is installed or not.
+    import httpx
 
     HAS_HTTPX = True
 except Exception:  # pragma: no cover - depends on install
@@ -47,15 +50,15 @@ class BridgeError(RuntimeError):
     "Google rejected the request" from "the network died".
     """
 
-    def __init__(self, message: str, code: Optional[int] = None):
+    def __init__(self, message: str, code: int | None = None):
         super().__init__(message)
         self.code = code
 
 
-_SSL_CTX: Optional[ssl.SSLContext] = None
+_SSL_CTX: ssl.SSLContext | None = None
 _HTTPX_CLIENT = None
 # mtime -> (cookie_str, sapisid) cache so a hot loop does not re-stat the file
-_COOKIE_CACHE: Dict[str, Any] = {"mtime": None, "cookie": "", "sapisid": None}
+_COOKIE_CACHE: dict[str, Any] = {"mtime": None, "cookie": "", "sapisid": None}
 
 
 def log(cfg: BridgeConfig, message: str) -> None:
@@ -81,7 +84,7 @@ def account_prefix(cfg: BridgeConfig) -> str:
     return f"/u/{cfg.auth_user}"
 
 
-def load_cookie(cfg: BridgeConfig) -> Tuple[str, Optional[str]]:
+def load_cookie(cfg: BridgeConfig) -> tuple[str, str | None]:
     """Read the session file, cached by mtime.
 
     Accepts both shapes the cookie-sync extension exports:
@@ -101,7 +104,7 @@ def load_cookie(cfg: BridgeConfig) -> Tuple[str, Optional[str]]:
         if _COOKIE_CACHE["mtime"] == mtime and _COOKIE_CACHE["cookie"]:
             return _COOKIE_CACHE["cookie"], _COOKIE_CACHE["sapisid"]
 
-        with open(path, "r", encoding="utf-8") as fh:
+        with open(path, encoding="utf-8") as fh:
             content = fh.read().strip()
 
         if content.startswith("{"):
@@ -119,11 +122,9 @@ def load_cookie(cfg: BridgeConfig) -> Tuple[str, Optional[str]]:
                     sapisid = v or None
                     break
 
-        _COOKIE_CACHE.update(
-            {"mtime": mtime, "cookie": cookie_str, "sapisid": sapisid}
-        )
+        _COOKIE_CACHE.update({"mtime": mtime, "cookie": cookie_str, "sapisid": sapisid})
         return cookie_str, sapisid
-    except Exception as exc:  # noqa: BLE001 - fall back to last known good
+    except Exception as exc:
         log(cfg, f"cookie load failed, using cached value: {exc}")
         return _COOKIE_CACHE["cookie"], _COOKIE_CACHE["sapisid"]
 
@@ -131,16 +132,14 @@ def load_cookie(cfg: BridgeConfig) -> Tuple[str, Optional[str]]:
 def make_sapisidhash(sapisid: str) -> str:
     """Google's Authorization header format: ``SAPISIDHASH <ts>_<sha1>``."""
     ts = int(time.time())
-    digest = hashlib.sha1(
-        f"{ts} {sapisid} https://gemini.google.com".encode()
-    ).hexdigest()
+    digest = hashlib.sha1(f"{ts} {sapisid} https://gemini.google.com".encode()).hexdigest()
     return f"SAPISIDHASH {ts}_{digest}"
 
 
 _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
 
-def build_headers(cfg: BridgeConfig) -> Dict[str, str]:
+def build_headers(cfg: BridgeConfig) -> dict[str, str]:
     prefix = account_prefix(cfg)
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
@@ -159,7 +158,7 @@ def build_headers(cfg: BridgeConfig) -> Dict[str, str]:
     return headers
 
 
-def _persistence_flags(inner: List[Any], temporary: bool) -> None:
+def _persistence_flags(inner: list[Any], temporary: bool) -> None:
     """Set the chat-persistence fields Gemini Web uses.
 
     ``temporary=True`` marks the request as an ephemeral chat so it does not
@@ -177,8 +176,8 @@ def build_payload(
     model_id: int,
     think_mode: int,
     cfg: BridgeConfig,
-    file_refs: Optional[List[str]] = None,
-    extra_fields: Optional[Dict[int, Any]] = None,
+    file_refs: list[str] | None = None,
+    extra_fields: dict[int, Any] | None = None,
 ) -> str:
     """Encode a request into Gemini's private wire format.
 
@@ -188,7 +187,7 @@ def build_payload(
     future field can be added without guessing what a sparse dict means
     upstream.
     """
-    inner: List[Any] = [None] * 102
+    inner: list[Any] = [None] * 102
 
     if file_refs:
         refs = [[None, None, ref] for ref in file_refs]
@@ -247,7 +246,7 @@ def clean_text(text: str, strip: bool = True) -> str:
     return text.strip() if strip else text
 
 
-def _extract_texts_from_line(line: str) -> List[str]:
+def _extract_texts_from_line(line: str) -> list[str]:
     """Yield candidate answer strings from one ``wrb.fr`` response line.
 
     Gemini streams progressively longer snapshots of the same answer, so the
@@ -263,7 +262,7 @@ def _extract_texts_from_line(line: str) -> List[str]:
         inner = json.loads(inner_str)
         if not (isinstance(inner, list) and len(inner) > 4 and inner[4]):
             return []
-        texts: List[str] = []
+        texts: list[str] = []
         for part in inner[4]:
             if isinstance(part, list) and len(part) > 1 and isinstance(part[1], list):
                 for item in part[1]:
@@ -291,7 +290,7 @@ def extract_response_text(raw: str) -> str:
     return clean_text(best)
 
 
-def _httpx_client(cfg: BridgeConfig):
+def _httpx_client(cfg: BridgeConfig) -> Any:
     global _HTTPX_CLIENT
     if _HTTPX_CLIENT is None and HAS_HTTPX:
         transport = httpx.HTTPTransport(proxy=cfg.proxy) if cfg.proxy else None
@@ -301,7 +300,7 @@ def _httpx_client(cfg: BridgeConfig):
     return _HTTPX_CLIENT
 
 
-def _post(cfg: BridgeConfig, body: bytes, url: str, headers: Dict[str, str]):
+def _post(cfg: BridgeConfig, body: bytes, url: str, headers: dict[str, str]) -> Any:
     """Send one request, honouring the configured proxy."""
     request = urllib.request.Request(url, data=body, headers=headers, method="POST")
     if cfg.proxy:
@@ -318,15 +317,15 @@ def generate(
     prompt: str,
     model_id: int,
     think_mode: int,
-    file_refs: Optional[List[str]] = None,
-    extra_fields: Optional[Dict[int, Any]] = None,
+    file_refs: list[str] | None = None,
+    extra_fields: dict[int, Any] | None = None,
 ) -> str:
     """Non-streaming generation with retry."""
     body = build_payload(prompt, model_id, think_mode, cfg, file_refs, extra_fields).encode()
     url = build_url(cfg)
     headers = build_headers(cfg)
 
-    last_error: Optional[Exception] = None
+    last_error: Exception | None = None
     for attempt in range(1, cfg.retry_attempts + 1):
         try:
             with _post(cfg, body, url, headers) as response:
@@ -334,7 +333,7 @@ def generate(
             return extract_response_text(raw)
         except BridgeError:
             raise  # upstream said no; retrying the same request will not help
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             last_error = exc
             if attempt < cfg.retry_attempts:
                 log(cfg, f"attempt {attempt}/{cfg.retry_attempts} failed: {exc}; retrying")
@@ -347,8 +346,8 @@ def generate_stream(
     prompt: str,
     model_id: int,
     think_mode: int,
-    file_refs: Optional[List[str]] = None,
-    extra_fields: Optional[Dict[int, Any]] = None,
+    file_refs: list[str] | None = None,
+    extra_fields: dict[int, Any] | None = None,
 ) -> Iterator[str]:
     """Stream the answer as it is produced.
 
@@ -369,7 +368,7 @@ def generate_stream(
     headers = build_headers(cfg)
     client = _httpx_client(cfg)
 
-    last_error: Optional[Exception] = None
+    last_error: Exception | None = None
     for attempt in range(1, cfg.retry_attempts + 1):
         emitted = ""
         try:
@@ -384,9 +383,7 @@ def generate_stream(
                             raise BridgeError(
                                 "Gemini rejected the request during streaming "
                                 f"(BardErrorInfo {match.group(1)}).",
-                                code=int(match.group(1))
-                                if match.group(1).isdigit()
-                                else None,
+                                code=int(match.group(1)) if match.group(1).isdigit() else None,
                             )
                     while "\n" in buffer:
                         line, buffer = buffer.split("\n", 1)
@@ -398,14 +395,14 @@ def generate_stream(
                                     "Gemini rewrote an already-streamed block; "
                                     "aborting to avoid corrupting the answer."
                                 )
-                            delta = clean_text(text[len(emitted):], strip=False)
+                            delta = clean_text(text[len(emitted) :], strip=False)
                             emitted = text
                             if delta:
                                 yield delta
             return
         except BridgeError:
             raise
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             last_error = exc
             if attempt < cfg.retry_attempts:
                 log(cfg, f"stream attempt {attempt}/{cfg.retry_attempts} failed: {exc}; retrying")
@@ -413,7 +410,7 @@ def generate_stream(
     raise BridgeError(f"Gemini stream failed after {cfg.retry_attempts} attempts: {last_error}")
 
 
-def fetch_build_tag(cfg: BridgeConfig) -> Optional[str]:
+def fetch_build_tag(cfg: BridgeConfig) -> str | None:
     """Scrape the current build tag from Gemini's page.
 
     Two formats are seen in the wild. The original code matched only
@@ -435,7 +432,7 @@ def fetch_build_tag(cfg: BridgeConfig) -> Optional[str]:
         else:
             response = urllib.request.urlopen(request, context=_ssl_ctx(), timeout=15)
         html = response.read().decode("utf-8", errors="replace")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log(cfg, f"build-tag fetch failed: {exc}")
         return None
 
@@ -450,7 +447,7 @@ def fetch_build_tag(cfg: BridgeConfig) -> Optional[str]:
     return None
 
 
-def refresh_build_tag(cfg: BridgeConfig) -> Tuple[BridgeConfig, Optional[str]]:
+def refresh_build_tag(cfg: BridgeConfig) -> tuple[BridgeConfig, str | None]:
     """Return (maybe-updated config, human-readable change).
 
     Returns a new config; never mutates the caller's. ``None`` change means

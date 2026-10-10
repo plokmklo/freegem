@@ -8,12 +8,13 @@ here, because the thing being protected is your Google session, not this code.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from . import __version__
 from .config import BridgeConfig
@@ -31,7 +32,7 @@ from .tools import (
 __all__ = ["GeminiHandler", "ThreadedServer", "estimate_tokens"]
 
 
-def estimate_tokens(prompt: str, completion: str) -> Dict[str, int]:
+def estimate_tokens(prompt: str, completion: str) -> dict[str, int]:
     """Approximate token counts.
 
     Gemini's web endpoint returns no usage data, so this is a character-count
@@ -42,11 +43,11 @@ def estimate_tokens(prompt: str, completion: str) -> Dict[str, int]:
     return {"prompt_tokens": p, "completion_tokens": c, "total_tokens": p + c}
 
 
-def upload_images(cfg: BridgeConfig, images: List[ImageRef]) -> Optional[List[str]]:
+def upload_images(cfg: BridgeConfig, images: list[ImageRef]) -> list[str] | None:
     """Turn parsed image refs into Gemini file references."""
     if not images:
         return None
-    refs: List[str] = []
+    refs: list[str] = []
     for data, mime in images:
         if isinstance(data, str):
             data = fetch_image_bytes(cfg, data)
@@ -59,7 +60,7 @@ def upload_images(cfg: BridgeConfig, images: List[ImageRef]) -> Optional[List[st
             refs.append(upload_image(cfg, bytes(data), resolved_mime))
         except BridgeError:
             raise
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise BridgeError(f"image upload failed: {exc}") from exc
     return refs or None
 
@@ -80,7 +81,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
     def cfg(self) -> BridgeConfig:
         return self.server.config  # type: ignore[attr-defined]
 
-    def log_message(self, fmt: str, *args: Any) -> None:  # noqa: A003
+    def log_message(self, fmt: str, *args: Any) -> None:
         client = self.client_address[0] if self.client_address else "-"
         log(self.cfg, f"{client} {fmt % args}")
 
@@ -114,7 +115,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.close_connection = True
 
-    def _sse(self, event: Optional[str], payload: Any) -> None:
+    def _sse(self, event: str | None, payload: Any) -> None:
         """Write one SSE frame.
 
         ``payload`` is JSON-encoded, so the OpenAI ``[DONE]`` sentinel cannot go
@@ -140,15 +141,15 @@ class GeminiHandler(BaseHTTPRequestHandler):
         """Read the body, handling both Content-Length and chunked transfer."""
         encoding = (self.headers.get("Transfer-Encoding") or "").lower()
         if "chunked" in encoding:
-            chunks: List[bytes] = []
+            chunks: list[bytes] = []
             while True:
                 size_line = self.rfile.readline()
                 if not size_line:
                     break
                 try:
                     size = int(size_line.split(b";", 1)[0].strip(), 16)
-                except ValueError:
-                    raise ValueError("malformed chunked body")
+                except ValueError as err:
+                    raise ValueError("malformed chunked body") from err
                 if size == 0:
                     while True:
                         trailer = self.rfile.readline()
@@ -161,7 +162,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         return self.rfile.read(length) if length else b""
 
-    def _json_body(self) -> Optional[dict]:
+    def _json_body(self) -> dict | None:
         raw = self._read_body()
         if not raw:
             return {}
@@ -177,7 +178,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
 
     # ── routing ──────────────────────────────────────────────────────────────
 
-    def do_OPTIONS(self) -> None:  # noqa: N802
+    def do_OPTIONS(self) -> None:
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
@@ -185,10 +186,10 @@ class GeminiHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
-    def do_HEAD(self) -> None:  # noqa: N802
+    def do_HEAD(self) -> None:
         self.do_GET()
 
-    def do_GET(self) -> None:  # noqa: N802
+    def do_GET(self) -> None:
         try:
             path = self.path.split("?", 1)[0]
             if path in ("/", "/health"):
@@ -237,14 +238,12 @@ class GeminiHandler(BaseHTTPRequestHandler):
                 self.send_error_json("not found", 404)
         except (BrokenPipeError, ConnectionResetError):
             pass
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log(self.cfg, f"GET error: {exc}")
-            try:
+            with contextlib.suppress(Exception):
                 self.send_error_json(str(exc), 500)
-            except Exception:  # noqa: BLE001
-                pass
 
-    def do_POST(self) -> None:  # noqa: N802
+    def do_POST(self) -> None:
         try:
             path = self.path.split("?", 1)[0]
             if path == "/v1/chat/completions":
@@ -262,16 +261,14 @@ class GeminiHandler(BaseHTTPRequestHandler):
                 self.send_error_json("not found", 404)
         except (BrokenPipeError, ConnectionResetError):
             pass
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log(self.cfg, f"POST error: {exc}")
-            try:
+            with contextlib.suppress(Exception):
                 self.send_error_json(str(exc), 500)
-            except Exception:  # noqa: BLE001
-                pass
 
     # ── shared core ──────────────────────────────────────────────────────────
 
-    def _resolve(self, requested: Optional[str]) -> Optional[Tuple[str, int, int, dict]]:
+    def _resolve(self, requested: str | None) -> tuple[str, int, int, dict] | None:
         name, mode_id, think_mode, err, extra = resolve_model(
             requested or self.cfg.default_model, self.cfg.default_model
         )
@@ -280,6 +277,12 @@ class GeminiHandler(BaseHTTPRequestHandler):
             return None
         if not name:
             log(self.cfg, f"unknown model {requested!r}; using {self.cfg.default_model}")
+        # resolve_model's contract: no error means every field is populated.
+        # Its Optional return type cannot express that; a violation must fail
+        # loudly here rather than as int(None) downstream.
+        assert name is not None and mode_id is not None and think_mode is not None, (
+            "resolve_model broke its contract"
+        )
         return name, int(mode_id), int(think_mode), extra or {}
 
     def _generation_error(self, exc: Exception) -> None:
@@ -323,19 +326,28 @@ class GeminiHandler(BaseHTTPRequestHandler):
         # parsed, then replayed as a single chunk. OpenAI clients expect tool
         # calls to arrive complete; a partial fence cannot be parsed anyway.
         if stream and not use_tools:
-            self._chat_stream(completion_id, created, model_name, prompt, model_id, think_mode, file_refs, extra_fields)
+            self._chat_stream(
+                completion_id,
+                created,
+                model_name,
+                prompt,
+                model_id,
+                think_mode,
+                file_refs,
+                extra_fields,
+            )
             return
 
         try:
             text = generate(self.cfg, prompt, model_id, think_mode, file_refs, extra_fields)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._generation_error(exc)
             return
 
         tool_calls = None
         if use_tools and text:
             text, tool_calls = parse_tool_calls(text)
-        message: Dict[str, Any] = {"role": "assistant", "content": text or None}
+        message: dict[str, Any] = {"role": "assistant", "content": text or None}
         if tool_calls:
             message["tool_calls"] = tool_calls
         finish = "tool_calls" if tool_calls else "stop"
@@ -349,9 +361,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
                     "object": "chat.completion.chunk",
                     "created": created,
                     "model": model_name,
-                    "choices": [
-                        {"index": 0, "delta": message, "finish_reason": finish}
-                    ],
+                    "choices": [{"index": 0, "delta": message, "finish_reason": finish}],
                 },
             )
             self._sse_done()
@@ -376,7 +386,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
         prompt: str,
         model_id: int,
         think_mode: int,
-        file_refs: Optional[List[str]],
+        file_refs: list[str] | None,
         extra_fields: dict,
     ) -> None:
         try:
@@ -388,7 +398,9 @@ class GeminiHandler(BaseHTTPRequestHandler):
                     "object": "chat.completion.chunk",
                     "created": created,
                     "model": model_name,
-                    "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+                    "choices": [
+                        {"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}
+                    ],
                 },
             )
             for delta in generate_stream(
@@ -419,7 +431,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
             self._sse_done()
         except (BrokenPipeError, ConnectionResetError):
             pass
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log(self.cfg, f"stream error: {exc}")
 
     # ── /v1/responses (Codex CLI) ────────────────────────────────────────────
@@ -433,7 +445,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
             return
         model_name, model_id, think_mode, extra_fields = resolved
 
-        messages: List[dict] = []
+        messages: list[dict] = []
         if req.get("instructions"):
             messages.append({"role": "system", "content": req["instructions"]})
 
@@ -475,7 +487,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
         try:
             file_refs = upload_images(self.cfg, images)
             text = generate(self.cfg, prompt, model_id, think_mode, file_refs, extra_fields)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._generation_error(exc)
             return
 
@@ -484,7 +496,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
         if use_tools and text:
             text, tool_calls = parse_tool_calls(text)
 
-        output: List[dict] = []
+        output: list[dict] = []
         if tool_calls:
             for call in tool_calls:
                 output.append(
@@ -541,7 +553,9 @@ class GeminiHandler(BaseHTTPRequestHandler):
             }
         if kind in ("input_text", "input_image", "image"):
             return {"role": "user", "content": [item]}
-        if item.get("role") == "assistant" or (kind == "message" and item.get("role") == "assistant"):
+        if item.get("role") == "assistant" or (
+            kind == "message" and item.get("role") == "assistant"
+        ):
             content = item.get("content", "")
             texts, calls = "", []
             if isinstance(content, list):
@@ -554,7 +568,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
                         calls.append(part)
             elif isinstance(content, str):
                 texts = content
-            message: Dict[str, Any] = {"role": "assistant", "content": texts or None}
+            message: dict[str, Any] = {"role": "assistant", "content": texts or None}
             if calls:
                 message["tool_calls"] = [
                     {
@@ -570,7 +584,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
             return message
         return {"role": item.get("role", "user"), "content": item.get("content", "")}
 
-    def _responses_stream(self, model_name: str, output: List[dict], usage: dict) -> None:
+    def _responses_stream(self, model_name: str, output: list[dict], usage: dict) -> None:
         response_id = f"resp_{uuid.uuid4().hex[:16]}"
         created = int(time.time())
         sequence = 0
@@ -582,8 +596,14 @@ class GeminiHandler(BaseHTTPRequestHandler):
 
         base = {"id": response_id, "object": "response", "created_at": created, "model": model_name}
         self._start_sse()
-        emit("response.created", response={**base, "status": "in_progress", "output": [], "usage": None})
-        emit("response.in_progress", response={**base, "status": "in_progress", "output": [], "usage": None})
+        emit(
+            "response.created",
+            response={**base, "status": "in_progress", "output": [], "usage": None},
+        )
+        emit(
+            "response.in_progress",
+            response={**base, "status": "in_progress", "output": [], "usage": None},
+        )
 
         for output_index, item in enumerate(output):
             if item["type"] == "function_call":
@@ -667,11 +687,11 @@ class GeminiHandler(BaseHTTPRequestHandler):
 
         try:
             text = generate(self.cfg, prompt, model_id, think_mode, file_refs, extra_fields)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._generation_error(exc)
             return
 
-        parts: List[dict] = []
+        parts: list[dict] = []
         if has_tools and text:
             cleaned, function_calls = parse_function_calls(text)
             if function_calls:
@@ -708,7 +728,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
         model_name: str,
         model_id: int,
         think_mode: int,
-        file_refs: Optional[List[str]],
+        file_refs: list[str] | None,
         extra_fields: dict,
     ) -> None:
         try:
@@ -742,7 +762,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
             )
         except (BrokenPipeError, ConnectionResetError):
             pass
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log(self.cfg, f"google stream error: {exc}")
 
 
@@ -750,6 +770,6 @@ class ThreadedServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address: Tuple[str, int], config: BridgeConfig):
+    def __init__(self, address: tuple[str, int], config: BridgeConfig):
         super().__init__(address, GeminiHandler)
         self.config = config  # read-only for handlers

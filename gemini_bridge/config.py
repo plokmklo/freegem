@@ -18,10 +18,11 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from typing import Any, Mapping, Optional, Tuple
+from typing import Any
 
-__all__ = ["BridgeConfig", "DEFAULT_CONFIG", "load_config", "find_config"]
+__all__ = ["DEFAULT_CONFIG", "BridgeConfig", "find_config", "load_config"]
 
 # Defaults are read-only. Use BridgeConfig.replace() to derive variants.
 DEFAULT_CONFIG: Mapping[str, Any] = {
@@ -55,18 +56,18 @@ class BridgeConfig:
     retry_delay_sec: int = DEFAULT_CONFIG["retry_delay_sec"]
     request_timeout_sec: int = DEFAULT_CONFIG["request_timeout_sec"]
     gemini_bl: str = DEFAULT_CONFIG["gemini_bl"]
-    auth_user: Optional[str] = DEFAULT_CONFIG["auth_user"]
-    xsrf_token: Optional[str] = DEFAULT_CONFIG["xsrf_token"]
+    auth_user: str | None = DEFAULT_CONFIG["auth_user"]
+    xsrf_token: str | None = DEFAULT_CONFIG["xsrf_token"]
     default_model: str = DEFAULT_CONFIG["default_model"]
-    cookie_file: Optional[str] = DEFAULT_CONFIG["cookie_file"]
-    proxy: Optional[str] = DEFAULT_CONFIG["proxy"]
+    cookie_file: str | None = DEFAULT_CONFIG["cookie_file"]
+    proxy: str | None = DEFAULT_CONFIG["proxy"]
     temporary_chats: bool = DEFAULT_CONFIG["temporary_chats"]
     log_requests: bool = DEFAULT_CONFIG["log_requests"]
 
     # ---- construction -------------------------------------------------------
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "BridgeConfig":
+    def from_dict(cls, data: Mapping[str, Any]) -> BridgeConfig:
         """Build from a mapping, ignoring unknown keys and applying env overrides.
 
         Unknown keys are dropped rather than rejected so that a config file
@@ -94,7 +95,7 @@ class BridgeConfig:
             cfg = cfg.replace(cookie_file=os.environ["GEMINI_COOKIE_FILE"])
         return cfg
 
-    def replace(self, **changes: Any) -> "BridgeConfig":
+    def replace(self, **changes: Any) -> BridgeConfig:
         """Return a copy with the named fields replaced. Never mutates self."""
         return replace(self, **changes)
 
@@ -125,21 +126,21 @@ class BridgeConfig:
         return out
 
 
-def load_config(path: Optional[str]) -> BridgeConfig:
+def load_config(path: str | None) -> BridgeConfig:
     """Load a JSON config file into a BridgeConfig.
 
     A missing file is not an error: defaults plus env overrides apply.
     """
     data: dict = {}
     if path and os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as fh:
+        with open(path, encoding="utf-8") as fh:
             loaded = json.load(fh)
         if isinstance(loaded, dict):
             data = loaded
     return BridgeConfig.from_dict(data)
 
 
-def find_config() -> Optional[str]:
+def find_config() -> str | None:
     """Search the usual places for a config file."""
     for candidate in (
         os.environ.get("GEMINI_BRIDGE_CONFIG"),
@@ -152,7 +153,7 @@ def find_config() -> Optional[str]:
     return None
 
 
-def config_search_paths() -> Tuple[str, ...]:
+def config_search_paths() -> tuple[str, ...]:
     """The paths :func:`find_config` checks, for ``--config-search`` diagnostics."""
     return (
         os.environ.get("GEMINI_BRIDGE_CONFIG") or "(unset)",

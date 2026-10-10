@@ -16,13 +16,12 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from typing import List, Optional
 
 from . import __version__
 from .config import BridgeConfig, config_search_paths, find_config, load_config
 from .gemini import BridgeError, log, refresh_build_tag
-from .models import MODELS, resolve_model
 from .mcp_tools import build_server, run_tool
+from .models import MODELS, resolve_model
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -113,10 +112,10 @@ def cmd_serve(cfg: BridgeConfig, args: argparse.Namespace) -> int:
     print(f"  Temporary: {'yes' if cfg.temporary_chats else 'no'}")
     if cfg.host not in ("127.0.0.1", "localhost", "::1"):
         warning = (
-            "\n  WARNING: bound to a non-loopback address ({host}).\n"
+            f"\n  WARNING: bound to a non-loopback address ({cfg.host}).\n"
             "  This exposes your Google session to the network.\n"
             "  Anyone who can reach this port can spend your Gemini quota.\n"
-        ).format(host=cfg.host)
+        )
         # One write to one stream: a warning split between stdout and stderr
         # is easy to miss when someone pipes one of them away.
         print(warning, file=sys.stderr)
@@ -184,11 +183,17 @@ def cmd_doctor(cfg: BridgeConfig, args: argparse.Namespace) -> int:
         if exists:
             cookie, sapisid = load_cookie(cfg)
             print(f"  cookie loaded        {'yes' if cookie else 'no'}")
-            print(f"  sapisid              {'present' if sapisid else 'absent (auth will be anonymous)'}")
-            names = sorted({p.split('=', 1)[0].strip() for p in cookie.split(';') if '=' in p})
-            print(f"  cookie names ({len(names):<3})    {', '.join(names[:8])}{' ...' if len(names) > 8 else ''}")
+            print(
+                f"  sapisid              {'present' if sapisid else 'absent (auth will be anonymous)'}"
+            )
+            names = sorted({p.split("=", 1)[0].strip() for p in cookie.split(";") if "=" in p})
+            print(
+                f"  cookie names ({len(names):<3})    {', '.join(names[:8])}{' ...' if len(names) > 8 else ''}"
+            )
         print(f"  account path prefix  {account_prefix(cfg) or '/'}")
-        print(f"  xsrf token           {'set' if cfg.xsrf_token else 'NOT SET (authenticated requests may 400)'}")
+        print(
+            f"  xsrf token           {'set' if cfg.xsrf_token else 'NOT SET (authenticated requests may 400)'}"
+        )
     else:
         print("  no cookie file configured: anonymous mode")
 
@@ -202,7 +207,7 @@ def cmd_doctor(cfg: BridgeConfig, args: argparse.Namespace) -> int:
     except URLError as exc:
         print(f"  gemini.google.com    UNREACHABLE ({exc.reason})")
         print("                         a proxy or VPN is likely required")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(f"  gemini.google.com    error ({exc})")
 
     print("\nModel resolution")
@@ -228,7 +233,7 @@ def _has_httpx() -> bool:
     return HAS_HTTPX
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 

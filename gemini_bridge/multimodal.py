@@ -13,7 +13,7 @@ import re
 import ssl
 import urllib.parse
 import urllib.request
-from typing import Dict, Optional, Tuple
+from typing import Any
 
 from .config import BridgeConfig
 from .gemini import (
@@ -25,9 +25,9 @@ from .gemini import (
     make_sapisidhash,
 )
 
-__all__ = ["detect_image_mime", "fetch_image_bytes", "upload_image", "reset_page_tokens"]
+__all__ = ["detect_image_mime", "fetch_image_bytes", "reset_page_tokens", "upload_image"]
 
-_SIGNATURES: Tuple[Tuple[bytes, str], ...] = (
+_SIGNATURES: tuple[tuple[bytes, str], ...] = (
     (b"\x89PNG\r\n\x1a\n", "image/png"),
     (b"\xff\xd8\xff", "image/jpeg"),
     (b"GIF87a", "image/gif"),
@@ -46,7 +46,7 @@ _FTYP_BRANDS = {
     b"hevx": "image/hevc",
 }
 
-_PAGE_TOKENS: Dict[str, object] = {"tokens": {}, "ts": 0.0}
+_PAGE_TOKENS: dict[str, Any] = {"tokens": {}, "ts": 0.0}
 _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
 
@@ -66,13 +66,13 @@ def detect_image_mime(data: bytes, fallback: str = "image/png") -> str:
     return fallback
 
 
-def _page_tokens(cfg: BridgeConfig) -> Dict[str, str]:
+def _page_tokens(cfg: BridgeConfig) -> dict[str, str]:
     """Fetch and cache the upload-session tokens embedded in Gemini's page."""
     import time
 
     now = time.time()
     if now - float(_PAGE_TOKENS["ts"]) < 600 and _PAGE_TOKENS["tokens"]:
-        return _PAGE_TOKENS["tokens"]  # type: ignore[return-value]
+        return _PAGE_TOKENS["tokens"]
 
     headers = {"User-Agent": _UA}
     cookie_str, sapisid = load_cookie(cfg)
@@ -81,7 +81,7 @@ def _page_tokens(cfg: BridgeConfig) -> Dict[str, str]:
     if sapisid:
         headers["Authorization"] = make_sapisidhash(str(sapisid))
 
-    tokens: Dict[str, str] = {}
+    tokens: dict[str, str] = {}
     try:
         url = f"https://gemini.google.com{account_prefix(cfg)}/app"
         request = urllib.request.Request(url, headers=headers)
@@ -102,7 +102,7 @@ def _page_tokens(cfg: BridgeConfig) -> Dict[str, str]:
             match = re.search(pattern, html)
             if match:
                 tokens[key] = match.group(1)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log(cfg, f"upload-token fetch failed: {exc}")
 
     _PAGE_TOKENS.update({"tokens": tokens, "ts": now})
@@ -193,14 +193,16 @@ def fetch_image_bytes(cfg: BridgeConfig, url: str) -> bytes:
             )
             response = opener.open(request, timeout=30)
         else:
-            response = urllib.request.urlopen(request, context=ssl.create_default_context(), timeout=30)
+            response = urllib.request.urlopen(
+                request, context=ssl.create_default_context(), timeout=30
+            )
         return response.read()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log(cfg, f"image fetch failed: {exc}")
         return b""
 
 
-def decode_data_url(url: str) -> Optional[Tuple[bytes, str]]:
+def decode_data_url(url: str) -> tuple[bytes, str] | None:
     """Decode ``data:[mime][;base64],<payload>`` into (bytes, mime)."""
     match = re.match(r"^data:([^;,]+)?(;base64)?,(.*)$", url, re.DOTALL)
     if not match:

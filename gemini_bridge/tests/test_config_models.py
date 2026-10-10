@@ -9,8 +9,6 @@ import unittest
 
 from gemini_bridge.config import (
     BridgeConfig,
-    config_search_paths,
-    find_config,
     load_config,
 )
 from gemini_bridge.models import MODELS, describe_model, parse_think_override, resolve_model
@@ -19,19 +17,19 @@ from gemini_bridge.models import MODELS, describe_model, parse_think_override, r
 class ImmutabilityTests(unittest.TestCase):
     """The frozen config is the fix for a real concurrency bug; prove it holds."""
 
-    def test_config_is_frozen(self):
+    def test_config_is_frozen(self) -> None:
         cfg = BridgeConfig()
         with self.assertRaises(Exception):
             cfg.port = 9999  # type: ignore[misc]
 
-    def test_replace_returns_new_instance(self):
+    def test_replace_returns_new_instance(self) -> None:
         cfg = BridgeConfig()
         derived = cfg.replace(port=9999)
         self.assertIsNot(cfg, derived)
         self.assertEqual(cfg.port, 8081)
         self.assertEqual(derived.port, 9999)
 
-    def test_replace_does_not_mutate_original(self):
+    def test_replace_does_not_mutate_original(self) -> None:
         """Two requests deriving from one config cannot see each other."""
         base = BridgeConfig(default_model="gemini-3.6-flash")
         a = base.replace(default_model="gemini-3.5-flash-thinking")
@@ -40,7 +38,7 @@ class ImmutabilityTests(unittest.TestCase):
         self.assertEqual(a.default_model, "gemini-3.5-flash-thinking")
         self.assertEqual(b.default_model, "gemini-flash-lite")
 
-    def test_defaults_are_not_shared_mutable(self):
+    def test_defaults_are_not_shared_mutable(self) -> None:
         cfg = BridgeConfig()
         self.assertEqual(BridgeConfig().host, cfg.host)
 
@@ -48,7 +46,7 @@ class ImmutabilityTests(unittest.TestCase):
 class RedactionTests(unittest.TestCase):
     """A config dump must never carry a credential."""
 
-    def test_redacted_omits_secrets(self):
+    def test_redacted_omits_secrets(self) -> None:
         cfg = BridgeConfig(
             xsrf_token="super-secret-token",
             cookie_file="/home/me/gemini-auth.json",
@@ -60,19 +58,19 @@ class RedactionTests(unittest.TestCase):
         self.assertNotIn("gemini-auth.json", blob)
         self.assertNotIn("/home/me", blob)
 
-    def test_redacted_reports_presence_not_value(self):
+    def test_redacted_reports_presence_not_value(self) -> None:
         cfg = BridgeConfig(xsrf_token="abc123")
         self.assertTrue(cfg.redacted()["xsrf_token_set"])
         self.assertFalse(BridgeConfig().redacted()["xsrf_token_set"])
 
-    def test_redacted_is_json_serialisable(self):
+    def test_redacted_is_json_serialisable(self) -> None:
         """It is meant to be dumped into logs, so it must round-trip."""
         import json
 
         cfg = BridgeConfig(cookie_file="gemini_bridge/tests/__init__.py")
         self.assertIsInstance(json.dumps(cfg.redacted()), str)
 
-    def test_session_detection(self):
+    def test_session_detection(self) -> None:
         self.assertFalse(BridgeConfig().has_session_cookie())
         self.assertTrue(
             BridgeConfig(cookie_file="gemini_bridge/tests/__init__.py").has_session_cookie()
@@ -80,11 +78,11 @@ class RedactionTests(unittest.TestCase):
 
 
 class ConfigLoadingTests(unittest.TestCase):
-    def test_load_missing_file_uses_defaults(self):
+    def test_load_missing_file_uses_defaults(self) -> None:
         cfg = load_config("/nonexistent/path/config.json")
         self.assertEqual(cfg.port, 8081)
 
-    def test_load_ignores_unknown_keys(self):
+    def test_load_ignores_unknown_keys(self) -> None:
         """A config from an older version must still load."""
         cfg = BridgeConfig.from_dict(
             {"port": 9000, "api_keys": ["sk-should-be-ignored"], "unknown_field": 1}
@@ -92,11 +90,11 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertEqual(cfg.port, 9000)
         self.assertFalse(hasattr(cfg, "api_keys"))
 
-    def test_no_api_keys_field_exists(self):
+    def test_no_api_keys_field_exists(self) -> None:
         """Auth was removed deliberately; the field must not come back."""
         self.assertNotIn("api_keys", BridgeConfig.__dataclass_fields__)
 
-    def test_env_overrides_file(self):
+    def test_env_overrides_file(self) -> None:
         import os
         from unittest import mock
 
@@ -106,7 +104,7 @@ class ConfigLoadingTests(unittest.TestCase):
 
 
 class ModelRegistryTests(unittest.TestCase):
-    def test_all_models_resolve(self):
+    def test_all_models_resolve(self) -> None:
         for name in MODELS:
             resolved, mode, think, err, _ = resolve_model(name)
             self.assertIsNone(err, f"{name}: {err}")
@@ -114,50 +112,50 @@ class ModelRegistryTests(unittest.TestCase):
             self.assertIsInstance(mode, int)
             self.assertIsInstance(think, int)
 
-    def test_think_depth_range(self):
+    def test_think_depth_range(self) -> None:
         for spec in MODELS.values():
             self.assertIn(spec.think, range(5))
 
-    def test_mode_values_are_known(self):
+    def test_mode_values_are_known(self) -> None:
         """MODE_CATEGORY from Gemini's frontend enum."""
         for name, spec in MODELS.items():
             self.assertIn(spec.mode, range(1, 7), f"{name} has unknown mode {spec.mode}")
 
-    def test_pro_models_require_cookie(self):
+    def test_pro_models_require_cookie(self) -> None:
         for name, spec in MODELS.items():
             if "pro" in name:
                 self.assertTrue(spec.requires_cookie, f"{name} should be flagged")
 
 
 class ThinkOverrideTests(unittest.TestCase):
-    def test_plain_name(self):
+    def test_plain_name(self) -> None:
         self.assertEqual(parse_think_override("gemini-3.6-flash"), ("gemini-3.6-flash", None, None))
 
-    def test_override_extracted(self):
+    def test_override_extracted(self) -> None:
         self.assertEqual(
             parse_think_override("gemini-3.5-flash-thinking@think=2"),
             ("gemini-3.5-flash-thinking", 2, None),
         )
 
-    def test_non_numeric_rejected(self):
+    def test_non_numeric_rejected(self) -> None:
         _, _, err = parse_think_override("gemini-3.6-flash@think=deep")
-        self.assertIn("Invalid think level", err)
+        self.assertIn("Invalid think level", err or "")
 
-    def test_out_of_range_rejected(self):
+    def test_out_of_range_rejected(self) -> None:
         _, _, err = parse_think_override("gemini-3.6-flash@think=9")
-        self.assertIn("out of range", err)
+        self.assertIn("out of range", err or "")
 
-    def test_override_wins_over_default(self):
+    def test_override_wins_over_default(self) -> None:
         _, _, think, _, _ = resolve_model("gemini-3.5-flash-thinking@think=4")
         self.assertEqual(think, 4)  # spec default is 0
 
-    def test_unknown_model_falls_back_to_default(self):
-        name, mode, think, err, _ = resolve_model("gemini-nonexistent-9000", "gemini-3.6-flash")
+    def test_unknown_model_falls_back_to_default(self) -> None:
+        name, mode, _think, err, _ = resolve_model("gemini-nonexistent-9000", "gemini-3.6-flash")
         self.assertIsNone(err)
         self.assertEqual(name, "gemini-3.6-flash")
         self.assertEqual(mode, MODELS["gemini-3.6-flash"].mode)
 
-    def test_describe_unknown(self):
+    def test_describe_unknown(self) -> None:
         self.assertEqual(describe_model("not-a-model"), "unknown model")
 
 
