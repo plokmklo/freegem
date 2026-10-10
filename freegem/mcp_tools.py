@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import Any
 
 from . import __version__
-from .config import BridgeConfig
+from .config import BridgeConfig, redact_proxy
 from .gemini import BridgeError, generate
 from .models import MODELS, resolve_model
 
@@ -190,7 +190,7 @@ def run_tool(cfg: BridgeConfig, name: str, arguments: dict[str, Any]) -> str:
             "",
             f"Default model: {cfg.default_model}",
             f"Session: {'cookie configured' if cfg.has_session_cookie() else 'none (anonymous)'}",
-            f"Proxy: {cfg.proxy or 'system env'}",
+            f"Proxy:     {redact_proxy(cfg.proxy)}",
         ]
         return "\n".join(lines)
 

@@ -12,6 +12,7 @@ import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from typing import Any
 from unittest import mock
 
 from freegem.cli import main
@@ -324,6 +325,64 @@ class McpBuildTests(unittest.TestCase):
 
         server = build_server(BridgeConfig())
         self.assertEqual(server._mcp_server.version, gb.__version__)
+
+
+class FlagPlacementTests(unittest.TestCase):
+    """Global flags must work before AND after the subcommand.
+
+    argparse gives subparser defaults precedence over values the main parser
+    already parsed, so the SUPPRESS defaults are load-bearing: without them
+    `freegem --quiet serve` silently lost --quiet.
+    """
+
+    def parse(self, argv: list[str]) -> Any:
+        from freegem.cli import _build_parser
+
+        return _build_parser().parse_args(argv)
+
+    def test_quiet_after_subcommand(self) -> None:
+        args = self.parse(["serve", "--quiet"])
+        self.assertTrue(getattr(args, "quiet", False))
+
+    def test_quiet_before_subcommand(self) -> None:
+        args = self.parse(["--quiet", "serve"])
+        self.assertTrue(getattr(args, "quiet", False))
+
+    def test_quiet_default_is_false(self) -> None:
+        args = self.parse(["serve"])
+        self.assertFalse(getattr(args, "quiet", False))
+
+    def test_config_after_subcommand(self) -> None:
+        args = self.parse(["ask", "--config", "x.json", "hi"])
+        self.assertEqual(getattr(args, "config", None), "x.json")
+
+    def test_config_before_subcommand(self) -> None:
+        args = self.parse(["--config", "x.json", "doctor"])
+        self.assertEqual(getattr(args, "config", None), "x.json")
+
+    def test_later_occurrence_wins(self) -> None:
+        args = self.parse(["--config", "a.json", "serve", "--config", "b.json"])
+        self.assertEqual(getattr(args, "config", None), "b.json")
+
+    def test_main_end_to_end_after_subcommand(self) -> None:
+        """A flag after the subcommand must reach the config, not argparse's error."""
+        import io as _io
+        from contextlib import redirect_stderr, redirect_stdout
+
+        from freegem.cli import main
+
+        out, err = _io.StringIO(), _io.StringIO()
+        with (
+            mock.patch("gemini_bridge.cli.cmd_serve", return_value=0)
+            if False
+            else mock.patch("freegem.cli.cmd_serve", return_value=0) as serve,
+            redirect_stdout(out),
+            redirect_stderr(err),
+        ):
+            code = main(["serve", "--quiet"])
+        self.assertEqual(code, 0)
+        cfg = serve.call_args[0][0]
+        self.assertFalse(cfg.log_requests)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import json
 import time
+import urllib.parse
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
@@ -31,6 +32,35 @@ from .tools import (
 
 __all__ = ["GeminiHandler", "ThreadedServer", "estimate_tokens"]
 
+# Hard ceiling on request bodies. Without it a declared Content-Length of 2 GB
+# is read straight into RAM by an unauthenticated caller.
+MAX_BODY_BYTES = 32 * 1024 * 1024
+
+# Hostnames that legitimately address a loopback server. A Host header outside
+# this set means either a misdirected request or a DNS-rebinding attempt.
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+class _BodyTooLarge(Exception):
+    """Request body exceeded MAX_BODY_BYTES."""
+
+
+def _hostname_of(host_header: str) -> str:
+    """Hostname part of a Host header: strips port and IPv6 brackets."""
+    value = host_header.strip().lower()
+    if value.startswith("["):  # [::1]:8081
+        return value[1 : value.find("]")] if "]" in value else value
+    return value.rsplit(":", 1)[0] if ":" in value else value
+
+
+def _origin_is_loopback(origin: str) -> bool:
+    """True when an Origin header addresses this machine's own server."""
+    try:
+        parsed = urllib.parse.urlsplit(origin)
+    except ValueError:
+        return False
+    return parsed.scheme in ("http", "https") and _hostname_of(parsed.netloc) in _LOOPBACK_HOSTS
+
 
 def estimate_tokens(prompt: str, completion: str) -> dict[str, int]:
     """Approximate token counts.
@@ -41,6 +71,22 @@ def estimate_tokens(prompt: str, completion: str) -> dict[str, int]:
     """
     p, c = len(prompt) // 4, len(completion or "") // 4
     return {"prompt_tokens": p, "completion_tokens": c, "total_tokens": p + c}
+
+
+def _google_usage_metadata(prompt: str, completion: str) -> dict[str, int]:
+    """usageMetadata with the Generative Language API's key names.
+
+    estimate_tokens() is shared with the OpenAI face (prompt_tokens/...), but
+    the Google-native contract uses promptTokenCount/candidatesTokenCount/
+    totalTokenCount -- Gemini CLI reads those keys. The counts are the same
+    documented len//4 estimate either way.
+    """
+    est = estimate_tokens(prompt, completion)
+    return {
+        "promptTokenCount": est["prompt_tokens"],
+        "candidatesTokenCount": est["completion_tokens"],
+        "totalTokenCount": est["total_tokens"],
+    }
 
 
 def upload_images(cfg: BridgeConfig, images: list[ImageRef]) -> list[str] | None:
@@ -112,7 +158,13 @@ class GeminiHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
+        # CORS only for loopback origins. "*" would let ANY webpage the user
+        # visits drive this server and read its responses (browsers reach
+        # loopback from any origin); non-browser clients need no CORS at all.
+        origin = self.headers.get("Origin")
+        if origin and _origin_is_loopback(origin):
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
@@ -134,7 +186,10 @@ class GeminiHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        origin = self.headers.get("Origin")
+        if origin and _origin_is_loopback(origin):
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
         self.end_headers()
         self.close_connection = True
 
@@ -173,6 +228,11 @@ class GeminiHandler(BaseHTTPRequestHandler):
                     size = int(size_line.split(b";", 1)[0].strip(), 16)
                 except ValueError as err:
                     raise ValueError("malformed chunked body") from err
+                if size < 0:
+                    # rfile.read(-1) would read until EOF and wedge the thread.
+                    raise ValueError("negative chunk size")
+                if size > MAX_BODY_BYTES:
+                    raise _BodyTooLarge(f"chunk of {size} bytes exceeds the limit")
                 if size == 0:
                     while True:
                         trailer = self.rfile.readline()
@@ -181,12 +241,34 @@ class GeminiHandler(BaseHTTPRequestHandler):
                     break
                 chunks.append(self.rfile.read(size))
                 self.rfile.read(2)  # trailing CRLF
-            return b"".join(chunks)
-        length = int(self.headers.get("Content-Length") or 0)
+            body = b"".join(chunks)
+            if len(body) > MAX_BODY_BYTES:
+                raise _BodyTooLarge(f"body of {len(body)} bytes exceeds the limit")
+            return body
+        raw_length = (self.headers.get("Content-Length") or "0").strip()
+        try:
+            length = int(raw_length)
+        except ValueError as err:
+            raise ValueError("invalid Content-Length") from err
+        if length < 0:
+            raise ValueError("negative Content-Length")
+        if length > MAX_BODY_BYTES:
+            raise _BodyTooLarge(f"declared Content-Length {length} exceeds the limit")
         return self.rfile.read(length) if length else b""
 
     def _json_body(self) -> dict | None:
-        raw = self._read_body()
+        try:
+            raw = self._read_body()
+        except _BodyTooLarge as exc:
+            # The body was not drained; answering on a keep-alive connection
+            # would parse the leftover bytes as the next request line.
+            self.close_connection = True
+            self.send_error_json(str(exc), 413)
+            return None
+        except ValueError as exc:
+            self.close_connection = True
+            self.send_error_json(str(exc), 400)
+            return None
         if not raw:
             return {}
         try:
@@ -201,11 +283,32 @@ class GeminiHandler(BaseHTTPRequestHandler):
 
     # ── routing ──────────────────────────────────────────────────────────────
 
+    def _client_may_speak(self) -> bool:
+        """Reject requests whose Host header is not this machine.
+
+        Loopback binding stops the LAN, but a browser reaches loopback from any
+        origin, including via DNS rebinding (the browser believes the host is
+        attacker-controlled while packets land here). Validating Host closes
+        that path: rebinding requires a Host we do not answer for.
+        """
+        hostname = _hostname_of(self.headers.get("Host") or "")
+        allowed = _LOOPBACK_HOSTS | {self.cfg.host.split("%")[0].lower()}
+        if hostname not in allowed:
+            log(self.cfg, f"rejected request with unexpected Host {hostname!r}")
+            self.send_error_json("forbidden host", 403)
+            return False
+        return True
+
     def do_OPTIONS(self) -> None:
+        if not self._client_may_speak():
+            return
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "*")
+        origin = self.headers.get("Origin")
+        if origin and _origin_is_loopback(origin):
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "*")
         self.send_header("Content-Length", "0")
         self.end_headers()
 
@@ -213,6 +316,8 @@ class GeminiHandler(BaseHTTPRequestHandler):
         self.do_GET()
 
     def do_GET(self) -> None:
+        if not self._client_may_speak():
+            return
         try:
             path = self.path.split("?", 1)[0]
             if path in ("/", "/health"):
@@ -232,7 +337,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
                             {
                                 "id": name,
                                 "object": "model",
-                                "created": 1700000000,
+                                "created": int(time.time()),
                                 "owned_by": "google",
                                 "description": spec.desc,
                             }
@@ -267,6 +372,8 @@ class GeminiHandler(BaseHTTPRequestHandler):
                 self.send_error_json(str(exc), 500)
 
     def do_POST(self) -> None:
+        if not self._client_may_speak():
+            return
         try:
             path = self.path.split("?", 1)[0]
             if path == "/v1/chat/completions":
@@ -465,6 +572,22 @@ class GeminiHandler(BaseHTTPRequestHandler):
             pass
         except Exception as exc:
             log(self.cfg, f"stream error: {exc}")
+            # The stream is already open, so returning silently would hand the
+            # client a 200 that ends without finish_reason or [DONE] -- a
+            # failure indistinguishable from a completed empty answer. Emit an
+            # error frame and still terminate the stream properly.
+            with contextlib.suppress(Exception):
+                self._sse(
+                    None,
+                    {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model_name,
+                        "error": {"message": str(exc), "type": "stream_error"},
+                    },
+                )
+                self._sse_done()
 
     # ── /v1/responses (Codex CLI) ────────────────────────────────────────────
 
@@ -618,6 +741,23 @@ class GeminiHandler(BaseHTTPRequestHandler):
                     for idx, call in enumerate(calls)
                 ]
             return message
+        if kind == "function_call":
+            # Codex echoes its own prior tool calls back as input items; mapping
+            # them to a user turn deleted the assistant's call from history.
+            return {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": item.get("call_id", ""),
+                        "type": "function",
+                        "function": {
+                            "name": item.get("name", ""),
+                            "arguments": item.get("arguments", "{}"),
+                        },
+                    }
+                ],
+            }
         return {"role": item.get("role", "user"), "content": item.get("content", "")}
 
     def _responses_stream(self, model_name: str, output: list[dict], usage: dict) -> None:
@@ -755,7 +895,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
             "candidates": [
                 {"content": {"parts": parts, "role": "model"}, "finishReason": "STOP", "index": 0}
             ],
-            "usageMetadata": estimate_tokens(prompt, text or ""),
+            "usageMetadata": _google_usage_metadata(prompt, text or ""),
             "modelVersion": model_name,
         }
         if stream:
@@ -798,7 +938,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
                 None,
                 {
                     "candidates": [{"finishReason": "STOP", "index": 0}],
-                    "usageMetadata": estimate_tokens(prompt, collected),
+                    "usageMetadata": _google_usage_metadata(prompt, collected),
                     "modelVersion": model_name,
                 },
             )

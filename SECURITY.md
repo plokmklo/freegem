@@ -74,3 +74,23 @@ under an open bind and will be closed as such.
 - Prefer `"temporary_chats": true` so requests do not land in your Gemini
   account history.
 - Review Google's active sessions on your account periodically.
+
+## Browser access: CORS and Host validation
+
+The server binds to loopback, but loopback binding is a network-position
+control, not an access control against a **browser** — pages reach
+`127.0.0.1` from any origin. Two rules close that gap:
+
+1. **`Host` header validation.** Requests whose `Host` is not
+   `localhost`, `127.0.0.1`, `::1`, or the configured bind address are
+   rejected with 403. This defeats DNS rebinding, where a browser believes
+   it is talking to an attacker-controlled name while packets land here.
+2. **Origin-scoped CORS.** `Access-Control-Allow-Origin` is only ever sent
+   when the request's `Origin` is loopback, and it echoes that origin —
+   never `*`. Non-browser clients (OpenAI SDK, Codex, Gemini CLI, curl)
+   send no `Origin` and need no CORS headers at all.
+
+Request bodies are capped at 32 MB (413 beyond), malformed or negative
+lengths are rejected (400) with the connection closed, and client-supplied
+image URLs are resolved first and refused unless every resolved address is
+public (SSRF guard).

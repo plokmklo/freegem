@@ -57,8 +57,11 @@ class BridgeError(RuntimeError):
 
 _SSL_CTX: ssl.SSLContext | None = None
 _HTTPX_CLIENT = None
-# mtime -> (cookie_str, sapisid) cache so a hot loop does not re-stat the file
-_COOKIE_CACHE: dict[str, Any] = {"mtime": None, "cookie": "", "sapisid": None}
+# (abspath, mtime, size) -> (cookie_str, sapisid) cache so a hot loop does not
+# re-read the file. The path and size are part of the key: mtime alone let two
+# cookie files with identical mtimes share one session (cross-account leak) and
+# missed same-tick rewrites.
+_COOKIE_CACHE: dict[str, Any] = {"key": None, "cookie": "", "sapisid": None}
 
 
 def log(cfg: BridgeConfig, message: str) -> None:
@@ -101,7 +104,8 @@ def load_cookie(cfg: BridgeConfig) -> tuple[str, str | None]:
         return "", None
     try:
         mtime = os.path.getmtime(path)
-        if _COOKIE_CACHE["mtime"] == mtime and _COOKIE_CACHE["cookie"]:
+        key = (os.path.abspath(path), mtime, os.path.getsize(path))
+        if _COOKIE_CACHE["key"] == key and _COOKIE_CACHE["cookie"]:
             return _COOKIE_CACHE["cookie"], _COOKIE_CACHE["sapisid"]
 
         with open(path, encoding="utf-8") as fh:
@@ -122,7 +126,7 @@ def load_cookie(cfg: BridgeConfig) -> tuple[str, str | None]:
                     sapisid = v or None
                     break
 
-        _COOKIE_CACHE.update({"mtime": mtime, "cookie": cookie_str, "sapisid": sapisid})
+        _COOKIE_CACHE.update({"key": key, "cookie": cookie_str, "sapisid": sapisid})
         return cookie_str, sapisid
     except Exception as exc:
         log(cfg, f"cookie load failed, using cached value: {exc}")
@@ -244,7 +248,9 @@ def build_url(cfg: BridgeConfig) -> str:
 def clean_text(text: str, strip: bool = True) -> str:
     """Strip Gemini's code-reference and card-content markers from output."""
     text = re.sub(
-        r"```(?:python|javascript|text)\?code_(?:reference|stdout)"
+        # Any fence language, not just python/javascript/text: bash/json/go/rust
+        # markers leaked through the old alternation in both code paths.
+        r"```[\w+#.-]+\?code_(?:reference|stdout)"
         r"&code_event_index=\d+\n.*?```\n?",
         "",
         text,
@@ -292,9 +298,14 @@ def extract_response_text(raw: str) -> str:
         )
     best = ""
     for line in raw.split("\n"):
-        for text in _extract_texts_from_line(line):
-            if len(text) > len(best):
-                best = text
+        texts = _extract_texts_from_line(line)
+        if not texts:
+            continue
+        # Slot 0 of a line is the primary answer; sibling strings are cards,
+        # related-question chips, etc. Longest-across-siblings discarded the
+        # answer whenever a chip list was longer than it.
+        if len(texts[0]) > len(best):
+            best = texts[0]
     return clean_text(best)
 
 
@@ -337,8 +348,20 @@ def generate(
     for attempt in range(1, cfg.retry_attempts + 1):
         try:
             with _post(cfg, body, url, headers) as response:
+                status = getattr(response, "status", None) or getattr(response, "code", None)
+                if isinstance(status, int) and status >= 400:
+                    # Retryable on purpose: 429/5xx are transient, and without
+                    # this a rate-limit page streamed back as HTTP 200 with
+                    # content: null while the retry loop never engaged.
+                    raise RuntimeError(f"upstream HTTP {status}")
                 raw = response.read().decode("utf-8", errors="replace")
-            return extract_response_text(raw)
+            text = extract_response_text(raw)
+            if not text.strip():
+                # A 200 login-wall or rate-limit page carries no BardErrorInfo
+                # marker; returning "" made a failed request look like a model
+                # that chose silence.
+                raise RuntimeError("upstream returned an empty answer (rate limit or login wall?)")
+            return text
         except BridgeError:
             raise  # upstream said no; retrying the same request will not help
         except Exception as exc:
@@ -407,10 +430,34 @@ def generate_stream(
                             emitted = text
                             if delta:
                                 yield delta
+                # Flush the remainder: a final frame without a trailing newline
+                # would otherwise be dropped (the non-streaming path does not
+                # have this asymmetry).
+                if buffer:
+                    for text in _extract_texts_from_line(buffer):
+                        if text == emitted or emitted.startswith(text):
+                            continue
+                        if not text.startswith(emitted):
+                            raise BridgeError(
+                                "Gemini rewrote an already-streamed block; "
+                                "aborting to avoid corrupting the answer."
+                            )
+                        delta = clean_text(text[len(emitted) :], strip=False)
+                        emitted = text
+                        if delta:
+                            yield delta
             return
         except BridgeError:
             raise
         except Exception as exc:
+            if emitted:
+                # Deltas from this attempt already reached the client; replaying
+                # the stream from scratch would duplicate everything emitted so
+                # far (verified: "Hello" + retry "Hello world" -> "HelloHelloHello").
+                raise BridgeError(
+                    "stream failed after emitting output; refusing to retry "
+                    "because the client would receive duplicated text"
+                ) from exc
             last_error = exc
             if attempt < cfg.retry_attempts:
                 log(cfg, f"stream attempt {attempt}/{cfg.retry_attempts} failed: {exc}; retrying")

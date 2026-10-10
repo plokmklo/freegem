@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.parse
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any
@@ -124,6 +125,29 @@ class BridgeConfig:
             "cookie_exists": self.has_session_cookie(),
         }
         return out
+
+
+def redact_proxy(proxy: str | None) -> str:
+    """Show a proxy without any embedded credentials.
+
+    Proxies are commonly configured as http://user:pass@host:port; printing
+    that verbatim puts the password in terminal scrollback, docker logs, and
+    tool output.
+    """
+    if not proxy:
+        return "system env"
+    try:
+        parts = urllib.parse.urlsplit(proxy)
+    except ValueError:
+        return "<unparseable proxy url>"
+    if parts.username or parts.password:
+        host = parts.hostname or ""
+        if parts.port:
+            host = f"{host}:{parts.port}"
+        return urllib.parse.urlunsplit(
+            (parts.scheme, host, parts.path, parts.query, parts.fragment)
+        )
+    return proxy
 
 
 def load_config(path: str | None) -> BridgeConfig:

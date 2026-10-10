@@ -77,8 +77,15 @@ class OpenAIMessageTests(unittest.TestCase):
             ]
         )
         self.assertIn("```tool_call", prompt)
-        self.assertIn('"name": "get_weather"', prompt)
-        self.assertIn('"city": "Oslo"', prompt)
+        # The fence must hold ONE valid JSON object whose arguments field is a
+        # JSON string (OpenAI's wire contract); assert by parsing, not by
+        # substring, so escaping is exercised.
+        import json as _json
+
+        fence = prompt.split("```tool_call\n", 1)[1].split("\n```", 1)[0]
+        payload = _json.loads(fence)
+        self.assertEqual(payload["name"], "get_weather")
+        self.assertEqual(_json.loads(payload["arguments"]), {"city": "Oslo"})
 
     def test_empty_message_list(self) -> None:
         prompt, images = messages_to_prompt([])

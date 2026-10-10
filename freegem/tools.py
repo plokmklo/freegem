@@ -72,6 +72,17 @@ def _tool_call_function(tc: Any) -> dict[str, Any]:
     return fn if isinstance(fn, dict) else {}
 
 
+def _arguments_field(fn: dict[str, Any]) -> str:
+    """The tool call's ``arguments`` as a JSON *string* (OpenAI wire contract)."""
+    value = fn.get("arguments", "{}")
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def _tool_choice_instruction(tool_choice: Any) -> str:
     """Text appended to the tool preamble to express ``tool_choice``."""
     if tool_choice == "none":
@@ -192,9 +203,21 @@ def messages_to_prompt(
         elif role == "assistant":
             rendered = f"[Assistant]: {content}" if content else "[Assistant]:"
             if tool_calls:
+                # json.dumps the whole call: a dict argument must become JSON
+                # (not Python repr), and names containing quotes must not break
+                # the fence. Arguments stay a JSON string per the OpenAI wire
+                # contract; _arguments_field serialises non-strings.
                 blocks = "\n".join(
-                    f'{TOOL_CALL_FENCE}\n{{"name": "{_as_text(fn.get("name"))}", '
-                    f'"arguments": {_as_text(fn.get("arguments", "{}"))}}}\n```'
+                    TOOL_CALL_FENCE
+                    + "\n"
+                    + json.dumps(
+                        {
+                            "name": _as_text(fn.get("name", "")),
+                            "arguments": _arguments_field(fn),
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n```"
                     for tc in (tool_calls if isinstance(tool_calls, list) else [])
                     for fn in [_tool_call_function(tc)]
                     if fn

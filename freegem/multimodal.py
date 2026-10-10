@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import base64
 import binascii
+import ipaddress
 import re
+import socket
 import ssl
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any
@@ -79,7 +82,14 @@ def _page_tokens(cfg: BridgeConfig) -> dict[str, str]:
     import time
 
     now = time.time()
-    if _PAGE_TOKENS["fetched"] and now - float(_PAGE_TOKENS["ts"]) < _TOKEN_TTL_SEC:
+    age = now - float(_PAGE_TOKENS["ts"])
+    if _PAGE_TOKENS["fetched"] and age < _TOKEN_TTL_SEC:
+        return _PAGE_TOKENS["tokens"]
+    if not _PAGE_TOKENS["fetched"] and float(_PAGE_TOKENS["ts"]) > 0 and age < 15:
+        # Recent FAILED fetch: back off briefly instead of re-scraping an
+        # authenticated page per image, but do not pin the failure for the
+        # full TTL -- one transient network blip used to lock in the
+        # hardcoded fallback tokens for 10 minutes.
         return _PAGE_TOKENS["tokens"]
 
     headers = {"User-Agent": _UA}
@@ -113,7 +123,12 @@ def _page_tokens(cfg: BridgeConfig) -> dict[str, str]:
     except Exception as exc:
         log(cfg, f"upload-token fetch failed: {exc}")
 
-    _PAGE_TOKENS.update({"tokens": tokens, "ts": now, "fetched": True})
+    if tokens:
+        _PAGE_TOKENS.update({"tokens": tokens, "ts": now, "fetched": True})
+    else:
+        # Cache failures as failures: ts records the attempt for the 15s
+        # backoff, fetched stays False so a later call retries for real.
+        _PAGE_TOKENS.update({"tokens": {}, "ts": now, "fetched": False})
     return tokens
 
 
@@ -147,14 +162,20 @@ def upload_image(cfg: BridgeConfig, data: bytes, mime: str, filename: str = "ima
 
     start_url = "https://content-push.googleapis.com/upload/"
     request = urllib.request.Request(start_url, data=b"", headers=start_headers, method="POST")
+    # Both upload steps carry Cookie + SAPISIDHASH, so both use an opener that
+    # refuses redirects outright (see _NoRedirect).
     if cfg.proxy:
         opener = urllib.request.build_opener(
             urllib.request.ProxyHandler({"http": cfg.proxy, "https": cfg.proxy}),
             urllib.request.HTTPSHandler(context=_ssl_ctx()),
+            _NoRedirect(),
         )
-        response = opener.open(request, timeout=30)
     else:
-        response = urllib.request.urlopen(request, context=_ssl_ctx(), timeout=30)
+        opener = urllib.request.build_opener(
+            urllib.request.HTTPSHandler(context=_ssl_ctx()),
+            _NoRedirect(),
+        )
+    response = opener.open(request, timeout=30)
 
     upload_url = response.headers.get("X-Goog-Upload-URL") or response.headers.get(
         "x-goog-upload-url"
@@ -175,10 +196,7 @@ def upload_image(cfg: BridgeConfig, data: bytes, mime: str, filename: str = "ima
         upload_headers["Authorization"] = make_sapisidhash(str(sapisid))
 
     request2 = urllib.request.Request(upload_url, data=data, headers=upload_headers, method="POST")
-    if cfg.proxy:
-        response2 = opener.open(request2, timeout=60)
-    else:
-        response2 = urllib.request.urlopen(request2, context=_ssl_ctx(), timeout=60)
+    response2 = opener.open(request2, timeout=60)
     file_ref = response2.read().decode("utf-8", errors="replace").strip()
 
     if not file_ref.startswith("/"):
@@ -217,24 +235,80 @@ def _validate_upload_url(cfg: BridgeConfig, upload_url: str) -> str:
     return upload_url
 
 
+def _host_resolves_public(host: str) -> bool:
+    """True when every address ``host`` resolves to is a public IP.
+
+    Client-supplied image URLs are fetched by this process, so an attacker who
+    can set the URL can aim it at the user's LAN, loopback services, or cloud
+    metadata (169.254.169.254). Resolve first and refuse non-public targets.
+    """
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return False
+    if not infos:
+        return False
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return False
+        if ip.version == 6 and ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        ):
+            return False
+    return True
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects on requests that carry session credentials.
+
+    Host validation on the *first* URL is not enough: urllib transparently
+    follows 30x and copies the Cookie and SAPISIDHASH headers onto the next
+    hop, so a hostile proxy can pass validation and then redirect the
+    credentialed POST anywhere. No redirects means one URL, one validated host.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        raise BridgeError(f"refusing redirect of credentialed request to {newurl!r}")
+
+
+class _PublicOnlyRedirect(urllib.request.HTTPRedirectHandler):
+    """Re-check every redirect hop of an uncredentialed image fetch."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        parsed = urllib.parse.urlparse(newurl)
+        if parsed.scheme not in ("http", "https"):
+            raise urllib.error.URLError(f"redirect to scheme {parsed.scheme!r} refused")
+        if not _host_resolves_public(parsed.hostname or ""):
+            raise urllib.error.URLError(f"redirect to non-public host refused: {newurl!r}")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def fetch_image_bytes(cfg: BridgeConfig, url: str) -> bytes:
-    """Download a remote image. ``file://`` and friends are refused."""
+    """Download a remote image. ``file://`` and private hosts are refused."""
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in ("http", "https"):
         log(cfg, f"refusing image fetch for scheme {parsed.scheme or 'none'!r}")
         return b""
+    if not _host_resolves_public(parsed.hostname or ""):
+        log(cfg, f"refusing image fetch for non-public host {parsed.hostname!r}")
+        return b""
     try:
         request = urllib.request.Request(url, headers={"User-Agent": _UA})
+        handlers: list = [urllib.request.HTTPSHandler(context=ssl.create_default_context())]
         if cfg.proxy:
-            opener = urllib.request.build_opener(
-                urllib.request.ProxyHandler({"http": cfg.proxy, "https": cfg.proxy}),
-                urllib.request.HTTPSHandler(context=ssl.create_default_context()),
-            )
-            response = opener.open(request, timeout=30)
-        else:
-            response = urllib.request.urlopen(
-                request, context=ssl.create_default_context(), timeout=30
-            )
+            handlers.insert(0, urllib.request.ProxyHandler({"http": cfg.proxy, "https": cfg.proxy}))
+        handlers.append(_PublicOnlyRedirect())
+        opener = urllib.request.build_opener(*handlers)
+        response = opener.open(request, timeout=30)
         return response.read()
     except Exception as exc:
         log(cfg, f"image fetch failed: {exc}")

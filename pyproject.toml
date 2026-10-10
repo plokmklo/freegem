@@ -41,12 +41,13 @@ dependencies = []
 # the whole reply in one chunk.
 streaming = ["httpx>=0.25"]
 # The MCP face.
-mcp = ["mcp>=1.0"]
+# mcp<2: 2.x renamed FastMCP -> MCPServer
+mcp = ["mcp>=1.0,<2"]
 # Everything a typical install wants.
-full = ["httpx>=0.25", "mcp>=1.0"]
+full = ["httpx>=0.25", "mcp>=1.0,<2"]
 dev = [
     "httpx>=0.25",
-    "mcp>=1.0",
+    "mcp>=1.0,<2",
     "pytest>=7",
     "pytest-cov>=4",
     "ruff>=0.4",

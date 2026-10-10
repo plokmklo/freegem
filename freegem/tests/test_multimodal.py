@@ -133,23 +133,61 @@ class FetchImageBytesTests(unittest.TestCase):
 
     def test_no_credential_headers_on_fetch(self) -> None:
         """A user-supplied image URL must never receive the session cookie."""
-        with mock.patch("freegem.multimodal.urllib.request.urlopen") as urlopen:
-            urlopen.return_value.read.return_value = b"imagedata"
+        opener = mock.MagicMock()
+        opener.open.return_value.read.return_value = b"imagedata"
+        with (
+            mock.patch("freegem.multimodal._host_resolves_public", return_value=True),
+            mock.patch("freegem.multimodal.urllib.request.build_opener", return_value=opener),
+        ):
             result = fetch_image_bytes(self.cfg, "https://example.com/pic.png")
         self.assertEqual(result, b"imagedata")
 
-        request = urlopen.call_args[0][0]
+        request = opener.open.call_args[0][0]
         header_names = {k.lower() for k in request.headers}
         self.assertNotIn("cookie", header_names)
         self.assertNotIn("authorization", header_names)
         self.assertIn("user-agent", header_names)
 
     def test_network_failure_returns_empty_not_raise(self) -> None:
-        with mock.patch(
-            "freegem.multimodal.urllib.request.urlopen",
-            side_effect=OSError("connection refused"),
+        opener = mock.MagicMock()
+        opener.open.side_effect = OSError("connection refused")
+        with (
+            mock.patch("freegem.multimodal._host_resolves_public", return_value=True),
+            mock.patch("freegem.multimodal.urllib.request.build_opener", return_value=opener),
         ):
             self.assertEqual(fetch_image_bytes(self.cfg, "https://example.com/x.png"), b"")
+
+    def test_private_hosts_refused_before_any_request(self) -> None:
+        """SSRF guard: loopback/private/metadata targets never leave the host."""
+        from freegem.multimodal import _host_resolves_public
+
+        with mock.patch(
+            "freegem.multimodal.socket.getaddrinfo",
+            return_value=[(2, 1, 6, "", ("127.0.0.1", 0))],
+        ):
+            self.assertFalse(_host_resolves_public("internal.service"))
+        with mock.patch(
+            "freegem.multimodal.socket.getaddrinfo",
+            return_value=[(2, 1, 6, "", ("169.254.169.254", 0))],
+        ):
+            self.assertFalse(_host_resolves_public("metadata.google.internal"))
+        with mock.patch("freegem.multimodal.socket.getaddrinfo", side_effect=OSError):
+            self.assertFalse(_host_resolves_public("nonexistent.example"))
+
+        with mock.patch("freegem.multimodal._host_resolves_public", return_value=False):
+            with mock.patch("freegem.multimodal.urllib.request.build_opener") as build_opener:
+                self.assertEqual(fetch_image_bytes(self.cfg, "http://192.168.1.1/admin"), b"")
+                build_opener.assert_not_called()
+
+    def test_credentialed_upload_refuses_redirects(self) -> None:
+        """_NoRedirect must raise, not follow: urllib copies headers to hops."""
+        from freegem.multimodal import _NoRedirect
+
+        handler = _NoRedirect()
+        with self.assertRaises(BridgeError):
+            handler.redirect_request(
+                mock.MagicMock(), None, 302, "Found", {}, "https://evil.example.com/x"
+            )
 
 
 class UploadFlowTests(unittest.TestCase):
@@ -188,12 +226,18 @@ class UploadFlowTests(unittest.TestCase):
 
         ``urlopen_side_effect`` may be a list (consumed in order) or a callable.
         """
+
+        # upload_image builds an opener (redirects must be refused outright for
+        # credentialed requests), so the seam is build_opener, not urlopen.
+        def _opener_factory(*args: object, **kwargs: object) -> mock.MagicMock:
+            opener = mock.MagicMock()
+            opener.open.side_effect = urlopen_side_effect
+            return opener
+
         return (
             mock.patch("freegem.multimodal._page_tokens", return_value={}),
             mock.patch("freegem.multimodal.load_cookie", return_value=cookie),
-            mock.patch(
-                "freegem.multimodal.urllib.request.urlopen", side_effect=urlopen_side_effect
-            ),
+            mock.patch("freegem.multimodal.urllib.request.build_opener", new=_opener_factory),
         )
 
     @staticmethod
@@ -328,6 +372,16 @@ class UploadFlowTests(unittest.TestCase):
         self.assertEqual(first, {})
         self.assertEqual(second, {})
         self.assertEqual(third, {})
+
+        # A failure must not be pinned for the full TTL: once the 15s backoff
+        # has passed, the next call retries for real.
+        multimodal._PAGE_TOKENS["ts"] -= 16
+        with mock.patch(
+            "freegem.multimodal.urllib.request.urlopen",
+            side_effect=OSError("still down"),
+        ) as urlopen2:
+            multimodal._page_tokens(self.cfg)
+        self.assertEqual(urlopen2.call_count, 1)
 
 
 if __name__ == "__main__":

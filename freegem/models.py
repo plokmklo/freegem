@@ -99,8 +99,11 @@ def resolve_model(
 
     spec = MODELS.get(base)
     if spec is None:
-        spec = MODELS.get(default, MODELS[DEFAULT_MODEL])
-        base = default
+        # The echoed name must be the one actually routed: if the configured
+        # default is itself unknown, keep base = DEFAULT_MODEL so responses do
+        # not advertise a model that never reached upstream.
+        base = default if default in MODELS else DEFAULT_MODEL
+        spec = MODELS[base]
 
     think = spec.think if think_override is None else think_override
     return base, spec.mode, think, None, dict(spec.extra) if spec.extra else None
