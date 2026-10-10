@@ -1,4 +1,4 @@
-# gemini-bridge
+# freegem
 
 **Free Gemini, shaped as the APIs you already use.**
 
@@ -6,9 +6,9 @@ One bridge, three faces, no API key, no bill:
 
 | Face | Protocol | Command |
 |---|---|---|
-| HTTP API | OpenAI-compatible + Google-native | `gemini-bridge serve` |
-| Agent tools | MCP (Model Context Protocol) | `gemini-bridge mcp` |
-| One-shot | plain CLI | `gemini-bridge ask "..."` |
+| HTTP API | OpenAI-compatible + Google-native | `freegem serve` |
+| Agent tools | MCP (Model Context Protocol) | `freegem mcp` |
+| One-shot | plain CLI | `freegem ask "..."` |
 
 Under the hood it talks to the same free Gemini web session your browser uses.
 Outwardly it looks like OpenAI, so existing clients and code work by changing
@@ -42,8 +42,8 @@ one base URL.
 ## Quick start
 
 ```bash
-pip install gemini-bridge        # or: pip install "gemini-bridge[full]"
-gemini-bridge serve
+pip install freegem        # or: pip install "freegem[full]"
+freegem serve
 ```
 
 The server starts on `http://127.0.0.1:8081` — loopback only. Point any
@@ -66,16 +66,16 @@ OpenAI — set the base URL and go.
 **Try it before installing anything:**
 
 ```bash
-gemini-bridge ask "what is the time in Tokyo?"
-gemini-bridge ask --search "what changed in Python 3.14?"
-gemini-bridge doctor
+freegem ask "what is the time in Tokyo?"
+freegem ask --search "what changed in Python 3.14?"
+freegem doctor
 ```
 
 ---
 
 ## The three faces
 
-### 1. HTTP API — `gemini-bridge serve`
+### 1. HTTP API — `freegem serve`
 
 | Endpoint | For |
 |---|---|
@@ -102,7 +102,7 @@ export GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:8081
 gemini
 ```
 
-### 2. MCP tools — `gemini-bridge mcp`
+### 2. MCP tools — `freegem mcp`
 
 Exposes Gemini as tools an agent can call:
 
@@ -116,13 +116,13 @@ Exposes Gemini as tools an agent can call:
 | `gemini_list_models` | Registry introspection |
 
 ```bash
-pip install "gemini-bridge[mcp]"
+pip install "freegem[mcp]"
 
 # stdio: your client launches it
-gemini-bridge mcp --transport stdio
+freegem mcp --transport stdio
 
 # sse: it stays up and clients connect over HTTP
-gemini-bridge mcp --transport sse --port 8768
+freegem mcp --transport sse --port 8768
 ```
 
 Client config (`.mcp.example.json`):
@@ -130,9 +130,9 @@ Client config (`.mcp.example.json`):
 ```json
 {
   "mcpServers": {
-    "gemini-bridge": {
+    "freegem": {
       "type": "stdio",
-      "command": "gemini-bridge",
+      "command": "freegem",
       "args": ["mcp", "--transport", "stdio"]
     }
   }
@@ -142,10 +142,10 @@ Client config (`.mcp.example.json`):
 ### 3. One-shot CLI
 
 ```bash
-gemini-bridge ask "summarise the plot of Dune"        # direct answer
-gemini-bridge ask --search "latest Python release"    # web-grounded + sources
-gemini-bridge models                                  # registry + session state
-gemini-bridge doctor                                  # diagnostics, no generation
+freegem ask "summarise the plot of Dune"        # direct answer
+freegem ask --search "latest Python release"    # web-grounded + sources
+freegem models                                  # registry + session state
+freegem doctor                                  # diagnostics, no generation
 ```
 
 ---
@@ -192,13 +192,13 @@ Then either drop `gemini-auth.json` in the working directory (it is found
 automatically) or point at it:
 
 ```bash
-gemini-bridge serve --cookie-file ~/Downloads/gemini-auth.json
+freegem serve --cookie-file ~/Downloads/gemini-auth.json
 ```
 
 Check it without spending a request:
 
 ```bash
-gemini-bridge doctor
+freegem doctor
 ```
 
 > **There is no API-key authentication in this project, by design.** There is
@@ -243,10 +243,10 @@ cp config.example.json config.json
 | `log_requests` | `true` | Request log to stderr |
 
 Environment variables override the file: `GEMINI_BL`, `GEMINI_AUTH_USER`,
-`GEMINI_XSRF_TOKEN`, `GEMINI_PROXY`, `GEMINI_COOKIE_FILE`, `GEMINI_BRIDGE_CONFIG`.
+`GEMINI_XSRF_TOKEN`, `GEMINI_PROXY`, `GEMINI_COOKIE_FILE`, `FREEGEM_CONFIG`.
 
-Config is discovered in this order: `--config` flag → `$GEMINI_BRIDGE_CONFIG` →
-`./config.json` → `./gemini-auth.json` → `~/.config/gemini-bridge/config.json`.
+Config is discovered in this order: `--config` flag → `$FREEGEM_CONFIG` →
+`./config.json` → `./gemini-auth.json` → `~/.config/freegem/config.json`.
 
 ---
 
@@ -260,7 +260,7 @@ docker compose up -d
 
 ```yaml
 services:
-  gemini-bridge:
+  freegem:
     build: .
     ports: ["127.0.0.1:8081:8081"]
     environment:
@@ -281,7 +281,7 @@ docker compose --profile mcp up -d
 
 ```
 OpenAI client ─┐
-Gemini CLI   ──┼─► gemini-bridge ─► Gemini Web StreamGenerate ─► Google
+Gemini CLI   ──┼─► freegem ─► Gemini Web StreamGenerate ─► Google
 MCP agent    ──┘        │
                         └─ prompt translation (roles, tools, images → flat prompt)
                            Gemini wire format (positional array, field 79 = model)
@@ -352,13 +352,13 @@ Read this before you build on it.
 ## Development
 
 ```bash
-git clone https://github.com/plokmklo/gemini-bridge
-cd gemini-bridge
+git clone https://github.com/plokmklo/freegem
+cd freegem
 pip install -e ".[dev]"
 
 ruff check .            # lint
 ruff format --check .   # format
-mypy gemini_bridge      # types
+mypy freegem      # types
 pytest                  # tests
 ```
 
@@ -370,7 +370,7 @@ no credentials and no network. See
 ### Layout
 
 ```
-gemini_bridge/
+freegem/
   config.py       immutable config, env overrides
   models.py       model registry + @think parsing
   gemini.py       Gemini protocol client (the only module that does network)
