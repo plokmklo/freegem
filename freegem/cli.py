@@ -7,6 +7,7 @@ One command runs either face of the bridge:
 
 Plus one-shot utilities for checking a setup without starting a server:
     freegem ask "what is the time in Tokyo?"
+    freegem scrape https://example.com --links --ask "what is this site?"
     freegem models
     freegem doctor
 """
@@ -62,7 +63,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"freegem {__version__}")
 
-    sub = parser.add_subparsers(dest="command", metavar="{serve,mcp,ask,models,doctor}")
+    sub = parser.add_subparsers(dest="command", metavar="{serve,mcp,ask,models,scrape,doctor}")
 
     serve = sub.add_parser("serve", help="run the HTTP API server", parents=[common])
     serve.add_argument("--port", type=int, help="port to listen on (default 8081)")
@@ -84,6 +85,28 @@ def _build_parser() -> argparse.ArgumentParser:
     ask = sub.add_parser("ask", help="ask one question and print the answer", parents=[common])
     ask.add_argument("prompt", nargs="+", help="the question")
     ask.add_argument("--search", action="store_true", help="ground in the web and cite sources")
+
+    scrape = sub.add_parser("scrape", help="fetch a web page as readable text", parents=[common])
+    scrape.add_argument("url", help="the page to fetch (http/https only)")
+    scrape.add_argument("--links", action="store_true", help="also list the page's links")
+    scrape.add_argument(
+        "--max-chars",
+        type=int,
+        default=20000,
+        metavar="N",
+        help="truncate extracted text to N characters (default 20000)",
+    )
+    scrape.add_argument(
+        "--ask",
+        metavar="QUESTION",
+        default=None,
+        help="have Gemini answer this question from the page instead of printing it",
+    )
+    scrape.add_argument(
+        "--ignore-robots",
+        action="store_true",
+        help="ignore robots.txt (CLI only: the web_scrape MCP tool cannot bypass it)",
+    )
 
     sub.add_parser("models", help="list available models", parents=[common])
 
@@ -191,6 +214,26 @@ def cmd_models(cfg: BridgeConfig, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_scrape(cfg: BridgeConfig, args: argparse.Namespace) -> int:
+    """Fetch a page (SSRF-guarded, robots-aware) and print text or an answer."""
+    from .web_scraper import scrape_cli
+
+    try:
+        output = scrape_cli(
+            cfg,
+            url=args.url,
+            include_links=args.links,
+            max_chars=args.max_chars,
+            question=args.ask,
+            ignore_robots=args.ignore_robots,
+        )
+    except (BridgeError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(output)
+    return 0
+
+
 def cmd_doctor(cfg: BridgeConfig, args: argparse.Namespace) -> int:
     """Read-only diagnostics. Never sends a generation request."""
     from .gemini import account_prefix, load_cookie
@@ -264,7 +307,7 @@ def main(argv: list[str] | None = None) -> int:
     # namespace (AttributeError on args.port). When no subcommand is present,
     # parse as if `serve` had been written. --help/--version keep the top-level
     # parser so the full command list stays visible.
-    _commands = {"serve", "mcp", "ask", "models", "doctor"}
+    _commands = {"serve", "mcp", "ask", "models", "scrape", "doctor"}
     if not any(a in _commands for a in raw) and not any(
         a in ("-h", "--help", "--version") for a in raw
     ):
@@ -303,6 +346,7 @@ def main(argv: list[str] | None = None) -> int:
         "mcp": cmd_mcp,
         "ask": cmd_ask,
         "models": cmd_models,
+        "scrape": cmd_scrape,
         "doctor": cmd_doctor,
     }
     return handlers[command](cfg, args)
