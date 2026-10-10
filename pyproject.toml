@@ -54,9 +54,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/YOUR-USERNAME/gemini-bridge"
-Documentation = "https://github.com/YOUR-USERNAME/gemini-bridge#readme"
-Issues = "https://github.com/YOUR-USERNAME/gemini-bridge/issues"
+Homepage = "https://github.com/plokmklo/gemini-bridge"
+Documentation = "https://github.com/plokmklo/gemini-bridge#readme"
+Issues = "https://github.com/plokmklo/gemini-bridge/issues"
 
 [project.scripts]
 gemini-bridge = "gemini_bridge.cli:main"

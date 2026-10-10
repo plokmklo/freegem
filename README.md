@@ -343,7 +343,7 @@ Read this before you build on it.
 ## Development
 
 ```bash
-git clone https://github.com/YOUR-USERNAME/gemini-bridge
+git clone https://github.com/plokmklo/gemini-bridge
 cd gemini-bridge
 pip install -e ".[dev]"
 
