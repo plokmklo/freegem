@@ -473,6 +473,72 @@ def _parse_call_object(raw: str) -> dict[str, Any] | None:
     return None
 
 
+def _call_name(call: dict) -> str | None:
+    """The tool name of a parsed call, OpenAI or Google shape."""
+    function = call.get("function")
+    if isinstance(function, dict):
+        name = function.get("name")
+        if isinstance(name, str):
+            return name
+    name = call.get("name")
+    return name if isinstance(name, str) else None
+
+
+def declared_tool_names(tools: list[dict] | None) -> set[str]:
+    """Every tool name the request actually declared, both wire shapes.
+
+    OpenAI tools look like ``{"type": "function", "function": {"name": ...}}``;
+    Google tools look like ``{"name": ..., "parameters": ...}``. Accepting
+    both here keeps one validator usable from either face.
+    """
+    names: set[str] = set()
+    for tool in tools or []:
+        if not isinstance(tool, dict):
+            continue
+        function = tool.get("function")
+        if isinstance(function, dict) and isinstance(function.get("name"), str):
+            names.add(function["name"])
+        elif isinstance(tool.get("name"), str):
+            names.add(tool["name"])
+    return names
+
+
+def validate_tool_calls(
+    calls: list[dict], tools: list[dict] | None, tool_choice: Any = "auto"
+) -> list[dict]:
+    """Keep only calls the request actually authorized.
+
+    The model can emit a fenced call for a tool that was never declared, or,
+    under a named ``tool_choice``, for a different tool than the one named.
+    Both would hand the client a call it never asked for and cannot route,
+    so undeclared calls are dropped here. With a named choice, every other
+    name is dropped too. Passing arguments through unvalidated is deliberate:
+    argument schemas belong to the declaring client, and a bridge that
+    second-guesses them breaks tools it does not know about.
+    """
+    if not calls:
+        return []
+    declared = declared_tool_names(tools)
+    wanted: str | None = None
+    if isinstance(tool_choice, dict):
+        function = tool_choice.get("function")
+        if isinstance(function, dict):
+            name = function.get("name")
+            if isinstance(name, str):
+                wanted = name
+    kept: list[dict] = []
+    for call in calls:
+        name = _call_name(call)
+        if name is None:
+            continue
+        if wanted is not None and name != wanted:
+            continue
+        if declared and name not in declared:
+            continue
+        kept.append(call)
+    return kept
+
+
 def parse_function_calls(text: str) -> tuple[str, list[dict]]:
     """Extract Google ``functionCall`` parts from fenced ``function_call`` blocks.
 

@@ -178,6 +178,15 @@ def _build_parser() -> argparse.ArgumentParser:
             "1 = sequential. Fetches to the same host always serialize"
         ),
     )
+    research.add_argument(
+        "--evidence",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "ask for, and verify, verbatim evidence quotes per cited source "
+            "(default: research_evidence config, on)"
+        ),
+    )
 
     sub.add_parser("models", help="list available models", parents=[common])
 
@@ -322,6 +331,7 @@ def cmd_research(cfg: BridgeConfig, args: argparse.Namespace) -> int:
             no_cache=args.no_cache,
             refresh=args.refresh,
             fetch_concurrency=args.fetch_concurrency,
+            evidence=args.evidence,
         )
     except (BridgeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)

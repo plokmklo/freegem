@@ -10,6 +10,7 @@ markers in every prompt, and the deterministic fallback when Gemini is down.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import tempfile
@@ -30,6 +31,7 @@ from freegem.web_research import (
     HARD_MAX_PAGES,
     ResearchCache,
     ResearchResult,
+    ResearchSource,
     render_json,
     render_markdown,
     render_text,
@@ -731,3 +733,246 @@ class ConcurrentCollectTests(_TmpDirTestCase):
         text = render_text(result)
         self.assertIn("mediawiki-api", text)
         self.assertIn("nav_only", text)
+
+
+class EvidenceTests(_TmpDirTestCase):
+    """Evidence-passage citations: prompt contract, parsing, verification."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.cfg = BridgeConfig(log_requests=False)
+
+    def _research(
+        self,
+        urls: list[str],
+        pages: dict[str, ScrapeResult],
+        gemini: Any,
+        **kwargs: Any,
+    ) -> tuple[ResearchResult, list[str]]:
+        captured: list[str] = []
+
+        def spy(cfg: BridgeConfig, prompt: str) -> str:
+            captured.append(prompt)
+            return gemini(cfg, prompt)
+
+        with (
+            mock.patch("freegem.web_scraper.scrape_page", _fetcher(pages)),
+            mock.patch("freegem.web_research._gemini_complete", spy),
+        ):
+            result = research(self.cfg, kwargs.pop("question", "Which option?"), urls, **kwargs)
+        return result, captured
+
+    def test_evidence_block_parsed_verified_and_stripped(self) -> None:
+        pages = {"http://a.test/1": _page("http://a.test/1", "A", "alpha content here")}
+        block = (
+            "## Answer\nA wins [S1].\n\n```evidence\n"
+            '[{"source": 1, "quotes": ["alpha content here"]}]\n```\n'
+        )
+
+        def gemini(cfg: BridgeConfig, prompt: str) -> str:
+            return block
+
+        result, _ = self._research(["http://a.test/1"], pages, gemini)
+        self.assertNotIn("```evidence", result.answer)
+        self.assertEqual(len(result.citations), 1)
+        citation = result.citations[0]
+        self.assertEqual(citation.marker, "S1")
+        self.assertEqual(citation.quotes, ["alpha content here"])
+        self.assertEqual(citation.verified, [True])
+        self.assertTrue(citation.all_verified)
+
+    def test_rewrapped_quote_still_verifies(self) -> None:
+        pages = {"http://a.test/1": _page("http://a.test/1", "A", "Alpha  CONTENT\nhere")}
+        block = (
+            "## Answer\nx [S1].\n\n```evidence\n"
+            '[{"source": 1, "quotes": ["alpha content\\nhere"]}]\n```\n'
+        )
+
+        def gemini(cfg: BridgeConfig, prompt: str) -> str:
+            return block
+
+        result, _ = self._research(["http://a.test/1"], pages, gemini)
+        self.assertEqual(result.citations[0].verified, [True])
+
+    def test_fabricated_quote_is_flagged_not_deleted(self) -> None:
+        pages = {"http://a.test/1": _page("http://a.test/1", "A", "real words")}
+        block = (
+            "## Answer\nx [S1].\n\n```evidence\n"
+            '[{"source": 1, "quotes": ["made up passage"]}]\n```\n'
+        )
+
+        def gemini(cfg: BridgeConfig, prompt: str) -> str:
+            return block
+
+        result, _ = self._research(["http://a.test/1"], pages, gemini)
+        self.assertEqual(result.citations[0].quotes, ["made up passage"])
+        self.assertEqual(result.citations[0].verified, [False])
+        self.assertFalse(result.citations[0].all_verified)
+
+    def test_evidence_for_source_beyond_material_is_dropped(self) -> None:
+        pages = {"http://a.test/1": _page("http://a.test/1", "A", "words")}
+        block = '## Answer\nx [S1].\n\n```evidence\n[{"source": 5, "quotes": ["words"]}]\n```\n'
+
+        def gemini(cfg: BridgeConfig, prompt: str) -> str:
+            return block
+
+        result, _ = self._research(["http://a.test/1"], pages, gemini)
+        self.assertEqual(result.citations, [])
+
+    def test_malformed_block_stripped_but_no_citations(self) -> None:
+        pages = {"http://a.test/1": _page("http://a.test/1", "A", "words")}
+        block = "## Answer\nx [S1].\n\n```evidence\nnot json at all\n```\n"
+
+        def gemini(cfg: BridgeConfig, prompt: str) -> str:
+            return block
+
+        result, _ = self._research(["http://a.test/1"], pages, gemini)
+        self.assertNotIn("```evidence", result.answer)
+        self.assertEqual(result.citations, [])
+
+    def test_prompt_carries_contract_when_enabled_and_not_when_disabled(self) -> None:
+        pages = {"http://a.test/1": _page("http://a.test/1", "A", "words")}
+
+        def gemini(cfg: BridgeConfig, prompt: str) -> str:
+            return "answer [S1]"
+
+        _, captured = self._research(["http://a.test/1"], pages, gemini)
+        self.assertIn("```evidence", captured[0])
+        self.assertIn("verbatim", captured[0])
+        _, captured = self._research(["http://a.test/1"], pages, gemini, evidence=False)
+        self.assertNotIn("```evidence", captured[0])
+
+    def test_failed_source_rule_present_in_prompt(self) -> None:
+        pages = {"http://a.test/1": _page("http://a.test/1", "A", "words")}
+
+        def gemini(cfg: BridgeConfig, prompt: str) -> str:
+            return "answer [S1]"
+
+        _, captured = self._research(["http://a.test/1"], pages, gemini)
+        self.assertIn("UNAVAILABLE", captured[0])
+        self.assertIn("which source says what", captured[0])
+
+    def test_evidence_disabled_leaves_model_block_untouched(self) -> None:
+        pages = {"http://a.test/1": _page("http://a.test/1", "A", "words")}
+        block = '## Answer\nx [S1].\n\n```evidence\n[{"source": 1, "quotes": ["words"]}]\n```\n'
+
+        def gemini(cfg: BridgeConfig, prompt: str) -> str:
+            return block
+
+        result, _ = self._research(["http://a.test/1"], pages, gemini, evidence=False)
+        self.assertIn("```evidence", result.answer)  # not asked, not parsed
+        self.assertEqual(result.citations, [])
+
+    def test_fallback_path_has_no_citations(self) -> None:
+        pages = {"http://a.test/1": _page("http://a.test/1", "A", "words")}
+
+        def gemini(cfg: BridgeConfig, prompt: str) -> str:
+            raise BridgeError("down")
+
+        result, _ = self._research(["http://a.test/1"], pages, gemini)
+        self.assertFalse(result.gemini_used)
+        self.assertEqual(result.citations, [])
+
+    def test_json_render_carries_citations_and_stamps(self) -> None:
+        pages = {
+            "http://a.test/1": ScrapeResult(
+                url="http://a.test/1",
+                title="A",
+                text="alpha words",
+                last_modified="Wed, 21 Oct 2026 07:28:00 GMT",
+            ),
+        }
+        block = (
+            "## Answer\nx [S1].\n\n```evidence\n"
+            '[{"source": 1, "quotes": ["alpha words", "bogus"]}]\n```\n'
+        )
+
+        def gemini(cfg: BridgeConfig, prompt: str) -> str:
+            return block
+
+        with (
+            mock.patch("freegem.web_scraper.scrape_page", _fetcher(pages)),
+            mock.patch("freegem.web_research._gemini_complete", gemini),
+        ):
+            result = research(self.cfg, "q?", ["http://a.test/1"])
+        payload = json.loads(render_json(result))
+        source = payload["sources"][0]
+        self.assertEqual(source["last_modified"], "Wed, 21 Oct 2026 07:28:00 GMT")
+        self.assertTrue(source["fetched_at"].endswith("Z"))
+        self.assertEqual(len(payload["citations"]), 1)
+        self.assertEqual(payload["citations"][0]["verified"], [True, False])
+        self.assertFalse(payload["citations"][0]["all_verified"])
+        self.assertEqual(payload["meta"]["evidence_offered"], 2)
+        self.assertEqual(payload["meta"]["evidence_verified"], 1)
+
+    def test_text_and_markdown_render_evidence(self) -> None:
+        from freegem.web_research import Citation
+
+        result = ResearchResult(
+            question="q",
+            answer="answer [S1]",
+            sources=[ResearchSource(url="http://a.test/1", ok=True, title="A", fetched_at=0.0)],
+            citations=[Citation(marker="S1", quotes=["a quote"], verified=[False])],
+        )
+        text = render_text(result)
+        self.assertIn("Evidence:", text)
+        self.assertIn('[S1] "a quote" (UNVERIFIED)', text)
+        markdown = render_markdown(result)
+        self.assertIn("## Evidence", markdown)
+        self.assertIn("[S1] ✗ unverified", markdown)
+        self.assertIn("Fetched: S1 1970-01-01T00:00:00Z", markdown)
+
+    def test_config_flag_reaches_research(self) -> None:
+        self.assertTrue(BridgeConfig().research_evidence)
+        seen: dict[str, Any] = {}
+
+        def fake_research(cfg: BridgeConfig, question: str, urls: list[str], **kw: Any) -> Any:
+            seen.update(kw)
+            return ResearchResult(question=question, answer="x", sources=[])
+
+        with (
+            mock.patch("freegem.web_research.research", fake_research),
+            mock.patch.dict("os.environ", {"FREEGEM_CACHE_DIR": str(self.tmp)}),
+        ):
+            from freegem.web_research import research_cli
+
+            research_cli(self.cfg, urls=["http://a.test/1"], query="q")
+            self.assertTrue(seen["evidence"])
+            research_cli(self.cfg, urls=["http://a.test/1"], query="q", evidence=False)
+            self.assertFalse(seen["evidence"])
+
+    def test_mcp_evidence_parameter_passes_through(self) -> None:
+        seen: dict[str, Any] = {}
+
+        def fake_research(cfg: BridgeConfig, question: str, urls: list[str], **kw: Any) -> Any:
+            seen.update(kw)
+            return ResearchResult(question=question, answer="x", sources=[])
+
+        with mock.patch("freegem.web_research.research", fake_research):
+            run_tool(
+                self.cfg,
+                "web_research",
+                {"urls": ["http://a.test/1"], "question": "q", "evidence": False},
+            )
+        self.assertFalse(seen["evidence"])
+
+    def test_cache_round_trips_last_modified(self) -> None:
+        cache = ResearchCache(self.tmp / "cache.json", ttl=600)
+        cache.put("http://a.test/1", "T", "text", "Wed, 21 Oct 2026 07:28:00 GMT")
+        hit = cache.get("http://a.test/1")
+        assert hit is not None
+        self.assertEqual(hit["last_modified"], "Wed, 21 Oct 2026 07:28:00 GMT")
+        # An old entry written before this field existed reads back as None.
+        legacy = {
+            "http://b.test/2": {
+                "title": "T",
+                "text": "old",
+                "fetched_at": time.time(),
+                "hash": hashlib.sha256(b"old").hexdigest(),
+            }
+        }
+        (self.tmp / "legacy.json").write_text(json.dumps(legacy))
+        old = ResearchCache(self.tmp / "legacy.json", ttl=600)
+        hit = old.get("http://b.test/2")
+        assert hit is not None
+        self.assertIsNone(hit["last_modified"])

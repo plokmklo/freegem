@@ -43,6 +43,7 @@ import urllib.parse
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +56,7 @@ __all__ = [
     "DEFAULT_MAX_PAGES",
     "DEFAULT_TOTAL_BUDGET",
     "HARD_MAX_PAGES",
+    "Citation",
     "ResearchCache",
     "ResearchResult",
     "ResearchSource",
@@ -138,7 +140,7 @@ class ResearchCache:
             return {}  # absent, unreadable, or corrupt: an empty cache
         return data if isinstance(data, dict) else {}
 
-    def get(self, url: str) -> dict[str, str] | None:
+    def get(self, url: str) -> dict[str, Any] | None:
         """A fresh, hash-valid entry, or None (miss, stale, or damaged)."""
         entry = self._load().get(url)
         if not isinstance(entry, dict):
@@ -157,15 +159,22 @@ class ResearchCache:
             return None
         if not isinstance(digest, str) or hashlib.sha256(text.encode()).hexdigest() != digest:
             return None
-        return {"title": title, "text": text, "fetched_at": str(fetched_at)}
+        modified = entry.get("last_modified")
+        return {
+            "title": title,
+            "text": text,
+            "fetched_at": str(fetched_at),
+            "last_modified": modified if isinstance(modified, str) else None,
+        }
 
-    def put(self, url: str, title: str, text: str) -> None:
+    def put(self, url: str, title: str, text: str, last_modified: str | None = None) -> None:
         data = self._load()
         data[url] = {
             "title": title,
             "text": text,
             "fetched_at": time.time(),
             "hash": hashlib.sha256(text.encode()).hexdigest(),
+            "last_modified": last_modified,
         }
         # Evict the oldest entries when the cache outgrows its cap.
         if len(data) > _CACHE_MAX_ENTRIES:
@@ -208,6 +217,32 @@ class ResearchSource:
     #: page means the fetch worked but the extractor got site chrome, not
     #: content -- the citation is honest but carries no evidence.
     quality: str = "ok"
+    #: When THIS module got the text (epoch seconds), or None for a source
+    #: that was never fetched. Cache hits keep the ORIGINAL fetch time.
+    fetched_at: float | None = None
+    #: The origin server's Last-Modified header, when it sent one.
+    last_modified: str | None = None
+
+
+@dataclass
+class Citation:
+    """Evidence the model offered for one cited source, and whether it holds.
+
+    ``quotes`` are verbatim passages the model claims to come from the
+    source; ``verified[i]`` says whether quotes[i] was actually found in
+    that source's fetched text (whitespace-insensitive, case-insensitive).
+    An unverified quote is NOT deleted -- deleting evidence the model
+    hallucinated would look identical to evidence the verifier missed, so
+    the flag travels with the quote instead.
+    """
+
+    marker: str
+    quotes: list[str] = field(default_factory=list)
+    verified: list[bool] = field(default_factory=list)
+
+    @property
+    def all_verified(self) -> bool:
+        return bool(self.quotes) and all(self.verified)
 
 
 @dataclass
@@ -220,6 +255,10 @@ class ResearchResult:
     gemini_used: bool = False
     chars_fetched: int = 0
     elapsed_sec: float = 0.0
+    #: Evidence-passage citations (only when evidence mode is enabled and
+    #: the model supplied its evidence block). Empty is honest: it means
+    #: none was offered, not that none exists.
+    citations: list[Citation] = field(default_factory=list)
 
     @property
     def ok_pages(self) -> int:
@@ -336,6 +375,8 @@ def _collect_sources(
                 source.chars = len(cached["text"])
                 source.from_cache = True
                 source.quality = extraction_quality(cached["text"])
+                source.fetched_at = float(cached["fetched_at"])
+                source.last_modified = cached.get("last_modified")
                 text = cached["text"]
             else:
                 # The last page only gets the budget that is actually left, so
@@ -353,9 +394,11 @@ def _collect_sources(
                 source.chars = len(page.text)
                 source.via = page.via
                 source.quality = extraction_quality(page.text)
+                source.fetched_at = time.time()
+                source.last_modified = page.last_modified
                 text = page.text
                 if cache is not None:
-                    cache.put(url, page.title, page.text)
+                    cache.put(url, page.title, page.text, page.last_modified)
             fetched += source.chars
             sources[position] = source
             material.append((source, text))
@@ -394,6 +437,8 @@ def _collect_sources(
                 source.chars = len(cached["text"])
                 source.from_cache = True
                 source.quality = extraction_quality(cached["text"])
+                source.fetched_at = float(cached["fetched_at"])
+                source.last_modified = cached.get("last_modified")
                 fetched += source.chars
                 sources[position] = source
                 material.append((source, cached["text"]))
@@ -429,8 +474,10 @@ def _collect_sources(
             source.chars = len(text)
             source.via = page.via
             source.quality = extraction_quality(text)
+            source.fetched_at = time.time()
+            source.last_modified = page.last_modified
             if cache is not None:
-                cache.put(urls[position], page.title, text)
+                cache.put(urls[position], page.title, text, page.last_modified)
             fetched += source.chars
             sources[position] = source
             material.append((source, text))
@@ -467,13 +514,34 @@ _INJECTION_RULES = (
     "- Use ONLY the numbered sources provided. Never invent or visit URLs.\n"
     "- Cite every claim with its source marker, like [S1] or [S2], placed "
     "right after the claim. A claim without a marker is unsupported.\n"
+    "- A source that failed to fetch, or that carried only navigation stubs, "
+    "means the evidence is UNAVAILABLE. Unavailable evidence is never proof "
+    "that a claim is false; if the sources that did load contradict each "
+    "other, say exactly which source says what.\n"
     "- If sources disagree, say so explicitly in Disagreements.\n"
     "- If the sources do not contain the answer, say so plainly in Missing "
     "evidence instead of guessing.\n"
 )
 
+_EVIDENCE_CONTRACT = (
+    "After the three sections, append exactly one fenced evidence block, "
+    "formatted as:\n"
+    "```evidence\n"
+    '[{"source": 1, "quotes": ["<verbatim quote>"]}]\n'
+    "```\n"
+    "One entry per source you cited, in ascending order of source number. "
+    "Each quote must be a short verbatim passage (at most 30 words) copied "
+    "EXACTLY from that source's material above, directly supporting the "
+    "claims you attributed to it. Nothing else goes inside the block.\n\n"
+)
 
-def _single_pass_prompt(question: str, blocks: list[str]) -> str:
+_EVIDENCE_RE = re.compile(r"```evidence\s*\n(.*?)\n```", re.DOTALL)
+_EVIDENCE_MAX_ENTRIES = 8
+_EVIDENCE_MAX_QUOTES = 4
+_EVIDENCE_MAX_QUOTE_CHARS = 400
+
+
+def _single_pass_prompt(question: str, blocks: list[str], *, evidence: bool = False) -> str:
     return (
         "You are a research assistant. Below are several web pages, each "
         "labeled [S1], [S2], ... Answer the question using their content.\n\n"
@@ -483,7 +551,9 @@ def _single_pass_prompt(question: str, blocks: list[str]) -> str:
         "## Key points\nThe most important supporting facts, each cited.\n\n"
         "## Disagreements and gaps\nWhere sources conflict, and what the "
         "sources do not cover.\n\n"
-        f"Question: {question}\n\n" + "\n\n".join(blocks)
+        + (_EVIDENCE_CONTRACT if evidence else "")
+        + f"Question: {question}\n\n"
+        + "\n\n".join(blocks)
     )
 
 
@@ -503,7 +573,7 @@ def _map_prompt(question: str, index: int, source: ResearchSource, chunk: str) -
 _RELEVANCE_SKIP = "(no relevant content)"
 
 
-def _reduce_prompt(question: str, notes: list[str]) -> str:
+def _reduce_prompt(question: str, notes: list[str], *, evidence: bool = False) -> str:
     return (
         "You are a research assistant. The notes below were extracted from "
         "several web pages, each labeled [S1], [S2], ... Write the final "
@@ -514,8 +584,10 @@ def _reduce_prompt(question: str, notes: list[str]) -> str:
         "## Key points\nThe most important supporting facts, each cited.\n\n"
         "## Disagreements and gaps\nWhere sources conflict, and what the "
         "notes do not cover.\n\n"
-        f"Question: {question}\n\n"
-        "Notes:\n" + "\n".join(notes)
+        + (_EVIDENCE_CONTRACT if evidence else "")
+        + f"Question: {question}\n\n"
+        + "Notes:\n"
+        + "\n".join(notes)
     )
 
 
@@ -593,12 +665,19 @@ def _mapped_notes(
     return notes
 
 
-def _ask(cfg: BridgeConfig, question: str, material: list[tuple[ResearchSource, str]]) -> str:
+def _ask(
+    cfg: BridgeConfig,
+    question: str,
+    material: list[tuple[ResearchSource, str]],
+    *,
+    evidence: bool = False,
+) -> str:
     """Single-pass when the material fits one prompt; map/reduce above that."""
     total = sum(len(text) for _, text in material)
     if total <= _SINGLE_PASS_BUDGET:
         return _gemini_complete(
-            cfg, _single_pass_prompt(question, _material_blocks(question, material))
+            cfg,
+            _single_pass_prompt(question, _material_blocks(question, material), evidence=evidence),
         )
     notes = _mapped_notes(cfg, question, material)
     if not notes:
@@ -610,7 +689,7 @@ def _ask(cfg: BridgeConfig, question: str, material: list[tuple[ResearchSource, 
             break
         reduce_input.append(note)
         used += len(note)
-    return _gemini_complete(cfg, _reduce_prompt(question, reduce_input))
+    return _gemini_complete(cfg, _reduce_prompt(question, reduce_input, evidence=evidence))
 
 
 def _deterministic_answer(question: str, material: list[tuple[ResearchSource, str]]) -> str:
@@ -676,6 +755,83 @@ def _relabel_answer(answer: str, sources: list[ResearchSource]) -> str:
     return answer
 
 
+# ─── evidence verification ──────────────────────────────────────────────────
+
+
+def _normalize_for_match(text: str) -> str:
+    """Collapse whitespace and lowercase, so quotes survive rewrapping."""
+    return re.sub(r"\s+", " ", text).strip().lower()
+
+
+def _parse_evidence(answer: str) -> tuple[str, list[dict[str, Any]]]:
+    """Strip the fenced evidence block(s) and return the parsed entries.
+
+    Every ```evidence fence is removed from the displayed answer whatever it
+    contains -- leftover fences would leak model plumbing into user output.
+    Only well-formed entries survive parsing: a JSON list of objects with an
+    integer ``source`` >= 1 and a list of string ``quotes``. Quotes are
+    capped so one bloated block cannot dominate the output. An absent or
+    malformed block returns no entries -- never a guess.
+    """
+    blocks = _EVIDENCE_RE.findall(answer)
+    cleaned = _EVIDENCE_RE.sub("", answer).strip()
+    entries: list[dict[str, Any]] = []
+    for block in blocks[:1]:  # a model that repeats the block gets one chance
+        try:
+            data = json.loads(block.strip())
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(data, list):
+            continue
+        for item in data[:_EVIDENCE_MAX_ENTRIES]:
+            if not isinstance(item, dict):
+                continue
+            source = item.get("source")
+            quotes = item.get("quotes")
+            if not isinstance(source, int) or isinstance(source, bool) or source < 1:
+                continue
+            if not isinstance(quotes, list):
+                continue
+            kept = [q.strip() for q in quotes if isinstance(q, str) and q.strip()]
+            kept = [q[:_EVIDENCE_MAX_QUOTE_CHARS] for q in kept[:_EVIDENCE_MAX_QUOTES]]
+            if not kept:
+                continue
+            entries.append({"source": source, "quotes": kept})
+    return cleaned, entries
+
+
+def _verify_citations(
+    entries: list[dict[str, Any]], material: list[tuple[ResearchSource, str]]
+) -> list[Citation]:
+    """Check each offered quote against the text this run actually fetched.
+
+    Material position i is source number i+1 (the prompt's numbering). A
+    source number beyond the material is the model inventing evidence for a
+    source that contributed nothing, so that entry is dropped entirely.
+    Matching is whitespace- and case-insensitive: models routinely rewrap
+    paragraphs, and demanding byte equality would mark honest quotes as
+    fake while fooling no attacker who can write the page anyway -- the
+    untrusted markers and the citation table carry that trust boundary.
+    """
+    pages = {index: _normalize_for_match(text) for index, (_, text) in enumerate(material, 1)}
+    citations: list[Citation] = []
+    for entry in entries:
+        number = int(entry["source"])
+        if number not in pages:
+            continue
+        quotes: list[str] = entry["quotes"]
+        verified = [_normalize_for_match(quote) in pages[number] for quote in quotes]
+        citations.append(Citation(marker=f"S{number}", quotes=quotes, verified=verified))
+    return citations
+
+
+def _iso(ts: float | None) -> str | None:
+    """Epoch seconds as a UTC ISO-8601 stamp, or None."""
+    if ts is None:
+        return None
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def research(
     cfg: BridgeConfig,
     question: str,
@@ -687,12 +843,19 @@ def research(
     cache: ResearchCache | None = None,
     refresh: bool = False,
     concurrency: int | None = None,
+    evidence: bool = True,
 ) -> ResearchResult:
     """Fetch the pages, answer ``question`` from them, and cite [S#] sources.
 
     Never raises for dead sources or spent budgets -- those are recorded in
     the returned sources. Raises only for caller mistakes (empty question or
     URL list) and for a model answer whose citations do not match reality.
+
+    With ``evidence`` (the default), the model is additionally asked to
+    append an ```evidence block quoting the passages that back its claims;
+    the block is parsed out of the answer and every quote is checked against
+    the text this run actually fetched, so ``result.citations`` says which
+    offered evidence holds and which does not.
     """
     question = (question or "").strip()
     if not question:
@@ -721,15 +884,21 @@ def research(
 
     answer = ""
     gemini_used = False
+    citations: list[Citation] = []
     if material:
         deduped = _dedupe_boilerplate([text for _, text in material])
         material = [(source, text) for (source, _), text in zip(material, deduped, strict=True)]
         try:
-            answer = _relabel_answer(_ask(cfg, question, material).strip(), sources)
+            answer = _relabel_answer(
+                _ask(cfg, question, material, evidence=evidence).strip(), sources
+            )
             gemini_used = True
         except BridgeError as exc:
             log(cfg, f"research falling back to raw extracts: {exc}")
             answer = _deterministic_answer(question, material)
+        if gemini_used and evidence:
+            answer, entries = _parse_evidence(answer)
+            citations = _verify_citations(entries, material)
     else:
         answer = "No source could be fetched, so there is nothing to research."
 
@@ -741,21 +910,48 @@ def research(
         gemini_used=gemini_used,
         chars_fetched=sum(s.chars for s in sources),
         elapsed_sec=elapsed,
+        citations=citations,
     )
 
 
 # ─── rendering ────────────────────────────────────────────────────────────────
 
 
+def _evidence_lines(result: ResearchResult, *, fancy: bool) -> list[str]:
+    """The evidence appendix shared by the text and markdown renderers.
+
+    ``fancy`` renders check/cross marks for humans; the plain variant spells
+    them out for terminals and agents that read the text output.
+    """
+    lines: list[str] = []
+    for citation in result.citations:
+        for quote, ok in zip(citation.quotes, citation.verified, strict=True):
+            if fancy:
+                mark = "\u2713" if ok else "\u2717 unverified"
+                lines.append(f"> \u201c{quote}\u201d \u2014 [{citation.marker}] {mark}")
+            else:
+                mark = "verified" if ok else "UNVERIFIED"
+                lines.append(f'[{citation.marker}] "{quote}" ({mark})')
+    return lines
+
+
 def render_text(result: ResearchResult) -> str:
-    """Plain-text rendering: answer, source table, fetch metadata."""
-    lines = [result.answer, "", _sources_table(result.sources), "", _meta_line(result)]
+    """Plain-text rendering: answer, evidence, source table, fetch metadata."""
+    lines = [result.answer]
+    evidence = _evidence_lines(result, fancy=False)
+    if evidence:
+        lines += ["", "Evidence:", *evidence]
+    lines += ["", _sources_table(result.sources), "", _meta_line(result)]
     return "\n".join(lines)
 
 
 def render_markdown(result: ResearchResult) -> str:
-    """Markdown rendering: answer body, linked source table, metadata."""
-    lines = [result.answer, "", "## Sources", ""]
+    """Markdown rendering: answer body, evidence, linked source table, metadata."""
+    lines = [result.answer]
+    evidence = _evidence_lines(result, fancy=True)
+    if evidence:
+        lines += ["", "## Evidence", "", *evidence]
+    lines += ["", "## Sources", ""]
     index = 0
     for source in result.sources:
         if not source.ok:
@@ -773,6 +969,11 @@ def render_markdown(result: ResearchResult) -> str:
         suffix = f" ({', '.join(flags)})" if flags else ""
         title = source.title or source.url
         lines.append(f"{index}. [{title}]({source.url}){suffix} `S{index}`")
+    fetched = [s for s in result.sources if s.ok and s.fetched_at is not None]
+    if fetched:
+        stamps = ", ".join(f"S{i} {_iso(s.fetched_at)}" for i, s in enumerate(fetched, 1))
+        lines.append("")
+        lines.append(f"Fetched: {stamps}")
     lines += ["", f"*{_meta_line(result)}*"]
     return "\n".join(lines)
 
@@ -795,26 +996,44 @@ def render_json(result: ResearchResult) -> str:
             "skipped": source.skipped,
             "via": source.via,
             "quality": source.quality,
+            "fetched_at": _iso(source.fetched_at),
+            "last_modified": source.last_modified,
         }
         if source.ok:
             index += 1
             entry["index"] = index
             entry["marker"] = f"S{index}"
         sources.append(entry)
+    citations: list[dict[str, Any]] = [
+        {
+            "source": citation.marker,
+            "quotes": citation.quotes,
+            "verified": citation.verified,
+            "all_verified": citation.all_verified,
+        }
+        for citation in result.citations
+    ]
+    meta: dict[str, Any] = {
+        "urls_requested": len(result.sources),
+        "pages_ok": result.ok_pages,
+        "pages_failed": result.failed_pages,
+        "cache_hits": result.cache_hits,
+        "chars_fetched": result.chars_fetched,
+        "elapsed_sec": round(result.elapsed_sec, 3),
+        "version": __version__,
+    }
+    if citations:
+        offered = sum(len(c["quotes"]) for c in citations)
+        held = sum(1 for c in citations for v in c["verified"] if v)
+        meta["evidence_offered"] = offered
+        meta["evidence_verified"] = held
     payload = {
         "question": result.question,
         "answer": result.answer,
         "gemini_used": result.gemini_used,
         "sources": sources,
-        "meta": {
-            "urls_requested": len(result.sources),
-            "pages_ok": result.ok_pages,
-            "pages_failed": result.failed_pages,
-            "cache_hits": result.cache_hits,
-            "chars_fetched": result.chars_fetched,
-            "elapsed_sec": round(result.elapsed_sec, 3),
-            "version": __version__,
-        },
+        "citations": citations,
+        "meta": meta,
     }
     return json.dumps(payload, indent=2, ensure_ascii=False)
 
@@ -848,6 +1067,7 @@ def research_cli(
     no_cache: bool = False,
     refresh: bool = False,
     fetch_concurrency: int | None = None,
+    evidence: bool | None = None,
 ) -> str:
     """One-shot research for the CLI: renders in the requested format."""
     cache = None if no_cache else ResearchCache(ResearchCache.default_path(), cache_ttl)
@@ -861,6 +1081,7 @@ def research_cli(
         cache=cache,
         refresh=refresh,
         concurrency=fetch_concurrency,
+        evidence=cfg.research_evidence if evidence is None else evidence,
     )
     if fmt == "json":
         return render_json(result)
@@ -896,6 +1117,8 @@ def run_research_tool(cfg: BridgeConfig, arguments: dict[str, Any]) -> str:
     fetch_concurrency = _int(
         "fetch_concurrency", int(getattr(cfg, "research_concurrency", 3)), 1, HARD_FETCH_CONCURRENCY
     )
+    raw_evidence = arguments.get("evidence")
+    evidence = raw_evidence if isinstance(raw_evidence, bool) else None
     return research_cli(
         cfg,
         urls=urls,
@@ -904,4 +1127,5 @@ def run_research_tool(cfg: BridgeConfig, arguments: dict[str, Any]) -> str:
         max_pages=max_pages,
         max_chars_per_page=max_chars,
         fetch_concurrency=fetch_concurrency,
+        evidence=evidence,
     )

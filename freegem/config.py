@@ -45,6 +45,10 @@ DEFAULT_CONFIG: Mapping[str, Any] = {
     # robots.txt cache lifetime per origin; entries revalidate conditionally
     # (ETag / Last-Modified) after this many seconds.
     "robots_cache_ttl_sec": 600,
+    # Ask the research answer to append an evidence block quoting the
+    # passages that back its claims; every quote is verified against the
+    # text actually fetched and the result carries per-quote flags.
+    "research_evidence": True,
     # > 0 enables the server's short admission queue: requests beyond the
     # concurrency cap wait up to this many seconds for a slot instead of
     # getting an immediate 503. 0 keeps today's refuse-fast behavior.
@@ -76,6 +80,7 @@ class BridgeConfig:
     research_concurrency: int = DEFAULT_CONFIG["research_concurrency"]
     robots_cache_ttl_sec: int = DEFAULT_CONFIG["robots_cache_ttl_sec"]
     request_queue_wait_sec: float = DEFAULT_CONFIG["request_queue_wait_sec"]
+    research_evidence: bool = DEFAULT_CONFIG["research_evidence"]
 
     # ---- construction -------------------------------------------------------
 
@@ -134,6 +139,7 @@ class BridgeConfig:
             "research_concurrency": self.research_concurrency,
             "robots_cache_ttl_sec": self.robots_cache_ttl_sec,
             "request_queue_wait_sec": self.request_queue_wait_sec,
+            "research_evidence": self.research_evidence,
             # Booleans and paths only; never the token itself.
             "xsrf_token_set": bool(self.xsrf_token),
             "cookie": "configured" if self.cookie_file else "none (anonymous)",

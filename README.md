@@ -262,6 +262,19 @@ serialize). Budget decisions stay strictly in request order.
 `nav_only`, or `empty` in the JSON output, so a caller can tell a real
 article from a navigation stub without reading it.
 
+- **Verified evidence quotes** — with evidence mode on (default; config
+`research_evidence`, CLI `--evidence/--no-evidence`, MCP `evidence`), the
+answer is followed by verbatim quotes for every cited source, each checked
+against the text FreeGem actually fetched and flagged verified or
+`UNVERIFIED`. A quote the model fabricated stays visible but is marked, so
+fabrication is distinguishable from a verifier miss. A source that failed to
+fetch is reported as missing evidence — never as proof a claim is false.
+
+- **Source timestamps** — every fetched source records when it was fetched
+(`fetched_at`, ISO-8601 UTC; cache hits keep the original fetch time) and the
+origin's `Last-Modified` header when it sent one, so a reader can judge how
+stale the evidence is.
+
 - **Hard budgets** — at most 10 pages per call, a per-page character cap
 (`--max-chars-per-page`, default 12 000), and a total fetched-character
 budget (`--total-budget`, default 80 000). URLs that would push the run
@@ -286,7 +299,9 @@ markers limit, but do not eliminate, it.
 
 - **Formats** — `--format text|markdown|json`; the JSON schema documents
 per-source status (`ok`, `error`, `truncated`, `from_cache`, `skipped`,
-`chars`) and run metadata (cache hits, failed pages, timing, version).
+`chars`, `fetched_at`, `last_modified`), the verified evidence `citations`,
+and run metadata (cache hits, failed pages, evidence offered vs verified,
+timing, version).
 
 Not a crawler: hand it the specific pages to compare. No JavaScript rendering
 (same posture as the scraper), and cache entries store extracted text only —
@@ -390,6 +405,7 @@ cp config.example.json config.json
 | `research_concurrency` | `3` | Parallel page fetches per research call (same-host fetches serialize; capped at 8) |
 | `robots_cache_ttl_sec` | `600` | robots.txt cache lifetime per origin; revalidated with ETag / Last-Modified after expiry |
 | `request_queue_wait_sec` | `0.0` | Seconds a burst may wait for a free slot before getting 503 + `Retry-After`; `0` sheds immediately |
+| `research_evidence` | `true` | Quote and verify verbatim evidence per cited source in research answers |
 
 Environment variables override the file: `GEMINI_BL`, `GEMINI_AUTH_USER`,
 `GEMINI_XSRF_TOKEN`, `GEMINI_PROXY`, `GEMINI_COOKIE_FILE`, `FREEGEM_CONFIG`.
@@ -528,7 +544,7 @@ pytest                  # tests
 ```
 
 The test suite runs entirely offline: every Gemini call is mocked, so CI needs
-no credentials and no network. The current suite contains 395 tests. See
+no credentials and no network. The current suite contains 416 tests. See
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the layering rules and
 [`CONTRIBUTING.md`](CONTRIBUTING.md) for how to add a model or an endpoint.
 
@@ -597,7 +613,7 @@ original.
 
 - `gemini_advisor` and the `gemini_deep_think` output contract.
 
-- A 395-test suite that runs offline with no credentials.
+- A 416-test suite that runs offline with no credentials.
 
 Upstream's own README credits its development agent capability to
 [GenericAgent](https://github.com/lsdefine/GenericAgent), originally shared via

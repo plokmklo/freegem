@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Nothing yet.
 
+## [2.4.0] — 2026-10-11
+
+### Added
+
+- **Verified evidence quotes for research** — with `research_evidence` on
+  (default; CLI `--evidence/--no-evidence`, MCP `evidence`), the answer is
+  followed by a per-source evidence appendix. The model is asked to quote the
+  passages that back its claims; every quote is checked against the text
+  actually fetched (whitespace/case-insensitive) and flagged verified or
+  `UNVERIFIED` — fabricated quotes stay visible and marked, never silently
+  dropped. The JSON output carries `citations` plus `evidence_offered` /
+  `evidence_verified` counters; markdown renders an Evidence section.
+- **Source timestamps** — each fetched source records `fetched_at` (ISO-8601
+  UTC; cache hits keep the original fetch time) and the origin's
+  `Last-Modified` header when present. The research cache round-trips both,
+  including entries written by older versions.
+- **Failed-vs-contradicted prompt contract** — research prompts now state
+  explicitly that a source which failed to fetch or extracted to a navigation
+  stub means evidence is unavailable, never proof a claim is false, and that
+  contradictions must say which source says what.
+- **Tool-call authorization** — emitted tool calls are validated against the
+  tools the request actually declared on all three faces (OpenAI chat
+  completions, OpenAI Responses, Google `generateContent`). A fenced call for
+  an undeclared tool is dropped instead of forwarded; a named `tool_choice`
+  keeps only calls to that name; the Google face honors
+  `allowedFunctionNames`. Argument contents are deliberately not
+  second-guessed.
+
+### Tests
+
+- 20 new tests (416 total): evidence parsing/verification/rendering, cache
+  round-trips, config/MCP flag plumbing, and tool-call validation on both
+  wire shapes.
+
 ## [2.3.0] — 2026-10-11
 
 ### Performance

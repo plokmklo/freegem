@@ -34,8 +34,9 @@
   "proxy": null,
   "log_requests": true,
 
-  "_comment_performance": "research_concurrency = parallel page fetches per research call (same-host fetches always serialize). robots_cache_ttl_sec = robots.txt cache lifetime per origin. request_queue_wait_sec > 0 lets bursts wait briefly for a free slot instead of getting an immediate 503.",
+  "_comment_performance": "research_concurrency = parallel page fetches per research call (same-host fetches always serialize). robots_cache_ttl_sec = robots.txt cache lifetime per origin. request_queue_wait_sec > 0 lets bursts wait briefly for a free slot instead of getting an immediate 503. research_evidence = quote and verify verbatim evidence per cited source in research answers.",
   "research_concurrency": 3,
   "robots_cache_ttl_sec": 600,
-  "request_queue_wait_sec": 0.0
+  "request_queue_wait_sec": 0.0,
+  "research_evidence": true
 }

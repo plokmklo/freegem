@@ -101,6 +101,10 @@ class ScrapeResult:
     #: How the text was obtained: "html" (fetch + HTML extraction) or
     #: "mediawiki-api" (a site's own structured API -- no scraping involved).
     via: str = "html"
+    #: The origin server's Last-Modified header, when it sent one. Research
+    #: results surface this per source so a reader can judge how fresh the
+    #: evidence is. It is server-asserted metadata, never verified.
+    last_modified: str | None = None
 
 
 def extraction_quality(text: str) -> str:
@@ -686,6 +690,7 @@ def _mediawiki_extract(cfg: BridgeConfig, url: str, max_chars: int) -> ScrapeRes
         truncated=truncated,
         links=[],
         via="mediawiki-api",
+        last_modified=response.headers.get("Last-Modified"),
     )
 
 
@@ -729,6 +734,7 @@ def scrape_page(
     mime = content_type.split(";")[0].strip().lower()
     if mime and mime not in _ALLOWED_TYPES:
         raise ScrapeError(f"refusing content type {mime!r}; only HTML and text are fetched")
+    last_modified = response.headers.get("Last-Modified")
 
     html = _decode_body(_read_capped(response), content_type)
 
@@ -762,6 +768,7 @@ def scrape_page(
         text=text,
         truncated=truncated,
         links=_dedupe_links(extractor.links),
+        last_modified=last_modified,
     )
 
 

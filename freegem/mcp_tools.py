@@ -107,7 +107,10 @@ TOOL_SPECS: list[dict[str, Any]] = [
         "description": (
             "Fetch up to max_pages URLs with the same SSRF/robots/caps guard as "
             "web_scrape, then answer one question across all of them with inline "
-            "[S1], [S2] citations, key points, and disagreements/gaps. Successful "
+            "[S1], [S2] citations, key points, and disagreements/gaps. With "
+            "evidence enabled (default), the answer is followed by per-source "
+            "verbatim quotes, each checked against the text actually fetched and "
+            "flagged verified or UNVERIFIED. Successful "
             "fetches are cached locally with a TTL; per-page and total character "
             "budgets are enforced; page text stays inside untrusted-content "
             "markers end to end. When Gemini is unavailable, returns labeled raw "
@@ -392,16 +395,18 @@ def build_server(cfg: BridgeConfig, name: str = "freegem") -> Any:
         question: str,
         max_pages: int = 5,
         max_chars_per_page: int = 12000,
+        evidence: bool = True,
     ) -> str:
         """Answer one question from several pages, with [S1]..[Sn] citations.
 
         Fetches each URL with the same SSRF/robots/5MB guard as web_scrape,
         extracts readable text, and returns a cited answer (Answer / Key
         points / Disagreements and gaps) plus the authoritative source table.
-        Successful fetches are cached locally with a 30-minute TTL, so repeated
-        calls do not re-download pages. Per-page and total character budgets
-        apply. When Gemini is unavailable, labeled raw extracts come back
-        instead of an error.
+        With evidence on, verified verbatim quotes per cited source follow the
+        answer. Successful fetches are cached locally with a 30-minute TTL, so
+        repeated calls do not re-download pages. Per-page and total character
+        budgets apply. When Gemini is unavailable, labeled raw extracts come
+        back instead of an error.
 
         Args:
             urls: The pages to research, http/https (2-10 works best).
@@ -409,6 +414,8 @@ def build_server(cfg: BridgeConfig, name: str = "freegem") -> Any:
             max_pages: Fetch at most this many URLs (1-10, default 5).
             max_chars_per_page: Truncate each page's text to this many
                 characters (500-50000, default 12000).
+            evidence: Quote and verify supporting passages per source
+                (default True).
         """
         return run_tool(
             cfg,
@@ -418,6 +425,7 @@ def build_server(cfg: BridgeConfig, name: str = "freegem") -> Any:
                 "question": question,
                 "max_pages": max_pages,
                 "max_chars_per_page": max_chars_per_page,
+                "evidence": evidence,
             },
         )
 

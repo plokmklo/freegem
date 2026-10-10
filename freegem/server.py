@@ -31,6 +31,7 @@ from .tools import (
     messages_to_prompt,
     parse_function_calls,
     parse_tool_calls,
+    validate_tool_calls,
 )
 
 __all__ = ["GeminiHandler", "ThreadedServer", "estimate_tokens"]
@@ -521,6 +522,9 @@ class GeminiHandler(BaseHTTPRequestHandler):
         tool_calls = None
         if use_tools and text:
             text, tool_calls = parse_tool_calls(text)
+            # A fenced call for a tool the request never declared would hand
+            # the client something it cannot route; drop it here.
+            tool_calls = validate_tool_calls(tool_calls, tools, tool_choice)
         message: dict[str, Any] = {"role": "assistant", "content": text or None}
         if tool_calls:
             message["tool_calls"] = tool_calls
@@ -701,6 +705,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
         tool_calls = None
         if use_tools and text:
             text, tool_calls = parse_tool_calls(text)
+            tool_calls = validate_tool_calls(tool_calls, tools, tool_choice)
 
         output: list[dict] = []
         if tool_calls:
@@ -923,6 +928,10 @@ class GeminiHandler(BaseHTTPRequestHandler):
         parts: list[dict] = []
         if has_tools and text:
             cleaned, function_calls = parse_function_calls(text)
+            function_calls = validate_tool_calls(function_calls, tools_present)
+            allowed = fc_config.get("allowedFunctionNames")
+            if isinstance(allowed, list) and allowed and all(isinstance(n, str) for n in allowed):
+                function_calls = [c for c in function_calls if c.get("name") in allowed]
             if function_calls:
                 if cleaned:
                     parts.append({"text": cleaned})

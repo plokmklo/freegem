@@ -5,12 +5,14 @@ fixture directory, the logic probably belongs in a caller.
 """
 
 import unittest
+from typing import ClassVar
 
 from freegem.tools import (
     google_contents_to_prompt,
     messages_to_prompt,
     parse_function_calls,
     parse_tool_calls,
+    validate_tool_calls,
 )
 
 TOOLS = [
@@ -498,3 +500,50 @@ class MalformedInputTests(unittest.TestCase):
     def test_null_fn_args_default_to_object(self) -> None:
         _, calls = parse_function_calls('```function_call\n{"name": "a", "args": null}\n```')
         self.assertEqual(calls[0]["args"], {})
+
+
+class ValidateToolCallsTests(unittest.TestCase):
+    """Undeclared or unauthorized calls never reach the client."""
+
+    GOOGLE_TOOLS: ClassVar[list[dict]] = [{"name": "get_weather", "parameters": {"type": "object"}}]
+
+    def _openai_call(self, name: str) -> dict:
+        return {
+            "id": "call_x",
+            "type": "function",
+            "function": {"name": name, "arguments": "{}"},
+        }
+
+    def test_undeclared_name_dropped_declared_kept(self) -> None:
+        calls = [self._openai_call("get_weather"), self._openai_call("delete_all")]
+        kept = validate_tool_calls(calls, TOOLS, "auto")
+        self.assertEqual([c["function"]["name"] for c in kept], ["get_weather"])
+
+    def test_named_tool_choice_filters_other_names(self) -> None:
+        second = {
+            "type": "function",
+            "function": {"name": "other_tool", "parameters": {"type": "object"}},
+        }
+        calls = [self._openai_call("get_weather"), self._openai_call("other_tool")]
+        kept = validate_tool_calls(calls, [*TOOLS, second], {"function": {"name": "other_tool"}})
+        self.assertEqual([c["function"]["name"] for c in kept], ["other_tool"])
+
+    def test_google_shaped_calls_against_google_tools(self) -> None:
+        calls = [{"name": "get_weather", "args": {}}, {"name": "ghost", "args": {}}]
+        kept = validate_tool_calls(calls, self.GOOGLE_TOOLS, "auto")
+        self.assertEqual([c["name"] for c in kept], ["get_weather"])
+
+    def test_allowed_function_names_semantics_via_named_choice(self) -> None:
+        calls = [{"name": "a", "args": {}}, {"name": "b", "args": {}}]
+        tools = [{"name": "a"}, {"name": "b"}]
+        kept = validate_tool_calls(calls, tools, {"function": {"name": "b"}})
+        self.assertEqual([c["name"] for c in kept], ["b"])
+
+    def test_no_declared_tools_keeps_calls_defensively(self) -> None:
+        calls = [{"name": "anything", "args": {}}]
+        self.assertEqual(validate_tool_calls(calls, None), calls)
+        self.assertEqual(validate_tool_calls([], TOOLS), [])
+
+    def test_call_without_name_is_dropped(self) -> None:
+        calls = [{"function": {"arguments": "{}"}}]
+        self.assertEqual(validate_tool_calls(calls, TOOLS), [])
