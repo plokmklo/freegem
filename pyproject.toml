@@ -1,0 +1,115 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gemini-bridge"
+version = "2.0.0"
+description = "Free Gemini, shaped as the APIs you already use: OpenAI-compatible, Google-native, and MCP."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+authors = [{ name = "gemini-bridge contributors" }]
+keywords = [
+    "gemini",
+    "openai",
+    "api",
+    "proxy",
+    "mcp",
+    "model-context-protocol",
+    "llm",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+# Core has no third-party dependencies: the stdlib server works as-is.
+dependencies = []
+
+[project.optional-dependencies]
+# True token-by-token streaming. Without it the bridge still works but returns
+# the whole reply in one chunk.
+streaming = ["httpx>=0.25"]
+# The MCP face.
+mcp = ["mcp>=1.0"]
+# Everything a typical install wants.
+full = ["httpx>=0.25", "mcp>=1.0"]
+dev = [
+    "httpx>=0.25",
+    "mcp>=1.0",
+    "pytest>=7",
+    "pytest-cov>=4",
+    "ruff>=0.4",
+    "mypy>=1.8",
+]
+
+[project.urls]
+Homepage = "https://github.com/YOUR-USERNAME/gemini-bridge"
+Documentation = "https://github.com/YOUR-USERNAME/gemini-bridge#readme"
+Issues = "https://github.com/YOUR-USERNAME/gemini-bridge/issues"
+
+[project.scripts]
+gemini-bridge = "gemini_bridge.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["gemini_bridge*"]
+
+[tool.setuptools.package-data]
+gemini_bridge = ["py.typed"]
+
+[tool.pytest.ini_options]
+minversion = "7"
+testpaths = ["gemini_bridge/tests"]
+addopts = "-q --strict-markers"
+filterwarnings = ["error::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # isort
+    "B",        # bugbear
+    "UP",       # pyupgrade
+    "C4",       # comprehensions
+    "SIM",      # simplify
+    "RUF",
+]
+ignore = [
+    "E501",   # line length handled separately
+    "B008",   # function calls in defaults are fine here
+    "RUF001", # ambiguous unicode: we use em-dashes and arrows in text on purpose
+    "RUF002",
+    "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"gemini_bridge/tests/*" = ["B017", "SIM"]
+
+[tool.mypy]
+python_version = "3.9"
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+strict_equality = true
+
+[[tool.mypy.overrides]]
+module = ["mcp.*", "httpx.*"]
+ignore_missing_imports = true

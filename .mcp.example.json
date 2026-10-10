@@ -1,0 +1,16 @@
+{
+  "//": "Client configuration for the MCP face. Copy into your MCP client's config file.",
+  "mcpServers": {
+    "gemini-bridge": {
+      "//": "stdio: the client launches the server itself. Requires the mcp extra.",
+      "type": "stdio",
+      "command": "gemini-bridge",
+      "args": ["mcp", "--transport", "stdio"]
+    },
+    "gemini-bridge-sse": {
+      "//": "sse: connects to an already-running server. Start it with: gemini-bridge mcp --transport sse",
+      "type": "sse",
+      "url": "http://127.0.0.1:8768/sse"
+    }
+  }
+}

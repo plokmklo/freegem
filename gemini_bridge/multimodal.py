@@ -1,0 +1,215 @@
+"""Image upload for multimodal requests.
+
+Gemini Web does not accept inline image bytes: the bytes go to a separate
+resumable-upload endpoint and only a reference id comes back. This module does
+that handshake and also fetches remote images the client passed as URLs.
+"""
+
+from __future__ import annotations
+
+import base64
+import binascii
+import re
+import ssl
+import urllib.parse
+import urllib.request
+from typing import Dict, Optional, Tuple
+
+from .config import BridgeConfig
+from .gemini import (
+    BridgeError,
+    _ssl_ctx,
+    account_prefix,
+    load_cookie,
+    log,
+    make_sapisidhash,
+)
+
+__all__ = ["detect_image_mime", "fetch_image_bytes", "upload_image", "reset_page_tokens"]
+
+_SIGNATURES: Tuple[Tuple[bytes, str], ...] = (
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+    (b"BM", "image/bmp"),
+    (b"II*\x00", "image/tiff"),
+    (b"MM\x00*", "image/tiff"),
+)
+_WEBP = (b"RIFF", b"WEBP")
+_FTYP_BRANDS = {
+    b"avif": "image/avif",
+    b"avis": "image/avif",
+    b"heic": "image/heic",
+    b"heix": "image/heic",
+    b"hevc": "image/hevc",
+    b"hevx": "image/hevc",
+}
+
+_PAGE_TOKENS: Dict[str, object] = {"tokens": {}, "ts": 0.0}
+_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+
+
+def detect_image_mime(data: bytes, fallback: str = "image/png") -> str:
+    """Infer a raster MIME type from magic bytes; ``fallback`` when unknown."""
+    if not isinstance(data, (bytes, bytearray)):
+        return fallback
+    for signature, mime in _SIGNATURES:
+        if data.startswith(signature):
+            return mime
+    if data[:4] == _WEBP[0] and data[8:12] == _WEBP[1]:
+        return "image/webp"
+    if len(data) >= 12 and data[4:8] == b"ftyp":
+        brand = data[8:12]
+        if brand in _FTYP_BRANDS:
+            return _FTYP_BRANDS[brand]
+    return fallback
+
+
+def _page_tokens(cfg: BridgeConfig) -> Dict[str, str]:
+    """Fetch and cache the upload-session tokens embedded in Gemini's page."""
+    import time
+
+    now = time.time()
+    if now - float(_PAGE_TOKENS["ts"]) < 600 and _PAGE_TOKENS["tokens"]:
+        return _PAGE_TOKENS["tokens"]  # type: ignore[return-value]
+
+    headers = {"User-Agent": _UA}
+    cookie_str, sapisid = load_cookie(cfg)
+    if cookie_str:
+        headers["Cookie"] = cookie_str
+    if sapisid:
+        headers["Authorization"] = make_sapisidhash(str(sapisid))
+
+    tokens: Dict[str, str] = {}
+    try:
+        url = f"https://gemini.google.com{account_prefix(cfg)}/app"
+        request = urllib.request.Request(url, headers=headers)
+        if cfg.proxy:
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({"http": cfg.proxy, "https": cfg.proxy}),
+                urllib.request.HTTPSHandler(context=_ssl_ctx()),
+            )
+            response = opener.open(request, timeout=30)
+        else:
+            response = urllib.request.urlopen(request, context=_ssl_ctx(), timeout=30)
+        html = response.read().decode("utf-8", errors="replace")
+
+        for key, pattern in (
+            ("push_id", r'"qKIAYe":"([^"]+)"'),
+            ("pctx", r'"Ylro7b":"([^"]+)"'),
+        ):
+            match = re.search(pattern, html)
+            if match:
+                tokens[key] = match.group(1)
+    except Exception as exc:  # noqa: BLE001
+        log(cfg, f"upload-token fetch failed: {exc}")
+
+    _PAGE_TOKENS.update({"tokens": tokens, "ts": now})
+    return tokens
+
+
+def reset_page_tokens() -> None:
+    """Force the next upload to re-read tokens from the page (used by tests)."""
+    _PAGE_TOKENS.update({"tokens": {}, "ts": 0.0})
+
+
+def upload_image(cfg: BridgeConfig, data: bytes, mime: str, filename: str = "image.png") -> str:
+    """Upload bytes and return the reference id to put in the request payload."""
+    tokens = _page_tokens(cfg)
+    push_id = str(tokens.get("push_id", "feeds/mcudyrk2a4khkz"))
+    pctx = str(tokens.get("pctx", "CgcSBWjK7pYx"))
+    cookie_str, sapisid = load_cookie(cfg)
+
+    start_headers = {
+        "Push-ID": push_id,
+        "X-Tenant-Id": "bard-storage",
+        "X-Client-Pctx": pctx,
+        "X-Goog-Upload-Header-Content-Length": str(len(data)),
+        "X-Goog-Upload-Header-Content-Type": mime,
+        "X-Goog-Upload-Protocol": "resumable",
+        "X-Goog-Upload-Command": "start",
+        "Content-Type": "application/x-www-form-urlencoded;charset=utf-8",
+        "User-Agent": _UA,
+    }
+    if cookie_str:
+        start_headers["Cookie"] = cookie_str
+    if sapisid:
+        start_headers["Authorization"] = make_sapisidhash(str(sapisid))
+
+    start_url = "https://content-push.googleapis.com/upload/"
+    request = urllib.request.Request(start_url, data=b"", headers=start_headers, method="POST")
+    if cfg.proxy:
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({"http": cfg.proxy, "https": cfg.proxy}),
+            urllib.request.HTTPSHandler(context=_ssl_ctx()),
+        )
+        response = opener.open(request, timeout=30)
+    else:
+        response = urllib.request.urlopen(request, context=_ssl_ctx(), timeout=30)
+
+    upload_url = response.headers.get("X-Goog-Upload-URL") or response.headers.get(
+        "x-goog-upload-url"
+    )
+    if not upload_url:
+        raise BridgeError("upload endpoint returned no upload URL")
+
+    upload_headers = {
+        "X-Goog-Upload-Command": "upload, finalize",
+        "X-Goog-Upload-Offset": "0",
+        "Content-Type": "application/octet-stream",
+        "User-Agent": _UA,
+    }
+    if cookie_str:
+        upload_headers["Cookie"] = cookie_str
+    if sapisid:
+        upload_headers["Authorization"] = make_sapisidhash(str(sapisid))
+
+    request2 = urllib.request.Request(upload_url, data=data, headers=upload_headers, method="POST")
+    if cfg.proxy:
+        response2 = opener.open(request2, timeout=60)
+    else:
+        response2 = urllib.request.urlopen(request2, context=_ssl_ctx(), timeout=60)
+    file_ref = response2.read().decode("utf-8", errors="replace").strip()
+
+    if not file_ref.startswith("/"):
+        raise BridgeError(f"upload returned an unusable reference: {file_ref[:64]!r}")
+    log(cfg, f"uploaded {filename} ({len(data)} bytes) -> {file_ref[:48]}...")
+    return file_ref
+
+
+def fetch_image_bytes(cfg: BridgeConfig, url: str) -> bytes:
+    """Download a remote image. ``file://`` and friends are refused."""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        log(cfg, f"refusing image fetch for scheme {parsed.scheme or 'none'!r}")
+        return b""
+    try:
+        request = urllib.request.Request(url, headers={"User-Agent": _UA})
+        if cfg.proxy:
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({"http": cfg.proxy, "https": cfg.proxy}),
+                urllib.request.HTTPSHandler(context=ssl.create_default_context()),
+            )
+            response = opener.open(request, timeout=30)
+        else:
+            response = urllib.request.urlopen(request, context=ssl.create_default_context(), timeout=30)
+        return response.read()
+    except Exception as exc:  # noqa: BLE001
+        log(cfg, f"image fetch failed: {exc}")
+        return b""
+
+
+def decode_data_url(url: str) -> Optional[Tuple[bytes, str]]:
+    """Decode ``data:[mime][;base64],<payload>`` into (bytes, mime)."""
+    match = re.match(r"^data:([^;,]+)?(;base64)?,(.*)$", url, re.DOTALL)
+    if not match:
+        return None
+    mime = match.group(1) or "image/png"
+    payload = match.group(3)
+    try:
+        if match.group(2):
+            return base64.b64decode(payload, validate=True), mime
+        return urllib.parse.unquote_to_bytes(payload), mime
+    except (ValueError, TypeError, binascii.Error):
+        return None

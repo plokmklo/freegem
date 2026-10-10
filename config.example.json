@@ -1,0 +1,36 @@
+# Config template — copy to config.json and edit.
+#
+#   cp config.example.json config.json
+#
+# Every field is optional; anything omitted falls back to the default shown
+# below. Values can also come from environment variables, which take priority
+# over the file (useful for Docker and CI):
+#
+#   GEMINI_BL, GEMINI_AUTH_USER, GEMINI_XSRF_TOKEN, GEMINI_PROXY,
+#   GEMINI_COOKIE_FILE, GEMINI_BRIDGE_CONFIG
+#
+# NOTE: there is deliberately no api_keys field. This project has no
+# authentication layer. Access control is that the server binds to loopback.
+# Expose it beyond your own machine only behind a reverse proxy that does the
+# auth, because the thing you would be protecting is your Google session.
+{
+  "host": "127.0.0.1",
+  "port": 8081,
+  "default_model": "gemini-3.6-flash",
+
+  "_comment_session": "Authentication is optional. Anonymous mode works for all models; a session cookie improves reliability, avoids rate limits, and is required for real Pro routing.",
+  "cookie_file": null,
+  "auth_user": null,
+  "xsrf_token": null,
+
+  "_comment_bl": "Gemini's frontend build tag. Refreshed automatically at startup by `gemini-bridge serve`; set it only to pin a version.",
+  "gemini_bl": "boq_assistant-bard-web-server_20260716.08_p0",
+
+  "_comment_behaviour": "temporary_chats=true keeps requests out of your Gemini account history.",
+  "temporary_chats": true,
+  "retry_attempts": 3,
+  "retry_delay_sec": 2,
+  "request_timeout_sec": 180,
+  "proxy": null,
+  "log_requests": true
+}
