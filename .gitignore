@@ -48,3 +48,6 @@ logs/
 # Editor lock files (Word/Office leaves these when a doc is open)
 ~$*
 *.tmp
+
+# Local test/run config (may point at a session file)
+cfg.json

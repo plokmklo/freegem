@@ -1,8 +1,0 @@
-{
-  "gemini_bl": "boq_gemini-web-uiserver_20261001.12_p0",
-  "auth_user": "1",
-  "cookie_file": "C:/Users/hp/Downloads/_Code-Repos/gemini-web2api-main/gemini-auth-alt.json",
-  "default_model": "gemini-3.6-flash",
-  "temporary_chats": true,
-  "log_requests": false
-}
