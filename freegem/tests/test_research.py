@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 import shutil
 import tempfile
+import threading
+import time
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
@@ -587,3 +589,145 @@ class CLIResearchTests(_TmpDirTestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+# ─── concurrent fetching ──────────────────────────────────────────────────────
+
+
+class _TrackedFetcher:
+    """scrape_page stand-in that records how much work overlaps."""
+
+    def __init__(self, pages: dict[str, ScrapeResult], delay: float = 0.05) -> None:
+        self.pages = pages
+        self.delay = delay
+        self.calls: list[str] = []
+        self.active = 0
+        self.max_active = 0
+        self._lock = threading.Lock()
+
+    def __call__(self, cfg: BridgeConfig, url: str, **kwargs: Any) -> ScrapeResult:
+        with self._lock:
+            self.active += 1
+            self.calls.append(url)
+            self.max_active = max(self.max_active, self.active)
+        try:
+            time.sleep(self.delay)
+            if url not in self.pages:
+                raise ScrapeError(f"no fake page for {url!r}")
+            return self.pages[url]
+        finally:
+            with self._lock:
+                self.active -= 1
+
+
+class ConcurrentCollectTests(_TmpDirTestCase):
+    """The bounded fetch pool: order, budgets, per-host serialization."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.cfg = BridgeConfig(log_requests=False)
+
+    def _collect(self, urls: list[str], fetcher: Any, **kwargs: Any) -> Any:
+        from freegem.web_research import _collect_sources
+
+        kwargs.setdefault("max_pages", 10)
+        kwargs.setdefault("max_chars_per_page", 12000)
+        kwargs.setdefault("total_budget", 80000)
+        kwargs.setdefault("cache", None)
+        kwargs.setdefault("refresh", False)
+        kwargs.setdefault("concurrency", 4)
+        with mock.patch("freegem.web_scraper.scrape_page", fetcher):
+            return _collect_sources(self.cfg, urls, **kwargs)
+
+    def test_order_is_request_order_not_completion_order(self) -> None:
+        pages = {
+            f"http://{host}.test/{i}": _page(f"http://{host}.test/{i}", f"T{i}", f"body {i}")
+            for i, host in enumerate(["a", "b", "c", "d", "e", "f"], start=1)
+        }
+        fetcher = _TrackedFetcher(pages, delay=0.05)
+        urls = list(pages)
+        sources, material = self._collect(urls, fetcher)
+        self.assertEqual([s.url for s in sources], urls)
+        self.assertTrue(all(s.ok for s in sources))
+        self.assertEqual([m[1] for m in material], [f"body {i}" for i in range(1, 7)])
+        # Three workers started before the first 50 ms sleep ended.
+        self.assertGreaterEqual(fetcher.max_active, 3)
+
+    def test_same_host_fetches_serialize(self) -> None:
+        pages = {
+            f"http://a.test/{i}": _page(f"http://a.test/{i}", f"T{i}", f"body {i}")
+            for i in range(1, 5)
+        }
+        fetcher = _TrackedFetcher(pages, delay=0.03)
+        urls = list(pages)
+        sources, _material = self._collect(urls, fetcher)
+        self.assertTrue(all(s.ok for s in sources))
+        self.assertEqual(fetcher.max_active, 1)  # per-host lock: never parallel
+
+    def test_budget_boundary_respected_under_concurrency(self) -> None:
+        pages = {
+            f"http://{host}.test/{i}": _page(f"http://{host}.test/{i}", f"T{i}", "x" * 60000)
+            for i, host in enumerate(["a", "b", "c"], start=1)
+        }
+        fetcher = _TrackedFetcher(pages, delay=0.01)
+        sources, material = self._collect(list(pages), fetcher, total_budget=80000)
+        # Page 1 keeps 60000; page 2 is cut at the remaining 20000; page 3
+        # was prefetched, then discarded as skipped -- the budget holds.
+        self.assertEqual(sources[0].chars, 60000)
+        self.assertEqual(sources[1].chars, 20000)
+        self.assertTrue(sources[1].truncated)
+        self.assertEqual(sources[2].skipped, "total_budget")
+        self.assertEqual(sum(s.chars for s in sources), 80000)
+        self.assertEqual(len(material), 2)
+
+    def test_max_pages_skip_under_concurrency(self) -> None:
+        pages = {
+            f"http://a.test/{i}": _page(f"http://a.test/{i}", "t", "body") for i in range(1, 13)
+        }
+        fetcher = _TrackedFetcher(pages, delay=0.0)
+        sources, material = self._collect(list(pages), fetcher, max_pages=10, concurrency=3)
+        self.assertEqual(len(material), 10)
+        self.assertTrue(all(s.skipped == "max_pages" for s in sources[10:]))
+        self.assertEqual(len(fetcher.calls), 10)  # beyond-cap URLs never fetch
+
+    def test_failed_source_does_not_kill_the_run(self) -> None:
+        pages = {
+            "http://a.test/1": _page("http://a.test/1", "A", "content one"),
+            "http://c.test/3": _page("http://c.test/3", "C", "content three"),
+        }
+        fetcher = _TrackedFetcher(pages, delay=0.01)
+        sources, material = self._collect(
+            ["http://a.test/1", "http://b.test/2", "http://c.test/3"], fetcher
+        )
+        self.assertTrue(sources[0].ok)
+        self.assertIn("no fake page", str(sources[1].error))
+        self.assertTrue(sources[2].ok)
+        self.assertEqual([m[1] for m in material], ["content one", "content three"])
+
+    def test_via_and_quality_surface_in_json(self) -> None:
+        pages = {
+            "http://a.test/1": ScrapeResult(
+                url="http://a.test/1", title="Wiki", text="x" * 300, via="mediawiki-api"
+            ),
+            "http://b.test/2": ScrapeResult(
+                url="http://b.test/2", title="Stub", text="Jump to content"
+            ),
+        }
+
+        def gemini(cfg: BridgeConfig, prompt: str) -> str:
+            return "## Answer\nFine [S1]."
+
+        with (
+            mock.patch("freegem.web_scraper.scrape_page", _fetcher(pages)),
+            mock.patch("freegem.web_research._gemini_complete", gemini),
+        ):
+            result = research(self.cfg, "q?", ["http://a.test/1", "http://b.test/2"])
+        payload = json.loads(render_json(result))
+        by_url = {s["url"]: s for s in payload["sources"]}
+        self.assertEqual(by_url["http://a.test/1"]["via"], "mediawiki-api")
+        self.assertEqual(by_url["http://a.test/1"]["quality"], "ok")
+        self.assertEqual(by_url["http://b.test/2"]["via"], "html")
+        self.assertEqual(by_url["http://b.test/2"]["quality"], "nav_only")
+        text = render_text(result)
+        self.assertIn("mediawiki-api", text)
+        self.assertIn("nav_only", text)

@@ -7,13 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [2.3.0] — 2026-10-11
+
+### Performance
+
+- **Connection reuse for Gemini calls** — non-streaming requests now go
+  through the same pooled `httpx.Client` as streaming (when httpx is
+  installed), saving a fresh TLS handshake per request. Clients are keyed by
+  (proxy, timeout) so a config change can never silently ride an old client.
+- **Concurrent research fetching** — pages from different sites are fetched
+  in parallel by a bounded worker pool (`research_concurrency`, default 3,
+  CLI `--fetch-concurrency`, MCP `fetch_concurrency`; hard cap 8). Fetches to
+  the same host serialize via per-host locks; budget decisions stay strictly
+  in request order and total-budget accounting is unchanged.
+- **robots.txt cache** — per-origin cache with a TTL (default 600 s,
+  `robots_cache_ttl_sec`) and conditional revalidation via ETag /
+  Last-Modified, so research over N pages of one site pays for robots.txt
+  once instead of N times. Refusal semantics unchanged; a network failure
+  during revalidation serves the last known rules.
+- **Time-to-first-token logging** — both streaming API faces log `ttft` per
+  request, so buffering or upstream slowness shows up in the log.
+
+### Added
+
+- **MediaWiki source adapter** — Wikipedia/Wikimedia article URLs are fetched
+  through the site's own Action API (`prop=extracts&explaintext`) instead of
+  scraping HTML, producing clean article text with no navigation chrome.
+  Same SSRF guard, robots.txt honored for the API URL (never bypassed), same
+  size caps; per-source metadata records `via: mediawiki-api`.
+- **Extraction-quality indicators** — every research source is labeled
+  `ok` / `nav_only` / `empty` in the JSON output (and flagged in the text
+  tables), so a caller can tell a real article from a navigation stub.
+- **Optional bounded request queue** — `request_queue_wait_sec > 0` lets a
+  burst wait briefly for a free slot instead of getting an immediate 503;
+  the in-flight bound (active + queued) stays hard. Default `0` keeps the
+  refuse-fast behavior. Shed responses now carry a `Retry-After: 2` header.
+
 ### Changed
 
-- **README rewritten** — new positioning ("a local bridge to Gemini Web for
-  APIs, developer tools, and AI agents"), a What-FreeGem-provides overview,
-  an Important-project-status section, a Project-origin section, and an
-  expanded Credits section. The GitHub About description and homepage were
+- README rewritten: positioning, per-face tables, structured-adapter and
+  quality documentation; GitHub About description and repository topics
   updated separately from the README.
+- Config template documents the three new fields.
+- 29 new offline tests (395 total): robots cache, MediaWiki adapter,
+  quality labels, concurrent collection (order / budgets / per-host
+  serialization), admission queue, pooled-client keying.
 
 ## [2.2.0] — 2026-10-11
 

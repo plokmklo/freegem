@@ -563,6 +563,8 @@ class GeminiHandler(BaseHTTPRequestHandler):
         file_refs: list[str] | None,
         extra_fields: dict,
     ) -> None:
+        started = time.monotonic()
+        first_frame = True
         try:
             self._start_sse()
             self._sse(
@@ -580,6 +582,16 @@ class GeminiHandler(BaseHTTPRequestHandler):
             for delta in generate_stream(
                 self.cfg, prompt, model_id, think_mode, file_refs, extra_fields
             ):
+                if first_frame:
+                    # Time to first token: the number a 10-second answer
+                    # actually feels like. Logged per stream so regressions
+                    # (new buffering, upstream slowness) show up in the log.
+                    first_frame = False
+                    log(
+                        self.cfg,
+                        f"ttft {time.monotonic() - started:.2f}s "
+                        f"({model_name}, first frame written)",
+                    )
                 self._sse(
                     None,
                     {
@@ -948,6 +960,8 @@ class GeminiHandler(BaseHTTPRequestHandler):
         file_refs: list[str] | None,
         extra_fields: dict,
     ) -> None:
+        started = time.monotonic()
+        first_frame = True
         try:
             self._start_sse()
             collected = ""
@@ -956,6 +970,15 @@ class GeminiHandler(BaseHTTPRequestHandler):
             ):
                 if not delta:
                     continue
+                if first_frame:
+                    # Same TTFT metric the OpenAI face logs -- one number per
+                    # stream, comparable across both API faces.
+                    first_frame = False
+                    log(
+                        self.cfg,
+                        f"ttft {time.monotonic() - started:.2f}s "
+                        f"({model_name}, first frame written)",
+                    )
                 collected += delta
                 self._sse(
                     None,
@@ -1022,13 +1045,23 @@ class ThreadedServer(ThreadingMixIn, HTTPServer):
             if max_concurrent_requests is None
             else max_concurrent_requests
         )
+        # Optional short admission queue. request_queue_wait_sec > 0 lets a
+        # request WAIT (bounded) for a free slot instead of shedding it, which
+        # smooths bursts of real clients without ever letting in-flight work
+        # exceed the cap. The in-flight bound grows to active + queued, where
+        # queued == active (at most a burst's worth); the active semaphore is
+        # what actually enforces the concurrency cap.
+        self._queue_wait = max(0.0, float(getattr(config, "request_queue_wait_sec", 0.0) or 0.0))
+        queue_slots = self._max_concurrent if self._queue_wait > 0 else 0
+        self._in_flight_limit = self._max_concurrent + queue_slots
         self._active_requests = 0
         self._admit_lock = threading.Lock()
+        self._active_slots = threading.BoundedSemaphore(self._max_concurrent)
 
     def _admit(self) -> bool:
-        """Atomically claim one request slot; False when the server is full."""
+        """Atomically claim one in-flight slot; False when the server is full."""
         with self._admit_lock:
-            if self._active_requests >= self._max_concurrent:
+            if self._active_requests >= self._in_flight_limit:
                 return False
             self._active_requests += 1
             return True
@@ -1036,6 +1069,18 @@ class ThreadedServer(ThreadingMixIn, HTTPServer):
     def _release(self) -> None:
         with self._admit_lock:
             self._active_requests -= 1
+
+    def _promote(self) -> bool:
+        """Turn an in-flight slot into an ACTIVE slot (a concurrency permit).
+
+        Without the queue this is a non-blocking try -- identical to the old
+        refuse-fast behavior. With the queue it waits up to
+        request_queue_wait_sec, then gives up (the caller sheds the request
+        with a 503 + Retry-After).
+        """
+        if self._queue_wait <= 0:
+            return self._active_slots.acquire(blocking=False)
+        return self._active_slots.acquire(timeout=self._queue_wait)
 
     def process_request(self, request: Any, client_address: Any) -> None:
         # ``request`` is always a connected socket for an HTTPServer, but the
@@ -1054,7 +1099,14 @@ class ThreadedServer(ThreadingMixIn, HTTPServer):
 
     def process_request_thread(self, request: Any, client_address: Any) -> None:
         try:
-            super().process_request_thread(request, client_address)
+            # Queue-or-run: wait (bounded) for a concurrency permit, or shed.
+            if not self._promote():
+                self._refuse_busy(request)
+                return
+            try:
+                super().process_request_thread(request, client_address)
+            finally:
+                self._active_slots.release()
         finally:
             self._release()
 
@@ -1088,6 +1140,7 @@ class ThreadedServer(ThreadingMixIn, HTTPServer):
             "HTTP/1.1 503 Service Unavailable\r\n"
             "Content-Type: application/json\r\n"
             f"Content-Length: {len(body)}\r\n"
+            "Retry-After: 2\r\n"
             "Connection: close\r\n"
             "\r\n"
         ).encode("ascii")

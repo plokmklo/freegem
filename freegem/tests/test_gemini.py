@@ -632,3 +632,66 @@ class BackoffTests(unittest.TestCase):
             mock.patch("freegem.gemini.time.sleep"),
         ):
             self.assertEqual(generate(cfg, "hi", 1, 0), "recovered")
+
+
+class HttpxPoolTests(unittest.TestCase):
+    """The pooled httpx client is shared, and shared by the RIGHT settings."""
+
+    def setUp(self) -> None:
+        from freegem import gemini as gem
+
+        self.gem = gem
+        self.addCleanup(gem._HTTPX_CLIENTS.clear)
+
+    def test_same_settings_share_one_client(self) -> None:
+        if not self.gem.HAS_HTTPX:
+            self.skipTest("httpx not installed")
+        first = self.gem._httpx_client(BridgeConfig(log_requests=False))
+        second = self.gem._httpx_client(BridgeConfig(log_requests=False))
+        self.assertIs(first, second)
+
+    def test_different_timeout_gets_its_own_client(self) -> None:
+        """A timeout change must not silently ride an old cached client."""
+        if not self.gem.HAS_HTTPX:
+            self.skipTest("httpx not installed")
+        base = self.gem._httpx_client(BridgeConfig(log_requests=False))
+        slower = self.gem._httpx_client(BridgeConfig(log_requests=False, request_timeout_sec=99))
+        self.assertIsNot(base, slower)
+        proxied = self.gem._httpx_client(
+            BridgeConfig(log_requests=False, proxy="http://127.0.0.1:9")
+        )
+        self.assertIsNot(base, proxied)
+
+    def test_post_prefers_the_pooled_client(self) -> None:
+        calls: list[dict[str, Any]] = []
+
+        class FakeHttpxResponse:
+            status_code = 200
+
+            def __init__(self) -> None:
+                self.headers = {"Retry-After": "7"}
+                self.closed = False
+
+            def read(self) -> bytes:
+                return b"body"
+
+            def close(self) -> None:
+                self.closed = True
+
+        class FakeClient:
+            def post(self, url: str, content: Any = None, headers: Any = None) -> Any:
+                calls.append({"url": url, "content": content, "headers": headers})
+                return FakeHttpxResponse()
+
+        fake = FakeClient()
+        with mock.patch.object(self.gem, "_httpx_client", return_value=fake):
+            response = self.gem._post(
+                BridgeConfig(log_requests=False), b"payload", "http://u.test/x", {"h": "1"}
+            )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["content"], b"payload")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.read(), b"body")
+        with response:
+            pass
+        self.assertTrue(response._raw.closed)  # context manager closes

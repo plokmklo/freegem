@@ -11,6 +11,7 @@ import hashlib
 import json
 import re
 import ssl
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -58,7 +59,6 @@ class BridgeError(RuntimeError):
 
 
 _SSL_CTX: ssl.SSLContext | None = None
-_HTTPX_CLIENT = None
 # (abspath, mtime, size) -> (cookie_str, sapisid) cache so a hot loop does not
 # re-read the file. The path and size are part of the key: mtime alone let two
 # cookie files with identical mtimes share one session (cross-account leak) and
@@ -388,18 +388,72 @@ def extract_response_text(raw: str) -> str:
     return clean_text(best)
 
 
+_HTTPX_CLIENTS: dict[tuple[str | None, float], Any] = {}
+_CLIENTS_LOCK = threading.Lock()
+
+
 def _httpx_client(cfg: BridgeConfig) -> Any:
-    global _HTTPX_CLIENT
-    if _HTTPX_CLIENT is None and HAS_HTTPX:
-        transport = httpx.HTTPTransport(proxy=cfg.proxy) if cfg.proxy else None
-        _HTTPX_CLIENT = httpx.Client(
-            transport=transport, timeout=cfg.request_timeout_sec, verify=True
-        )
-    return _HTTPX_CLIENT
+    """A shared, pooled httpx.Client, keyed by its connection-relevant settings.
+
+    The key is the whole point: a client built for proxy A must never serve
+    traffic meant for proxy B, and a timeout change must not be silently
+    ignored because an old client was cached. One pool per distinct
+    (proxy, timeout) pair; every Gemini call -- streaming and, now,
+    non-streaming -- reuses it, saving a fresh TLS handshake per request.
+    """
+    key = (cfg.proxy, float(cfg.request_timeout_sec))
+    with _CLIENTS_LOCK:
+        client = _HTTPX_CLIENTS.get(key)
+        if client is None and HAS_HTTPX:
+            transport = httpx.HTTPTransport(proxy=cfg.proxy) if cfg.proxy else None
+            client = httpx.Client(transport=transport, timeout=cfg.request_timeout_sec, verify=True)
+            _HTTPX_CLIENTS[key] = client
+        return client
+
+
+class _UpstreamResponse:
+    """One non-streaming upstream response, normalized across urllib/httpx.
+
+    ``generate()`` only needs three things from whichever client answered:
+    the numeric status, the headers (for Retry-After), and the body bytes.
+    urllib and httpx name all three differently; this wrapper names them
+    once so the retry loop stays client-agnostic.
+    """
+
+    def __init__(self, raw: Any) -> None:
+        self._raw = raw
+        status = getattr(raw, "status_code", None)
+        if status is None:
+            status = getattr(raw, "status", None) or getattr(raw, "code", None)
+        self.status = status
+        self.headers = getattr(raw, "headers", None)
+
+    def read(self) -> bytes:
+        return self._raw.read()
+
+    def close(self) -> None:
+        closer = getattr(self._raw, "close", None)
+        if callable(closer):
+            closer()
+
+    def __enter__(self) -> _UpstreamResponse:
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        self.close()
 
 
 def _post(cfg: BridgeConfig, body: bytes, url: str, headers: dict[str, str]) -> Any:
-    """Send one request, honouring the configured proxy."""
+    """Send one request, honouring the configured proxy.
+
+    Prefers the pooled httpx client (connection reuse across calls); falls
+    back to urllib -- one fresh connection per request -- when httpx is not
+    installed. Both paths return a response the retry loop can read the
+    same way.
+    """
+    client = _httpx_client(cfg)
+    if client is not None:
+        return _UpstreamResponse(client.post(url, content=body, headers=headers))
     request = urllib.request.Request(url, data=body, headers=headers, method="POST")
     if cfg.proxy:
         opener = urllib.request.build_opener(
@@ -432,9 +486,7 @@ def generate(
                     # Retryable on purpose: 429/5xx are transient, and without
                     # this a rate-limit page streamed back as HTTP 200 with
                     # content: null while the retry loop never engaged.
-                    raise _UpstreamHTTPStatus(
-                        int(status), _retry_after_seconds(getattr(response, "headers", None))
-                    )
+                    raise _UpstreamHTTPStatus(int(status), _retry_after_seconds(response.headers))
                 raw = response.read().decode("utf-8", errors="replace")
             text = extract_response_text(raw)
             if not text.strip():

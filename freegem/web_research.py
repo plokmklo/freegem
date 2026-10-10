@@ -37,9 +37,11 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
 import urllib.parse
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -200,6 +202,12 @@ class ResearchSource:
     from_cache: bool = False
     #: Why this URL contributed no material: "total_budget", "max_pages".
     skipped: str | None = None
+    #: How the text was obtained: "html" or "mediawiki-api" (site's own API).
+    via: str = "html"
+    #: Extraction-quality label: "ok", "nav_only", or "empty". A nav-only
+    #: page means the fetch worked but the extractor got site chrome, not
+    #: content -- the citation is honest but carries no evidence.
+    quality: str = "ok"
 
 
 @dataclass
@@ -239,6 +247,26 @@ def _normalize_urls(urls: list[str]) -> list[str]:
     return out
 
 
+#: Hard ceiling for the per-call fetch pool. Three workers overlap three
+#: independent site round-trips; more than eight starts to look like a mini
+#: crawler to the sites being researched, which is not the deal.
+HARD_FETCH_CONCURRENCY = 8
+
+
+def _host_locks(urls: list[str]) -> dict[str, threading.Lock]:
+    """One lock per distinct host: fetches to the SAME host serialize, even
+    when the pool runs wide. Different hosts fetch concurrently."""
+    locks: dict[str, threading.Lock] = {}
+    guard = threading.Lock()
+
+    def lock_for(url: str) -> threading.Lock:
+        host = urllib.parse.urlsplit(url).hostname or ""
+        with guard:
+            return locks.setdefault(host, threading.Lock())
+
+    return {url: lock_for(url) for url in urls}
+
+
 def _collect_sources(
     cfg: BridgeConfig,
     urls: list[str],
@@ -248,60 +276,173 @@ def _collect_sources(
     total_budget: int,
     cache: ResearchCache | None,
     refresh: bool,
+    concurrency: int = 1,
 ) -> tuple[list[ResearchSource], list[tuple[ResearchSource, str]]]:
     """Fetch (or cache-hit) every URL up to the page and character budgets.
 
     Returns ``(sources, material)`` where material pairs each contributing
     source with its extracted text. URLs beyond ``max_pages`` and URLs that
-    would push the fetched total past ``total_budget`` are recorded but never
-    fetched. A page that fails the guard, robots, type check, or network is
-    recorded as failed and the run continues -- one dead source never kills
-    the research.
+    would push the fetched total past ``total_budget`` are recorded but
+    never contribute material. A page that fails the guard, robots, type
+    check, or network is recorded as failed and the run continues -- one
+    dead source never kills the research.
+
+    Concurrency: with ``concurrency > 1`` a bounded worker pool runs the
+    independent page fetches in parallel (per-host locks serialize fetches
+    to the same origin), while every BUDGET decision stays strictly in
+    request order, computed from actual fetched sizes. A prefetched page
+    that ends up beyond the budget is discarded and reported as
+    ``skipped="total_budget"`` -- its characters never count. ``concurrency=1``
+    reproduces the old strictly sequential behavior.
+
+    Source order is the citation contract: ``sources`` (and therefore the
+    ``[S1]..[Sn]`` numbering, the URL table, and the JSON schema) always
+    follows the order the caller listed, whatever order the network answered.
     """
-    from .web_scraper import ScrapeError, scrape_page  # lazy: breaks the mcp cycle
+    from .web_scraper import ScrapeError, extraction_quality, scrape_page  # lazy: mcp cycle
 
-    sources: list[ResearchSource] = []
-    material: list[tuple[ResearchSource, str]] = []
+    concurrency = max(1, min(int(concurrency), HARD_FETCH_CONCURRENCY))
+
+    # sources[i] answers urls[i]; positions >= max_pages are skipped up front.
+    sources: list[ResearchSource | None] = [None] * len(urls)
+    for position in range(min(len(urls), max_pages), len(urls)):
+        sources[position] = ResearchSource(url=urls[position], ok=False, skipped="max_pages")
+    fetch_positions = list(range(min(len(urls), max_pages)))
+
+    host_lock = _host_locks(urls)
+
+    def worker(url: str) -> Any:
+        # Serialize per host; the pool only widens across distinct hosts.
+        with host_lock[url]:
+            return scrape_page(cfg, url, max_chars=max_chars_per_page)
+
     fetched = 0
-    for position, url in enumerate(urls):
-        if position >= max_pages:
-            sources.append(ResearchSource(url=url, ok=False, skipped="max_pages"))
-            continue
-        source = ResearchSource(url=url)
-        if fetched >= total_budget:
-            source.skipped = "total_budget"
-            sources.append(source)
-            continue
+    material: list[tuple[ResearchSource, str]] = []
 
-        cached = cache.get(url) if cache is not None and not refresh else None
-        if cached is not None:
-            source.ok = True
-            source.title = cached["title"]
-            source.chars = len(cached["text"])
-            source.from_cache = True
-            text = cached["text"]
-        else:
-            # The last page only gets the budget that is actually left, so a
-            # single monster page cannot eat sources that were listed first.
-            allowance = min(max_chars_per_page, total_budget - fetched)
-            try:
-                page = scrape_page(cfg, url, max_chars=allowance)
-            except ScrapeError as exc:
-                source.error = str(exc)
-                sources.append(source)
+    if concurrency == 1:
+        # Sequential: identical decisions to the original implementation,
+        # including fetching each page with only the allowance it can keep.
+        for position in fetch_positions:
+            url = urls[position]
+            source = ResearchSource(url=url)
+            if fetched >= total_budget:
+                source.skipped = "total_budget"
+                sources[position] = source
                 continue
+            cached = cache.get(url) if cache is not None and not refresh else None
+            if cached is not None:
+                source.ok = True
+                source.title = cached["title"]
+                source.chars = len(cached["text"])
+                source.from_cache = True
+                source.quality = extraction_quality(cached["text"])
+                text = cached["text"]
+            else:
+                # The last page only gets the budget that is actually left, so
+                # a single monster page cannot eat earlier-listed sources.
+                allowance = min(max_chars_per_page, total_budget - fetched)
+                try:
+                    page = scrape_page(cfg, url, max_chars=allowance)
+                except ScrapeError as exc:
+                    source.error = str(exc)
+                    sources[position] = source
+                    continue
+                source.ok = True
+                source.title = page.title
+                source.truncated = page.truncated
+                source.chars = len(page.text)
+                source.via = page.via
+                source.quality = extraction_quality(page.text)
+                text = page.text
+                if cache is not None:
+                    cache.put(url, page.title, page.text)
+            fetched += source.chars
+            sources[position] = source
+            material.append((source, text))
+        return _typed(sources), material
+
+    # Concurrent pipeline: keep `concurrency` fetches in flight ahead of the
+    # decision cursor. Cache hits are detected before submission (a hit needs
+    # no network and consumes budget only when its position is reached).
+    results: dict[int, Any] = {}  # position -> ResearchCache entry (cache hit)
+    in_flight: dict[int, Future[Any]] = {}
+    position_iter = iter(fetch_positions)
+
+    executor = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="research-fetch")
+    try:
+
+        def fill_window() -> None:
+            while len(in_flight) < concurrency:
+                try:
+                    position = next(position_iter)
+                except StopIteration:
+                    return
+                url = urls[position]
+                cached = cache.get(url) if cache is not None and not refresh else None
+                if cached is not None:
+                    results[position] = cached
+                else:
+                    in_flight[position] = executor.submit(worker, url)
+
+        for position in fetch_positions:
+            fill_window()
+            cached = results.pop(position, None)
+            if cached is not None:
+                source = ResearchSource(url=urls[position])
+                source.ok = True
+                source.title = cached["title"]
+                source.chars = len(cached["text"])
+                source.from_cache = True
+                source.quality = extraction_quality(cached["text"])
+                fetched += source.chars
+                sources[position] = source
+                material.append((source, cached["text"]))
+                continue
+            future = in_flight.pop(position)
+            try:
+                page = future.result()
+            except ScrapeError as exc:
+                source = ResearchSource(url=urls[position], error=str(exc))
+                sources[position] = source
+                continue
+            # Budget decision at the cursor, from ACTUAL sizes, in request
+            # order -- the same rule the sequential path applies.
+            if fetched >= total_budget:
+                # Fetched, then discarded: the characters never count toward
+                # the budget and the page contributes no material.
+                sources[position] = ResearchSource(
+                    url=urls[position], ok=False, skipped="total_budget"
+                )
+                continue
+            text = page.text
+            truncated = page.truncated
+            # scrape_page already capped the text at max_chars_per_page; the
+            # only cut left is the budget boundary: the tail of a page that
+            # would push the kept total past total_budget is dropped.
+            if fetched + len(text) > total_budget:
+                text = text[: total_budget - fetched].rstrip()
+                truncated = True
+            source = ResearchSource(url=urls[position])
             source.ok = True
             source.title = page.title
-            source.truncated = page.truncated
-            source.chars = len(page.text)
-            text = page.text
+            source.truncated = truncated
+            source.chars = len(text)
+            source.via = page.via
+            source.quality = extraction_quality(text)
             if cache is not None:
-                cache.put(url, page.title, page.text)
+                cache.put(urls[position], page.title, text)
+            fetched += source.chars
+            sources[position] = source
+            material.append((source, text))
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
-        fetched += source.chars
-        sources.append(source)
-        material.append((source, text))
-    return sources, material
+    return _typed(sources), material
+
+
+def _typed(sources: list[ResearchSource | None]) -> list[ResearchSource]:
+    """Every position was filled; narrow the list for the type checker."""
+    return [source for source in sources if source is not None]
 
 
 # ─── prompt construction ──────────────────────────────────────────────────────
@@ -503,6 +644,10 @@ def _sources_table(sources: list[ResearchSource]) -> str:
             flags.append("truncated")
         if source.from_cache:
             flags.append("cached")
+        if source.via != "html":
+            flags.append(source.via)
+        if source.quality != "ok":
+            flags.append(source.quality)
         suffix = f" ({', '.join(flags)})" if flags else ""
         title = f" — {source.title}" if source.title else ""
         lines.append(f"[S{index}] {source.url}{title}{suffix}")
@@ -541,6 +686,7 @@ def research(
     total_budget: int = DEFAULT_TOTAL_BUDGET,
     cache: ResearchCache | None = None,
     refresh: bool = False,
+    concurrency: int | None = None,
 ) -> ResearchResult:
     """Fetch the pages, answer ``question`` from them, and cite [S#] sources.
 
@@ -570,6 +716,7 @@ def research(
         total_budget=total_budget,
         cache=cache,
         refresh=refresh,
+        concurrency=cfg.research_concurrency if concurrency is None else concurrency,
     )
 
     answer = ""
@@ -619,6 +766,10 @@ def render_markdown(result: ResearchResult) -> str:
             flags.append("truncated")
         if source.from_cache:
             flags.append("cached")
+        if source.via != "html":
+            flags.append(source.via)
+        if source.quality != "ok":
+            flags.append(source.quality)
         suffix = f" ({', '.join(flags)})" if flags else ""
         title = source.title or source.url
         lines.append(f"{index}. [{title}]({source.url}){suffix} `S{index}`")
@@ -642,6 +793,8 @@ def render_json(result: ResearchResult) -> str:
             "chars": source.chars,
             "from_cache": source.from_cache,
             "skipped": source.skipped,
+            "via": source.via,
+            "quality": source.quality,
         }
         if source.ok:
             index += 1
@@ -694,6 +847,7 @@ def research_cli(
     cache_ttl: int = DEFAULT_CACHE_TTL,
     no_cache: bool = False,
     refresh: bool = False,
+    fetch_concurrency: int | None = None,
 ) -> str:
     """One-shot research for the CLI: renders in the requested format."""
     cache = None if no_cache else ResearchCache(ResearchCache.default_path(), cache_ttl)
@@ -706,6 +860,7 @@ def research_cli(
         total_budget=total_budget,
         cache=cache,
         refresh=refresh,
+        concurrency=fetch_concurrency,
     )
     if fmt == "json":
         return render_json(result)
@@ -738,6 +893,9 @@ def run_research_tool(cfg: BridgeConfig, arguments: dict[str, Any]) -> str:
         _MIN_CHARS_PER_PAGE,
         _MAX_CHARS_PER_PAGE_HARD,
     )
+    fetch_concurrency = _int(
+        "fetch_concurrency", int(getattr(cfg, "research_concurrency", 3)), 1, HARD_FETCH_CONCURRENCY
+    )
     return research_cli(
         cfg,
         urls=urls,
@@ -745,4 +903,5 @@ def run_research_tool(cfg: BridgeConfig, arguments: dict[str, Any]) -> str:
         fmt="text",
         max_pages=max_pages,
         max_chars_per_page=max_chars,
+        fetch_concurrency=fetch_concurrency,
     )

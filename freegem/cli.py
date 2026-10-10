@@ -168,6 +168,16 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="SEC",
         help="how long cached fetches stay fresh (default 1800 seconds)",
     )
+    research.add_argument(
+        "--fetch-concurrency",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "fetch pages N at a time (default: research_concurrency config, 3); "
+            "1 = sequential. Fetches to the same host always serialize"
+        ),
+    )
 
     sub.add_parser("models", help="list available models", parents=[common])
 
@@ -311,6 +321,7 @@ def cmd_research(cfg: BridgeConfig, args: argparse.Namespace) -> int:
             cache_ttl=args.cache_ttl,
             no_cache=args.no_cache,
             refresh=args.refresh,
+            fetch_concurrency=args.fetch_concurrency,
         )
     except (BridgeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)

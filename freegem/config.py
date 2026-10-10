@@ -40,6 +40,15 @@ DEFAULT_CONFIG: Mapping[str, Any] = {
     "proxy": None,
     "temporary_chats": False,
     "log_requests": True,
+    # Concurrent fetches per research() call (bounded pool, per-host locks).
+    "research_concurrency": 3,
+    # robots.txt cache lifetime per origin; entries revalidate conditionally
+    # (ETag / Last-Modified) after this many seconds.
+    "robots_cache_ttl_sec": 600,
+    # > 0 enables the server's short admission queue: requests beyond the
+    # concurrency cap wait up to this many seconds for a slot instead of
+    # getting an immediate 503. 0 keeps today's refuse-fast behavior.
+    "request_queue_wait_sec": 0.0,
 }
 
 
@@ -64,6 +73,9 @@ class BridgeConfig:
     proxy: str | None = DEFAULT_CONFIG["proxy"]
     temporary_chats: bool = DEFAULT_CONFIG["temporary_chats"]
     log_requests: bool = DEFAULT_CONFIG["log_requests"]
+    research_concurrency: int = DEFAULT_CONFIG["research_concurrency"]
+    robots_cache_ttl_sec: int = DEFAULT_CONFIG["robots_cache_ttl_sec"]
+    request_queue_wait_sec: float = DEFAULT_CONFIG["request_queue_wait_sec"]
 
     # ---- construction -------------------------------------------------------
 
@@ -119,6 +131,9 @@ class BridgeConfig:
             "retry_attempts": self.retry_attempts,
             "request_timeout_sec": self.request_timeout_sec,
             "log_requests": self.log_requests,
+            "research_concurrency": self.research_concurrency,
+            "robots_cache_ttl_sec": self.robots_cache_ttl_sec,
+            "request_queue_wait_sec": self.request_queue_wait_sec,
             # Booleans and paths only; never the token itself.
             "xsrf_token_set": bool(self.xsrf_token),
             "cookie": "configured" if self.cookie_file else "none (anonymous)",

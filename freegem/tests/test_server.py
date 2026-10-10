@@ -810,3 +810,99 @@ class ThreadCapTests(unittest.TestCase):
                 break
             time.sleep(0.01)
         self.assertEqual(server._active_requests, 0)
+
+
+class QueueTests(ThreadCapTests):
+    """request_queue_wait_sec > 0: brief admission queueing before the 503."""
+
+    def _boot(self, cap: int, queue_wait: float = 0.0) -> ThreadedServer:
+        cfg = BridgeConfig(log_requests=False, request_queue_wait_sec=queue_wait)
+        server = ThreadedServer(("127.0.0.1", 0), cfg, max_concurrent_requests=cap)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+        self.addCleanup(thread.join, timeout=5)
+        return server
+
+    def test_503_carries_retry_after(self) -> None:
+        conn = http.client.HTTPConnection("127.0.0.1", self._boot(0).server_address[1], timeout=10)
+        try:
+            conn.request("GET", "/health")
+            response = conn.getresponse()
+            response.read()
+            self.assertEqual(response.status, 503)
+            self.assertEqual(response.headers.get("Retry-After"), "2")
+        finally:
+            conn.close()
+
+    @mock.patch("freegem.server.generate")
+    def test_waiter_is_admitted_when_a_slot_frees(self, generate: Any) -> None:
+        """cap=1 + queue: a second request waits for the slot instead of 503."""
+        server = self._boot(1, queue_wait=3.0)
+        port = server.server_address[1]
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_generate(*args: Any, **kwargs: Any) -> str:
+            started.set()
+            release.wait(timeout=10)
+            return "done"
+
+        first_status: dict[str, int] = {}
+
+        def first_request() -> None:
+            first_status["code"], _ = self._post_chat(port)
+
+        with mock.patch("freegem.server.generate", side_effect=slow_generate):
+            worker = threading.Thread(target=first_request, daemon=True)
+            worker.start()
+            self.assertTrue(started.wait(timeout=10), "generate was never reached")
+            self.assertEqual(server._active_requests, 1)
+
+            def release_soon() -> None:
+                time.sleep(0.4)
+                release.set()
+
+            threading.Thread(target=release_soon, daemon=True).start()
+            began = time.monotonic()
+            status, _raw = self._get(port, "/health")
+            waited = time.monotonic() - began
+            self.assertEqual(status, 200)  # queued, not shed
+            self.assertGreaterEqual(waited, 0.35)
+            worker.join(timeout=10)
+            self.assertEqual(first_status["code"], 200)
+
+    @mock.patch("freegem.server.generate")
+    def test_queue_overflow_still_sheds_immediately(self, generate: Any) -> None:
+        """Active cap + queue both full: the extra connection gets 503 at once."""
+        server = self._boot(1, queue_wait=5.0)
+        port = server.server_address[1]
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_generate(*args: Any, **kwargs: Any) -> str:
+            started.set()
+            release.wait(timeout=10)
+            return "done"
+
+        with mock.patch("freegem.server.generate", side_effect=slow_generate):
+            first = threading.Thread(target=lambda: self._post_chat(port), daemon=True)
+            first.start()
+            self.assertTrue(started.wait(timeout=10))
+            self.assertEqual(server._active_requests, 1)
+
+            # Second connection takes the one queue slot (it will hang there).
+            queued = threading.Thread(target=lambda: self._post_chat(port), daemon=True)
+            queued.start()
+            time.sleep(0.3)  # let it settle into the queue
+            self.assertEqual(server._active_requests, 2)
+
+            began = time.monotonic()
+            status, raw = self._get(port, "/health")
+            self.assertEqual(status, 503)
+            self.assertLess(time.monotonic() - began, 2.0)  # refused, not queued
+            self.assertIn(b"server busy", raw)
+            release.set()
+            first.join(timeout=10)
+            queued.join(timeout=10)

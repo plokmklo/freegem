@@ -25,7 +25,10 @@ Security posture, in order of what bites first:
 
 from __future__ import annotations
 
+import json
 import re
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -41,8 +44,11 @@ from .ssrf import SSRFRefused, build_guarded_opener, url_allowed
 
 __all__ = [
     "DEFAULT_MAX_CHARS",
+    "RobotsCache",
     "ScrapeError",
     "ScrapeResult",
+    "clear_robots_cache",
+    "extraction_quality",
     "format_page",
     "run_scrape_tool",
     "scrape_cli",
@@ -87,6 +93,28 @@ class ScrapeResult:
     text: str
     truncated: bool = False
     links: list[tuple[str, str]] = field(default_factory=list)
+    #: How the text was obtained: "html" (fetch + HTML extraction) or
+    #: "mediawiki-api" (a site's own structured API -- no scraping involved).
+    via: str = "html"
+
+
+def extraction_quality(text: str) -> str:
+    """Coarse extraction-quality label for one page of text.
+
+    Research results carry this per source so a caller can tell a real
+    article from a navigation stub without reading it. Deterministic and
+    cheap on purpose: it guards against the "extractor got only the chrome"
+    failure mode (a Wikipedia skin, a cookie wall) without pretending to be
+    a content classifier.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return "empty"
+    if len(stripped) < 200:
+        # Too little to be an article: nav links, "Jump to content", a
+        # paywall notice. Navigation-only pages land here.
+        return "nav_only"
+    return "ok"
 
 
 # ─── fetching ─────────────────────────────────────────────────────────────────
@@ -159,36 +187,122 @@ def _gunzip_capped(data: bytes, cap: int) -> bytes:
     return b"".join(parts)
 
 
-def _check_robots(cfg: BridgeConfig, url: str) -> None:
-    """Refuse the URL when robots.txt disallows it.
+class _RobotsEntry:
+    """One origin's parsed robots.txt plus HTTP validators for revalidation."""
 
-    Semantics: 2xx parses the rules; 4xx and 5xx allow (a missing or broken
-    robots.txt is the site's way of not objecting -- RFC 9309's stricter
-    "unreachable means disallow" is the wrong default for a user-initiated
-    tool, and the choice is documented here); a guard refusal refuses the
-    scrape, because "could not safely check" must not become "fetch anyway".
+    __slots__ = ("etag", "fetched_at", "last_modified", "parser")
+
+    def __init__(
+        self,
+        parser: urllib.robotparser.RobotFileParser | None,
+        etag: str | None,
+        last_modified: str | None,
+        fetched_at: float,
+    ) -> None:
+        self.parser = parser  # None means "no reachable robots.txt: allow"
+        self.etag = etag
+        self.last_modified = last_modified
+        self.fetched_at = fetched_at
+
+
+class RobotsCache:
+    """Per-origin robots.txt cache with a TTL and conditional revalidation.
+
+    Research and repeated scrapes used to fetch robots.txt on every page:
+    one research call over five Wikipedia URLs paid five robots fetches
+    before any article moved. This cache pays it once per TTL window, and
+    after the window sends If-None-Match / If-Modified-Since so an origin
+    that supports validators answers 304 instead of resending the file.
+
+    Refusal semantics are UNCHANGED from the uncached ``_check_robots``:
+
+    - 2xx parses the rules;
+    - 4xx/5xx allow (a missing or broken robots.txt is the site's way of not
+      objecting -- RFC 9309's stricter "unreachable means disallow" is the
+      wrong default for a user-initiated tool, and this choice is documented
+      here as well as in the original);
+    - a guard refusal raises, because "could not safely check" must never
+      become "fetch anyway".
+
+    One deliberate addition: when a REVALIDATION fetch fails on the network,
+    the last known rules are served stale instead of the allow-on-error
+    fallback (that fallback only applies when nothing is cached yet). If a
+    site had disallowed, losing the network should not silently re-allow.
     """
-    robots_url = urllib.parse.urljoin(url, "/robots.txt")
-    request = urllib.request.Request(robots_url, headers={"User-Agent": _UA})
-    try:
-        response = build_guarded_opener(cfg.proxy, _ssl_ctx()).open(request, timeout=15)
-    except SSRFRefused as exc:
-        log(cfg, f"robots fetch refused: {exc}")
-        raise ScrapeError(f"SSRF guard refused {robots_url!r}: {exc}") from exc
-    except urllib.error.HTTPError:
-        return  # no robots reachable: allow
-    except (urllib.error.URLError, OSError):
-        return  # network too broken to check robots; the page fetch will fail too
-    try:
-        body = _read_capped(response, limit=1024 * 1024)
-    except ScrapeError:
-        return
-    parser = urllib.robotparser.RobotFileParser()
-    # Parsed from OUR guarded fetch -- RobotFileParser.read() would open its
-    # own raw connection and bypass the SSRF guard entirely.
-    parser.parse(body.decode("utf-8", errors="replace").splitlines())
-    if not parser.can_fetch(_UA, url):
-        raise ScrapeError(f"robots.txt disallows scraping {url!r}")
+
+    def __init__(self) -> None:
+        self._entries: dict[str, _RobotsEntry] = {}
+        self._lock = threading.Lock()
+
+    def clear(self) -> None:
+        """Drop every cached origin (used by tests and by --refresh paths)."""
+        with self._lock:
+            self._entries.clear()
+
+    def can_fetch(self, cfg: BridgeConfig, url: str, ua: str) -> None:
+        """Raise :class:`ScrapeError` when robots.txt disallows ``url``."""
+        robots_url = urllib.parse.urljoin(url, "/robots.txt")
+        ttl = max(0, int(getattr(cfg, "robots_cache_ttl_sec", 600)))
+        with self._lock:
+            entry = self._entries.get(robots_url)
+        if entry is None or time.time() - entry.fetched_at >= ttl:
+            entry = self._revalidate(cfg, robots_url, entry)
+            with self._lock:
+                self._entries[robots_url] = entry
+        if entry.parser is not None and not entry.parser.can_fetch(ua, url):
+            raise ScrapeError(f"robots.txt disallows scraping {url!r}")
+
+    def _revalidate(
+        self, cfg: BridgeConfig, robots_url: str, entry: _RobotsEntry | None
+    ) -> _RobotsEntry:
+        """Fetch (or conditionally re-fetch) one robots.txt under the guard."""
+        headers = {"User-Agent": _UA}
+        if entry is not None and entry.etag:
+            headers["If-None-Match"] = entry.etag
+        if entry is not None and entry.last_modified:
+            headers["If-Modified-Since"] = entry.last_modified
+        request = urllib.request.Request(robots_url, headers=headers)
+        try:
+            response = build_guarded_opener(cfg.proxy, _ssl_ctx()).open(request, timeout=15)
+        except SSRFRefused as exc:
+            log(cfg, f"robots fetch refused: {exc}")
+            raise ScrapeError(f"SSRF guard refused {robots_url!r}: {exc}") from exc
+        except urllib.error.HTTPError as exc:
+            if exc.code == 304 and entry is not None:
+                # Validators still current: the rules stand, restart the TTL.
+                return _RobotsEntry(entry.parser, entry.etag, entry.last_modified, time.time())
+            return _RobotsEntry(None, None, None, time.time())  # no robots reachable: allow
+        except (urllib.error.URLError, OSError):
+            if entry is not None:
+                return entry  # network hiccup mid-TTL: keep the last known rules
+            return _RobotsEntry(None, None, None, time.time())
+        try:
+            body = _read_capped(response, limit=1024 * 1024)
+        except ScrapeError:
+            return _RobotsEntry(None, None, None, time.time())
+        parser = urllib.robotparser.RobotFileParser()
+        # Parsed from OUR guarded fetch -- RobotFileParser.read() would open
+        # its own raw connection and bypass the SSRF guard entirely.
+        parser.parse(body.decode("utf-8", errors="replace").splitlines())
+        return _RobotsEntry(
+            parser,
+            response.headers.get("ETag"),
+            response.headers.get("Last-Modified"),
+            time.time(),
+        )
+
+
+_ROBOTS_CACHE = RobotsCache()
+
+
+def clear_robots_cache() -> None:
+    """Reset the process-wide robots cache (tests, robots-ttl changes)."""
+    _ROBOTS_CACHE.clear()
+
+
+def _check_robots(cfg: BridgeConfig, url: str) -> None:
+    """Refuse the URL when robots.txt disallows it (via the shared cache)."""
+    _ROBOTS_CACHE.can_fetch(cfg, url, _UA)
 
 
 # ─── extraction ───────────────────────────────────────────────────────────────
@@ -364,6 +478,134 @@ def _dedupe_links(links: list[tuple[str, str]], cap: int = 200) -> list[tuple[st
     return out
 
 
+# ─── source adapters ────────────────────────────────────────────────────
+#
+# Some sites offer a SUPPORTED, structured interface to their content.
+# Where one exists, using it beats scraping HTML: cleaner text, less
+# bandwidth, and it is what the site asks integrations to use. The
+# adapter runs behind the SAME guard: SSRF pinning, robots.txt (checked
+# against the API URL actually fetched -- never bypassed), size caps,
+# no session cookie.
+
+#: Host suffixes of the MediaWiki family served by Wikimedia. Other
+#: MediaWiki sites exist in the thousands; a curated list keeps the
+#: adapter from firing on false positives.
+_MEDIAWIKI_SUFFIXES = (
+    ".wikipedia.org",
+    ".wiktionary.org",
+    ".wikibooks.org",
+    ".wikiquote.org",
+    ".wikisource.org",
+    ".wikiversity.org",
+    ".wikivoyage.org",
+)
+
+#: Namespaces that are not content articles -- leave those to the HTML path
+#: (or refuse), because the plain-text extract API is article-oriented.
+_MEDIAWIKI_NON_ARTICLE = (
+    "Special:",
+    "Wikipedia:",
+    "Help:",
+    "Category:",
+    "File:",
+    "Template:",
+    "Talk:",
+    "Portal:",
+    "Draft:",
+    "User:",
+    "Module:",
+    "Media:",
+    "MediaWiki:",
+)
+
+
+def _mediawiki_article(url: str) -> tuple[str, str] | None:
+    """``(canonical host, article title)`` for a wiki article URL, else None.
+
+    Matches ``https://{lang}.wikipedia.org/wiki/{Title}`` and siblings in
+    ``_MEDIAWIKI_SUFFIXES``, including the mobile ``.m.`` hosts (fetched
+    from the canonical host). Fragments were already stripped upstream;
+    section anchors are not preserved -- the adapter returns the whole
+    article.
+    """
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except ValueError:
+        return None
+    if parsed.scheme not in ("http", "https"):
+        return None
+    host = (parsed.hostname or "").lower()
+    if not any(host.endswith(suffix) for suffix in _MEDIAWIKI_SUFFIXES):
+        return None
+    # en.m.wikipedia.org -> en.wikipedia.org (mobile mirrors share content)
+    parts = [p for p in host.split(".") if p != "m"]
+    canonical = ".".join(parts)
+    path = parsed.path or "/"
+    if not path.startswith("/wiki/"):
+        return None
+    title = urllib.parse.unquote(path[len("/wiki/") :]).strip()
+    if not title or title.startswith(_MEDIAWIKI_NON_ARTICLE):
+        return None
+    return canonical, title
+
+
+def _mediawiki_extract(cfg: BridgeConfig, url: str, max_chars: int) -> ScrapeResult | None:
+    """Fetch a MediaWiki article through the site's own Action API.
+
+    Returns None when ``url`` is not a recognized article URL (the caller
+    falls back to the plain HTML path). Raises ScrapeError when the URL IS
+    an article but the API path fails -- a failing adapter must look like
+    any other failed source, not silently become a scrape.
+    """
+    hit = _mediawiki_article(url)
+    if hit is None:
+        return None
+    canonical, title = hit
+    api_url = f"https://{canonical}/w/api.php?" + urllib.parse.urlencode(
+        {
+            "action": "query",
+            "format": "json",
+            "formatversion": "2",
+            "prop": "extracts",
+            "explaintext": "1",
+            "redirects": "1",
+            "titles": title,
+        }
+    )
+    # robots.txt is honored for the API URL exactly as for any page. If the
+    # site disallows its API to us, the adapter refuses -- it does not
+    # quietly downgrade to HTML scraping to dodge the rule.
+    _check_robots(cfg, api_url)
+    response = _fetch(cfg, api_url)
+    try:
+        data = json.loads(
+            _decode_body(_read_capped(response), response.headers.get("Content-Type") or "")
+        )
+    except (ValueError, ScrapeError) as exc:
+        raise ScrapeError(f"MediaWiki API returned unusable data for {title!r}: {exc}") from exc
+    try:
+        page = data["query"]["pages"][0]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise ScrapeError(f"MediaWiki API returned no page for {title!r}") from exc
+    if page.get("missing"):
+        raise ScrapeError(f"no article named {title!r} on {canonical}")
+    text = (page.get("extract") or "").strip()
+    if not text:
+        raise ScrapeError(f"MediaWiki API returned an empty extract for {title!r}")
+    truncated = False
+    if len(text) > max_chars:
+        text = text[:max_chars].rstrip()
+        truncated = True
+    return ScrapeResult(
+        url=url,
+        title=str(page.get("title") or title),
+        text=text,
+        truncated=truncated,
+        links=[],
+        via="mediawiki-api",
+    )
+
+
 # ─── public surface ───────────────────────────────────────────────────────────
 
 
@@ -381,6 +623,12 @@ def scrape_page(
         raise ScrapeError(f"SSRF guard refused {url!r}: {exc}") from exc
     if not ignore_robots:
         _check_robots(cfg, url)
+
+    # Structured-source adapters first: when the site offers an official API
+    # for this URL, that beats extracting HTML (and honors the same guard).
+    adapted = _mediawiki_extract(cfg, url, max_chars)
+    if adapted is not None:
+        return adapted
 
     response = _fetch(cfg, url)
     content_type = (response.headers.get("Content-Type") or "").strip()

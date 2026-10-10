@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import gzip
 import io
+import json
 import socket
 import ssl
 import threading
@@ -26,6 +27,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
+from email.message import Message
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from unittest import mock
@@ -49,8 +51,11 @@ from freegem.ssrf import (
 from freegem.web_scraper import (
     _MAX_BYTES,
     DEFAULT_MAX_CHARS,
+    RobotsCache,
     ScrapeError,
     ScrapeResult,
+    clear_robots_cache,
+    extraction_quality,
     format_page,
     run_scrape_tool,
     scrape_page,
@@ -697,3 +702,242 @@ class GuardedOpenerContextTests(unittest.TestCase):
     def test_default_context_when_none_given(self) -> None:
         opener = build_guarded_opener(None, None)
         self.assertIsNotNone(self._pinned_https_handler_of(opener)._pinned_context)
+
+
+# ─── robots.txt cache ─────────────────────────────────────────────────────────
+
+
+class _FakeHeaders(dict):
+    """dict with a headers-like .get contract (already is one)."""
+
+
+class _FakeBytesResponse:
+    """A read()-able response with headers, for robots and JSON bodies."""
+
+    def __init__(self, body: bytes, headers: dict[str, str] | None = None) -> None:
+        self._body = body
+        self.headers = _FakeHeaders(headers or {})
+
+    def read(self, size: int = -1) -> bytes:
+        if not self._body:
+            return b""
+        out, self._body = self._body, b""
+        return out
+
+
+class _FakeOpener:
+    """build_guarded_opener stand-in serving queued responses per request."""
+
+    def __init__(self, script: list[Any]) -> None:
+        self.script = script  # each entry: response, or an exception instance
+        self.requests: list[urllib.request.Request] = []
+
+    def open(self, request: urllib.request.Request, timeout: float = 30) -> Any:
+        self.requests.append(request)
+        item = self.script.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+def _not_modified() -> urllib.error.HTTPError:
+    """A 304 the way urllib raises it (hdrs must be an email Message)."""
+    return urllib.error.HTTPError("http://s.test/robots.txt", 304, "Not Modified", Message(), None)
+
+
+class RobotsCacheTests(unittest.TestCase):
+    """The per-origin robots cache: TTL hits, validators, refusal rules."""
+
+    def setUp(self) -> None:
+        self.cfg = BridgeConfig(log_requests=False)
+        clear_robots_cache()
+
+    def _robots(self, body: str, etag: str | None = None) -> _FakeBytesResponse:
+        headers = {"Content-Encoding": ""}
+        if etag:
+            headers["ETag"] = etag
+        return _FakeBytesResponse(body.encode(), headers)
+
+    def test_second_call_within_ttl_skips_the_network(self) -> None:
+        opener = _FakeOpener([self._robots("User-agent: *\nDisallow: /private\n")])
+        with mock.patch("freegem.web_scraper.build_guarded_opener", return_value=opener):
+            cache = RobotsCache()
+            cache.can_fetch(self.cfg, "http://s.test/page", "freegem-web-scraper/2.1")
+            cache.can_fetch(self.cfg, "http://s.test/other", "freegem-web-scraper/2.1")
+        self.assertEqual(len(opener.requests), 1)  # one fetch, two checks
+
+    def test_disallow_enforced_from_cache_without_network(self) -> None:
+        opener = _FakeOpener([self._robots("User-agent: *\nDisallow: /private\n")])
+        with mock.patch("freegem.web_scraper.build_guarded_opener", return_value=opener):
+            cache = RobotsCache()
+            cache.can_fetch(self.cfg, "http://s.test/page", "freegem-web-scraper/2.1")
+            with self.assertRaises(ScrapeError) as caught:
+                cache.can_fetch(self.cfg, "http://s.test/private", "freegem-web-scraper/2.1")
+        self.assertIn("robots.txt disallows", str(caught.exception))
+
+    def test_revalidation_sends_validators_and_304_keeps_rules(self) -> None:
+        opener = _FakeOpener(
+            [
+                self._robots("User-agent: *\nDisallow: /private\n", etag='"r1"'),
+                _not_modified(),
+                _not_modified(),
+            ]
+        )
+        with mock.patch("freegem.web_scraper.build_guarded_opener", return_value=opener):
+            cfg = self.cfg.replace(robots_cache_ttl_sec=0)  # revalidate every call
+            cache = RobotsCache()
+            cache.can_fetch(cfg, "http://s.test/page", "freegem-web-scraper/2.1")
+            cache.can_fetch(cfg, "http://s.test/page", "freegem-web-scraper/2.1")
+            # The 304 kept the parsed rules: /private is still disallowed.
+            with self.assertRaises(ScrapeError):
+                cache.can_fetch(cfg, "http://s.test/private", "freegem-web-scraper/2.1")
+        self.assertEqual(len(opener.requests), 3)  # ttl=0: every call revalidates
+        revalidation = opener.requests[1]
+        # urllib normalizes header casing ("If-none-match"); the wire name is
+        # case-insensitive either way.
+        self.assertEqual(revalidation.headers.get("If-none-match"), '"r1"')
+
+    def test_network_failure_serves_stale_rules(self) -> None:
+        opener = _FakeOpener(
+            [
+                self._robots("User-agent: *\nDisallow: /private\n"),
+                urllib.error.URLError("network gone"),
+                urllib.error.URLError("network gone again"),
+            ]
+        )
+        with mock.patch("freegem.web_scraper.build_guarded_opener", return_value=opener):
+            cfg = self.cfg.replace(robots_cache_ttl_sec=0)
+            cache = RobotsCache()
+            cache.can_fetch(cfg, "http://s.test/page", "freegem-web-scraper/2.1")
+            # Last known rules survive the outage: /private stays disallowed.
+            with self.assertRaises(ScrapeError):
+                cache.can_fetch(cfg, "http://s.test/private", "freegem-web-scraper/2.1")
+            # A URL the rules allow still works.
+            cache.can_fetch(cfg, "http://s.test/page", "freegem-web-scraper/2.1")
+
+
+# ─── MediaWiki source adapter ─────────────────────────────────────────────────
+
+
+class MediaWikiDetectionTests(unittest.TestCase):
+    """URL -> (canonical host, article title), or None for everything else."""
+
+    def test_plain_article(self) -> None:
+        from freegem.web_scraper import _mediawiki_article
+
+        self.assertEqual(
+            _mediawiki_article("https://en.wikipedia.org/wiki/Alexander_the_Great"),
+            ("en.wikipedia.org", "Alexander_the_Great"),
+        )
+
+    def test_mobile_host_is_canonicalized(self) -> None:
+        from freegem.web_scraper import _mediawiki_article
+
+        self.assertEqual(
+            _mediawiki_article("https://en.m.wikipedia.org/wiki/Dune_(novel)"),
+            ("en.wikipedia.org", "Dune_(novel)"),
+        )
+
+    def test_percent_decoding(self) -> None:
+        from freegem.web_scraper import _mediawiki_article
+
+        self.assertEqual(
+            _mediawiki_article("https://de.wikipedia.org/wiki/F%C3%BCr_Elise"),
+            ("de.wikipedia.org", "Für_Elise"),
+        )
+
+    def test_non_articles_return_none(self) -> None:
+        from freegem.web_scraper import _mediawiki_article
+
+        self.assertIsNone(_mediawiki_article("https://en.wikipedia.org/wiki/Special:Search"))
+        self.assertIsNone(_mediawiki_article("https://en.wikipedia.org/w/index.php?title=X"))
+        self.assertIsNone(_mediawiki_article("https://example.com/wiki/Page"))
+        self.assertIsNone(_mediawiki_article("ftp://en.wikipedia.org/wiki/X"))
+
+
+class MediaWikiAdapterTests(unittest.TestCase):
+    """scrape_page routes wiki articles through the site's own Action API."""
+
+    def setUp(self) -> None:
+        self.cfg = BridgeConfig(log_requests=False)
+
+    def _api_body(self, title: str, extract: str) -> bytes:
+        return json.dumps(
+            {"query": {"pages": [{"title": title, "extract": extract}]}},
+        ).encode()
+
+    def test_article_fetched_via_api(self) -> None:
+        response = _FakeBytesResponse(
+            self._api_body("Alexander the Great", "Alexander III of Macedon ... " * 30)
+        )
+        with (
+            mock.patch("freegem.web_scraper._check_robots") as robots,
+            mock.patch("freegem.web_scraper._fetch", return_value=response) as fetch,
+        ):
+            result = scrape_page(self.cfg, "https://en.wikipedia.org/wiki/Alexander_the_Great")
+        self.assertEqual(result.via, "mediawiki-api")
+        self.assertEqual(result.title, "Alexander the Great")
+        self.assertIn("Alexander III of Macedon", result.text)
+        # robots is checked twice BY DESIGN: once for the page URL the caller
+        # asked for, once for the api.php URL the adapter actually fetches.
+        self.assertEqual(robots.call_count, 2)
+        api_url = fetch.call_args[0][1]
+        self.assertTrue(api_url.startswith("https://en.wikipedia.org/w/api.php?"))
+        self.assertIn("titles=Alexander_the_Great", api_url)
+
+    def test_missing_article_is_a_scrape_error(self) -> None:
+        response = _FakeBytesResponse(
+            json.dumps({"query": {"pages": [{"missing": True}]}}).encode()
+        )
+        with (
+            mock.patch("freegem.web_scraper._check_robots"),
+            mock.patch("freegem.web_scraper._fetch", return_value=response),
+        ):
+            with self.assertRaises(ScrapeError) as caught:
+                scrape_page(self.cfg, "https://en.wikipedia.org/wiki/No_Such_Article_Xyz")
+        self.assertIn("no article named", str(caught.exception))
+
+    def test_robots_refusal_blocks_the_api_path(self) -> None:
+        with (
+            mock.patch(
+                "freegem.web_scraper._check_robots",
+                side_effect=ScrapeError("robots.txt disallows scraping ..."),
+            ) as robots,
+            mock.patch("freegem.web_scraper._fetch") as fetch,
+        ):
+            with self.assertRaises(ScrapeError):
+                scrape_page(self.cfg, "https://en.wikipedia.org/wiki/Alexander_the_Great")
+        robots.assert_called_once()
+        fetch.assert_not_called()  # never dodge the robots rule
+
+    def test_non_wiki_url_still_uses_html_path(self) -> None:
+        response = _FakeBytesResponse(
+            b"<html><head><title>Local</title></head><body><p>plain html body here</p></body></html>",
+            {"Content-Type": "text/html; charset=utf-8", "Content-Encoding": ""},
+        )
+        with (
+            mock.patch("freegem.web_scraper._check_robots"),
+            mock.patch("freegem.web_scraper._fetch", return_value=response),
+        ):
+            result = scrape_page(self.cfg, "https://example.org/wiki/Lookalike")
+        self.assertEqual(result.via, "html")
+        self.assertIn("plain html body here", result.text)
+
+    def test_extract_truncated_to_max_chars(self) -> None:
+        body = self._api_body("Big", "word " * 5000)
+        with (
+            mock.patch("freegem.web_scraper._check_robots"),
+            mock.patch("freegem.web_scraper._fetch", return_value=_FakeBytesResponse(body)),
+        ):
+            result = scrape_page(self.cfg, "https://en.wikipedia.org/wiki/Big", max_chars=500)
+        self.assertTrue(result.truncated)
+        # 500 minus the trailing space rstrip() removes from "word ".
+        self.assertEqual(len(result.text), 499)
+
+
+class ExtractionQualityTests(unittest.TestCase):
+    def test_labels(self) -> None:
+        self.assertEqual(extraction_quality(""), "empty")
+        self.assertEqual(extraction_quality("   \n  "), "empty")
+        self.assertEqual(extraction_quality("Jump to content\nLog in\nDonate"), "nav_only")
+        self.assertEqual(extraction_quality("word " * 200), "ok")
