@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Nothing yet.
 
+## [2.1.0] — 2026-10-10
+
+### Added
+
+- **`freegem scrape <url>`** CLI command and **`web_scrape`** MCP tool: fetch
+  a web page and return readable text (title, body, no scripts/styles/nav
+  junk), optionally with resolved links, or have Gemini answer a question from
+  the page. Stdlib only — no new dependencies, no JavaScript rendering (raw
+  HTML; SPA sites stay a documented limitation).
+- **`freegem/ssrf.py`, a shared SSRF guard that closes the DNS-rebinding
+  window.** The old resolve→check→reconnect sequence let an attacker-controlled
+  DNS server answer differently on the second lookup. The guard now resolves
+  once, verifies that every resolved address is public, and pins the dial to
+  exactly that checked set — per redirect hop — while TLS keeps using the
+  original hostname for SNI and certificate verification. `fetch_image_bytes`
+  was migrated onto it, closing the same gap on the image path.
+- **Scrape hardening:** `robots.txt` honored by default (the MCP tool cannot
+  bypass it; `--ignore-robots` is CLI-only), 5 MB caps on the wire AND after
+  decompression (gzip bombs die at the cap), HTML/text-only content types,
+  honest User-Agent, no session cookie ever sent to scraped sites, and output
+  wrapped in `[UNTRUSTED WEB CONTENT]` markers with explicit anti-injection
+  instructions in `--ask` mode.
+- **60 new tests** (304 total): every SSRF refusal is tested with the guard
+  unstubbed — literal private/loopback/metadata IPs resolve locally, so the
+  production code path runs end to end without network — plus robots
+  allow/disallow, wire and decompression caps, gzip, redirect-hop rejection,
+  pinning dial-order checks, MCP dispatch, and the CLI surface.
+
 ## [2.0.0] — 2026-10-10
 
 Rebuild of the upstream `gemini-web2api` design into a maintainable package.

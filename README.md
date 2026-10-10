@@ -26,6 +26,7 @@ one base URL.
 
 - [Quick start](#quick-start)
 - [The three faces](#the-three-faces)
+- [Web scraping](#web-scraping)
 - [Models](#models)
 - [Authentication](#authentication)
 - [Configuration](#configuration)
@@ -114,6 +115,7 @@ Exposes Gemini as tools an agent can call:
 | `gemini_advisor` | Structured second opinion on a decision |
 | `gemini_chat` | Raw multi-turn, full control |
 | `gemini_list_models` | Registry introspection |
+| `web_scrape` | Read a web page (SSRF-guarded, robots-aware) |
 
 ```bash
 pip install "freegem[mcp]"
@@ -144,9 +146,51 @@ Client config (`.mcp.example.json`):
 ```bash
 freegem ask "summarise the plot of Dune"        # direct answer
 freegem ask --search "latest Python release"    # web-grounded + sources
+freegem scrape https://example.com --links      # read a web page
 freegem models                                  # registry + session state
 freegem doctor                                  # diagnostics, no generation
 ```
+
+---
+
+## Web scraping
+
+`freegem scrape <url>` fetches a page and prints readable text — title, body,
+no scripts, styles, or nav junk. The same capability is exposed to agents as
+the `web_scrape` MCP tool.
+
+```bash
+freegem scrape https://example.com                     # text + title
+freegem scrape https://example.com --links             # + resolved links
+freegem scrape https://example.com --max-chars 5000    # cap the output
+freegem scrape https://example.com --ask "what is this site?"
+freegem scrape https://example.com --ignore-robots     # CLI only; MCP cannot
+```
+
+**Security model** — this fetches *untrusted* URLs, so it reuses and hardens
+the project's SSRF defenses (`freegem/ssrf.py`):
+
+- Every URL and every redirect hop is **resolved, checked, and pinned**: the
+  connection dials only the verified-public IPs the check inspected, closing
+  the resolve→check→reconnect window (DNS rebinding) the image fetcher
+  previously had. TLS keeps verifying the original hostname (SNI + certs).
+- Private ranges, loopback, link-local (including `169.254.169.254`),
+  reserved, and multicast targets are refused before any socket exists, as
+  are `file://`, `ftp://`, and URLs with embedded credentials.
+- The session cookie is **never** sent to scraped sites.
+- Responses are capped at 5 MB on the wire *and* after decompression, so gzip
+  bombs die at the cap instead of in RAM. Only HTML and text are accepted.
+- `robots.txt` is honored by default. The MCP tool cannot bypass it —
+  `--ignore-robots` exists only on the interactive CLI.
+- Output is wrapped in `[UNTRUSTED WEB CONTENT]` markers, and `--ask` mode
+  instructs Gemini to treat everything between them as data, never as
+  instructions. A page can still contain text aimed at your agent; the
+  markers limit, but do not eliminate, that injection surface.
+
+**Limitations**: no JavaScript rendering (React/SPA sites come back mostly
+empty — that needs a headless browser, deliberately not a dependency), sites
+that block non-browser agents stay blocked (the UA is honest), and scraping
+some sites violates their terms even when `robots.txt` allows it.
 
 ---
 
@@ -346,6 +390,10 @@ Read this before you build on it.
 - **Streaming with tool calls is emulated.** OpenAI clients expect complete
   tool calls, so the full answer is generated, parsed, then replayed as one
   chunk. Plain text streams token-by-token.
+- **The scraper fetches raw HTML.** `web_scrape` / `freegem scrape` render no
+  JavaScript: SPA sites return whatever the server sends before hydration,
+  which is often almost empty. That needs a headless browser and is
+  deliberately out of scope.
 
 ---
 
@@ -373,7 +421,9 @@ no credentials and no network. See
 freegem/
   config.py       immutable config, env overrides
   models.py       model registry + @think parsing
-  gemini.py       Gemini protocol client (the only module that does network)
+  gemini.py       Gemini protocol client
+  ssrf.py         shared SSRF guard: resolve, check, pin (DNS-rebinding safe)
+  web_scraper.py  page fetching: robots, caps, HTML -> text
   multimodal.py   image upload
   tools.py        pure protocol translation (OpenAI/Google -> prompt)
   server.py       HTTP faces

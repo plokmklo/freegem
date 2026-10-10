@@ -18,7 +18,7 @@ file and translation is testable without a credential.
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  cli.py            argparse: serve | mcp | ask | models | doctor
+│  cli.py            argparse: serve | mcp | ask | scrape | models | doctor
 ├──────────────────────────────────────────────────────────────┤
 │  server.py         OpenAI + Google-native HTTP faces         │
 │  mcp_tools.py      MCP tool definitions and dispatch         │
@@ -27,6 +27,9 @@ file and translation is testable without a credential.
 ├──────────────────────────────────────────────────────────────┤
 │  gemini.py         Gemini StreamGenerate client              │
 │  multimodal.py     Scotty resumable image upload             │
+│  web_scraper.py    untrusted-page fetcher (robots, caps)     │
+├──────────────────────────────────────────────────────────────┤
+│  ssrf.py           shared guard: resolve, check, pin         │
 ├──────────────────────────────────────────────────────────────┤
 │  config.py         frozen config, env overrides              │
 │  models.py         model registry, @think parsing            │
@@ -73,7 +76,7 @@ fenced call blocks — contains no network and no configuration. Consequences:
 Keep it pure. If you find yourself wanting config in `tools.py`, the logic
 probably belongs in the caller.
 
-### `gemini.py` is the only network module (plus image upload)
+### `gemini.py` is the only module that talks to Google (plus image upload)
 
 All Google-specific knowledge lives here: cookie parsing, `SAPISIDHASH`
 derivation, the wire format, response parsing, retries, build-tag scraping.
@@ -81,6 +84,22 @@ derivation, the wire format, response parsing, retries, build-tag scraping.
 separate from `StreamGenerate`.
 
 If Google changes the protocol, the blast radius is one file.
+
+### `ssrf.py` guards every fetch of an UNTRUSTED URL
+
+Two surfaces accept URLs from outside (client-supplied image URLs in
+`multimodal.py`, user/agent-supplied pages in `web_scraper.py`), and both go
+through the same guard. The original approach — resolve the host, check that
+every address is public, then let urllib connect — has a window: the connect
+re-resolves the host, and an attacker-controlled DNS server can answer
+differently the second time (DNS rebinding).
+
+`ssrf.py` closes it by resolving once, checking every resolved address, and
+pinning the dial to exactly that checked set — while TLS keeps using the
+original hostname for SNI and certificate verification. Redirect hops are
+re-validated because urllib redispatches each one through the same handlers.
+If you add another place that fetches a URL a user or an agent provided, it
+goes through `build_guarded_opener` too.
 
 ### `server.py` and `mcp_tools.py` are adapters
 
