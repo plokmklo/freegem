@@ -11,8 +11,8 @@ from typing import Any
 from unittest import mock
 from urllib.parse import parse_qs
 
-from gemini_bridge.config import BridgeConfig
-from gemini_bridge.gemini import (
+from freegem.config import BridgeConfig
+from freegem.gemini import (
     BridgeError,
     build_headers,
     build_payload,
@@ -25,7 +25,7 @@ from gemini_bridge.gemini import (
     make_sapisidhash,
     refresh_build_tag,
 )
-from gemini_bridge.models import resolve_model
+from freegem.models import resolve_model
 
 
 def make_response(raw: str) -> io.BytesIO:
@@ -183,7 +183,7 @@ class HeaderTests(unittest.TestCase):
 
 class CookieLoadingTests(unittest.TestCase):
     def setUp(self) -> None:
-        from gemini_bridge import gemini as gem
+        from freegem import gemini as gem
 
         gem._COOKIE_CACHE.update({"mtime": None, "cookie": "", "sapisid": None})
 
@@ -230,7 +230,7 @@ class CookieLoadingTests(unittest.TestCase):
         import os
         import tempfile
 
-        from gemini_bridge import gemini as gem
+        from freegem import gemini as gem
 
         good = json.dumps({"cookie": "SID=good", "sapisid": "s"})
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
@@ -285,16 +285,12 @@ class GenerateTests(unittest.TestCase):
         self.cfg = BridgeConfig(retry_attempts=2, retry_delay_sec=0)
 
     def test_success(self) -> None:
-        with mock.patch(
-            "gemini_bridge.gemini._post", return_value=make_response(wrb_line("hello"))
-        ):
+        with mock.patch("freegem.gemini._post", return_value=make_response(wrb_line("hello"))):
             self.assertEqual(generate(self.cfg, "hi", 1, 4), "hello")
 
     def test_bard_error_not_retried(self) -> None:
         """A rejected request will fail identically on retry; do not hammer."""
-        with mock.patch(
-            "gemini_bridge.gemini._post", return_value=make_response(BARD_ERROR)
-        ) as post:
+        with mock.patch("freegem.gemini._post", return_value=make_response(BARD_ERROR)) as post:
             with self.assertRaises(BridgeError):
                 generate(self.cfg, "hi", 1, 4)
             self.assertEqual(post.call_count, 1)
@@ -310,21 +306,21 @@ class GenerateTests(unittest.TestCase):
                 raise urllib.error.URLError("connection reset")
             return make_response(wrb_line("recovered"))
 
-        with mock.patch("gemini_bridge.gemini._post", side_effect=flaky):
+        with mock.patch("freegem.gemini._post", side_effect=flaky):
             self.assertEqual(generate(self.cfg, "hi", 1, 4), "recovered")
         self.assertEqual(calls["n"], 2)
 
     def test_raises_after_exhausting_retries(self) -> None:
         import urllib.error
 
-        with mock.patch("gemini_bridge.gemini._post", side_effect=urllib.error.URLError("down")):
+        with mock.patch("freegem.gemini._post", side_effect=urllib.error.URLError("down")):
             with self.assertRaises(BridgeError) as ctx:
                 generate(self.cfg, "hi", 1, 4)
         self.assertIn("2 attempts", str(ctx.exception))
 
     def test_proxy_config_passed_through(self) -> None:
         cfg = self.cfg.replace(proxy="http://127.0.0.1:7890")
-        with mock.patch("gemini_bridge.gemini._post", return_value=make_response(wrb_line("ok"))):
+        with mock.patch("freegem.gemini._post", return_value=make_response(wrb_line("ok"))):
             generate(cfg, "hi", 1, 4)
         # _post receives cfg and reads cfg.proxy itself
         self.assertEqual(cfg.proxy, "http://127.0.0.1:7890")
@@ -353,7 +349,7 @@ class StreamTests(unittest.TestCase):
 
     def test_falls_back_to_whole_reply_without_httpx(self) -> None:
         """Without httpx the bridge still works, just not token-by-token."""
-        import gemini_bridge.gemini as gem
+        import freegem.gemini as gem
 
         with (
             mock.patch.object(gem, "HAS_HTTPX", False),
@@ -363,7 +359,7 @@ class StreamTests(unittest.TestCase):
         self.assertEqual(chunks, ["all at once"])
 
     def test_yields_delta_from_progressive_snapshots(self) -> None:
-        import gemini_bridge.gemini as gem
+        import freegem.gemini as gem
 
         with (
             mock.patch.object(gem, "HAS_HTTPX", True),
@@ -377,7 +373,7 @@ class StreamTests(unittest.TestCase):
         self.assertEqual(chunks, ["par", "tial "])
 
     def test_identical_snapshot_yields_nothing(self) -> None:
-        import gemini_bridge.gemini as gem
+        import freegem.gemini as gem
 
         with (
             mock.patch.object(gem, "HAS_HTTPX", True),
@@ -392,7 +388,7 @@ class StreamTests(unittest.TestCase):
 
     def test_rewrite_aborts_instead_of_corrupting(self) -> None:
         """If prior output changes, stop rather than emit a silent rewrite."""
-        import gemini_bridge.gemini as gem
+        import freegem.gemini as gem
 
         with (
             mock.patch.object(gem, "HAS_HTTPX", True),
@@ -409,7 +405,7 @@ class StreamTests(unittest.TestCase):
         self.assertIn("rewrote", str(ctx.exception))
 
     def test_bard_error_during_stream_raises(self) -> None:
-        import gemini_bridge.gemini as gem
+        import freegem.gemini as gem
 
         with (
             mock.patch.object(gem, "HAS_HTTPX", True),
@@ -443,12 +439,12 @@ class BuildTagTests(unittest.TestCase):
         process-wide leaks into other tests. Patching the attribute on the
         module under test is scoped and reverted on exit.
         """
-        import gemini_bridge.gemini as gem
+        import freegem.gemini as gem
 
         return mock.patch.object(gem.urllib.request, "urlopen", return_value=self._urlopen(raw))
 
     def _patched_urlopen_error(self, exc: Any) -> Any:
-        import gemini_bridge.gemini as gem
+        import freegem.gemini as gem
 
         return mock.patch.object(gem.urllib.request, "urlopen", side_effect=exc)
 

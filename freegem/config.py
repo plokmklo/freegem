@@ -77,7 +77,7 @@ class BridgeConfig:
         known = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
         cfg = cls(**{**dict(DEFAULT_CONFIG), **known})
 
-        env = os.environ.get("GEMINI_BRIDGE_CONFIG")
+        env = os.environ.get("FREEGEM_CONFIG")
         if env and not data:
             # no explicit config was passed: honour the env var
             pass
@@ -143,10 +143,10 @@ def load_config(path: str | None) -> BridgeConfig:
 def find_config() -> str | None:
     """Search the usual places for a config file."""
     for candidate in (
-        os.environ.get("GEMINI_BRIDGE_CONFIG"),
+        os.environ.get("FREEGEM_CONFIG"),
         "./config.json",
         "./gemini-auth.json",  # exported by the cookie-sync extension
-        os.path.expanduser("~/.config/gemini-bridge/config.json"),
+        os.path.expanduser("~/.config/freegem/config.json"),
     ):
         if candidate and os.path.exists(candidate):
             return candidate
@@ -156,8 +156,8 @@ def find_config() -> str | None:
 def config_search_paths() -> tuple[str, ...]:
     """The paths :func:`find_config` checks, for ``--config-search`` diagnostics."""
     return (
-        os.environ.get("GEMINI_BRIDGE_CONFIG") or "(unset)",
+        os.environ.get("FREEGEM_CONFIG") or "(unset)",
         "./config.json",
         "./gemini-auth.json",
-        os.path.expanduser("~/.config/gemini-bridge/config.json"),
+        os.path.expanduser("~/.config/freegem/config.json"),
     )

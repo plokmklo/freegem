@@ -14,9 +14,9 @@ import unittest
 from typing import Any
 from unittest import mock
 
-from gemini_bridge.config import BridgeConfig
-from gemini_bridge.gemini import BridgeError
-from gemini_bridge.server import ThreadedServer, estimate_tokens
+from freegem.config import BridgeConfig
+from freegem.gemini import BridgeError
+from freegem.server import ThreadedServer, estimate_tokens
 
 TOOLS = [
     {
@@ -144,7 +144,7 @@ class DiscoveryEndpointTests(EndpointTestCase):
 
 
 class ChatCompletionTests(EndpointTestCase):
-    @mock.patch("gemini_bridge.server.generate")
+    @mock.patch("freegem.server.generate")
     def test_non_streaming(self, generate: Any) -> None:
         generate.return_value = "the answer"
         status, _, raw = self.post(
@@ -157,7 +157,7 @@ class ChatCompletionTests(EndpointTestCase):
         self.assertEqual(payload["choices"][0]["message"]["content"], "the answer")
         self.assertEqual(payload["choices"][0]["finish_reason"], "stop")
 
-    @mock.patch("gemini_bridge.server.generate")
+    @mock.patch("freegem.server.generate")
     def test_model_name_echoed(self, generate: Any) -> None:
         generate.return_value = "ok"
         _, _, raw = self.post(
@@ -166,7 +166,7 @@ class ChatCompletionTests(EndpointTestCase):
         )
         self.assertEqual(json.loads(raw)["model"], "gemini-3.5-flash-thinking")
 
-    @mock.patch("gemini_bridge.server.generate")
+    @mock.patch("freegem.server.generate")
     def test_default_model_used_when_omitted(self, generate: Any) -> None:
         generate.return_value = "ok"
         _, _, raw = self.post(
@@ -194,7 +194,7 @@ class ChatCompletionTests(EndpointTestCase):
         )
         self.assertEqual(status, 400)
 
-    @mock.patch("gemini_bridge.server.generate")
+    @mock.patch("freegem.server.generate")
     def test_upstream_failure_is_502(self, generate: Any) -> None:
         generate.side_effect = BridgeError("Gemini is down")
         status, _, raw = self.post(
@@ -204,7 +204,7 @@ class ChatCompletionTests(EndpointTestCase):
         self.assertEqual(status, 502)
         self.assertIn("Gemini is down", json.loads(raw)["error"]["message"])
 
-    @mock.patch("gemini_bridge.server.generate")
+    @mock.patch("freegem.server.generate")
     def test_usage_present_but_marked_estimate(self, generate: Any) -> None:
         generate.return_value = "hello world"
         _, _, raw = self.post(
@@ -215,7 +215,7 @@ class ChatCompletionTests(EndpointTestCase):
         self.assertIn("total_tokens", usage)
         self.assertGreaterEqual(usage["total_tokens"], usage["completion_tokens"])
 
-    @mock.patch("gemini_bridge.server.generate")
+    @mock.patch("freegem.server.generate")
     def test_tool_calls_parsed(self, generate: Any) -> None:
         generate.return_value = (
             'Checking.\n```tool_call\n{"name": "get_weather", "arguments": {"city": "Tokyo"}}\n```'
@@ -234,7 +234,7 @@ class ChatCompletionTests(EndpointTestCase):
         self.assertEqual(message["tool_calls"][0]["function"]["name"], "get_weather")
         self.assertIn("Tokyo", message["tool_calls"][0]["function"]["arguments"])
 
-    @mock.patch("gemini_bridge.server.generate")
+    @mock.patch("freegem.server.generate")
     def test_tool_choice_none_suppresses_calls(self, generate: Any) -> None:
         generate.return_value = '```tool_call\n{"name": "x", "arguments": {}}\n```'
         _, _, raw = self.post(
@@ -251,7 +251,7 @@ class ChatCompletionTests(EndpointTestCase):
 
 
 class StreamingTests(EndpointTestCase):
-    @mock.patch("gemini_bridge.server.generate_stream")
+    @mock.patch("freegem.server.generate_stream")
     def test_openai_sse_sequence(self, generate_stream: Any) -> None:
         generate_stream.return_value = iter(["hel", "lo"])
         status, headers, raw = self.post(
@@ -275,7 +275,7 @@ class StreamingTests(EndpointTestCase):
         self.assertIn("data: [DONE]", text)
         self.assertTrue(text.endswith("\n\n"))
 
-    @mock.patch("gemini_bridge.server.generate_stream")
+    @mock.patch("freegem.server.generate_stream")
     def test_sse_closes_connection(self, generate_stream: Any) -> None:
         """The fix for the hang: SSE has no Content-Length, so close is required."""
         generate_stream.return_value = iter(["x"])
@@ -290,7 +290,7 @@ class StreamingTests(EndpointTestCase):
         self.assertNotIn("Content-Length", headers)
         self.assertEqual(headers.get("Connection"), "close")
 
-    @mock.patch("gemini_bridge.server.generate_stream")
+    @mock.patch("freegem.server.generate_stream")
     def test_client_disconnect_does_not_crash_server(self, generate_stream: Any) -> None:
         """A dropped client must not take the worker down with it."""
         generate_stream.return_value = iter(["a", "b", "c"])
@@ -315,7 +315,7 @@ class StreamingTests(EndpointTestCase):
 
 
 class GoogleNativeTests(EndpointTestCase):
-    @mock.patch("gemini_bridge.server.generate")
+    @mock.patch("freegem.server.generate")
     def test_generate_content(self, generate: Any) -> None:
         generate.return_value = "native answer"
         status, _, raw = self.post(
@@ -335,7 +335,7 @@ class GoogleNativeTests(EndpointTestCase):
         status, _, _ = self.post("/v1beta/models/gemini-3.6-flash:generateContent", {})
         self.assertEqual(status, 400)
 
-    @mock.patch("gemini_bridge.server.generate")
+    @mock.patch("freegem.server.generate")
     def test_function_calls_parsed(self, generate: Any) -> None:
         fence = "```"
         generate.return_value = (
@@ -354,7 +354,7 @@ class GoogleNativeTests(EndpointTestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["functionCall"]["args"]["city"], "Oslo")
 
-    @mock.patch("gemini_bridge.server.generate_stream")
+    @mock.patch("freegem.server.generate_stream")
     def test_google_stream(self, generate_stream: Any) -> None:
         generate_stream.return_value = iter(["native ", "stream"])
         status, _, raw = self.post(
@@ -368,7 +368,7 @@ class GoogleNativeTests(EndpointTestCase):
 
 
 class ResponsesApiTests(EndpointTestCase):
-    @mock.patch("gemini_bridge.server.generate")
+    @mock.patch("freegem.server.generate")
     def test_string_input(self, generate: Any) -> None:
         generate.return_value = "responses answer"
         status, _, raw = self.post("/v1/responses", {"input": "hello"})
@@ -377,14 +377,14 @@ class ResponsesApiTests(EndpointTestCase):
         self.assertEqual(payload["object"], "response")
         self.assertEqual(payload["output"][0]["content"][0]["text"], "responses answer")
 
-    @mock.patch("gemini_bridge.server.generate")
+    @mock.patch("freegem.server.generate")
     def test_instructions_become_system(self, generate: Any) -> None:
         generate.return_value = "ok"
         self.post("/v1/responses", {"instructions": "be terse", "input": "hi"})
         prompt = generate.call_args[0][1]
         self.assertIn("[System instruction]: be terse", prompt)
 
-    @mock.patch("gemini_bridge.server.generate")
+    @mock.patch("freegem.server.generate")
     def test_function_call_output_item(self, generate: Any) -> None:
         generate.return_value = "ok"
         self.post(
@@ -407,7 +407,7 @@ class ResponsesApiTests(EndpointTestCase):
 class ChunkedBodyTests(EndpointTestCase):
     """Chunked transfer encoding is used by some clients and was hand-rolled."""
 
-    @mock.patch("gemini_bridge.server.generate")
+    @mock.patch("freegem.server.generate")
     def test_chunked_body_parsed(self, generate: Any) -> None:
         generate.return_value = "chunked ok"
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
@@ -448,7 +448,7 @@ class ConfigInjectionTests(EndpointTestCase):
     def test_temporary_chats_reaches_payload(self) -> None:
         """Two concurrent configs must not interfere."""
         self.server.config = BridgeConfig(log_requests=False, temporary_chats=True)
-        from gemini_bridge import gemini
+        from freegem import gemini
 
         with mock.patch.object(gemini, "_post", return_value=io_bytes(wrb_line("ok"))):
             self.post("/v1/chat/completions", {"messages": [{"role": "user", "content": "x"}]})

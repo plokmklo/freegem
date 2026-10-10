@@ -6,7 +6,7 @@ fixture directory, the logic probably belongs in a caller.
 
 import unittest
 
-from gemini_bridge.tools import (
+from freegem.tools import (
     google_contents_to_prompt,
     messages_to_prompt,
     parse_function_calls,

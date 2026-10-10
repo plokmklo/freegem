@@ -2,13 +2,13 @@
 
 One command runs either face of the bridge:
 
-    gemini-bridge serve   # OpenAI + Google-native HTTP API
-    gemini-bridge mcp     # MCP server for agents
+    freegem serve   # OpenAI + Google-native HTTP API
+    freegem mcp     # MCP server for agents
 
 Plus one-shot utilities for checking a setup without starting a server:
-    gemini-bridge ask "what is the time in Tokyo?"
-    gemini-bridge models
-    gemini-bridge doctor
+    freegem ask "what is the time in Tokyo?"
+    freegem models
+    freegem doctor
 """
 
 from __future__ import annotations
@@ -26,15 +26,15 @@ from .models import MODELS, resolve_model
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="gemini-bridge",
+        prog="freegem",
         description="Free Gemini, shaped as the APIs you already use.",
     )
-    parser.add_argument("--version", action="version", version=f"gemini-bridge {__version__}")
+    parser.add_argument("--version", action="version", version=f"freegem {__version__}")
     parser.add_argument(
         "--config",
         metavar="PATH",
         help="config file (default: search ./config.json, ./gemini-auth.json, "
-        "~/.config/gemini-bridge/config.json, $GEMINI_BRIDGE_CONFIG)",
+        "~/.config/freegem/config.json, $FREEGEM_CONFIG)",
     )
     parser.add_argument("--model", metavar="ID", help="default model id")
     parser.add_argument("--cookie-file", metavar="PATH", help="session cookie file")
@@ -58,7 +58,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     mcp.add_argument("--host", default="127.0.0.1", help="bind address for sse")
     mcp.add_argument("--port", type=int, default=8768, help="port for sse")
-    mcp.add_argument("--name", default="gemini-bridge", help="server name shown to clients")
+    mcp.add_argument("--name", default="freegem", help="server name shown to clients")
 
     ask = sub.add_parser("ask", help="ask one question and print the answer")
     ask.add_argument("prompt", nargs="+", help="the question")
@@ -101,7 +101,7 @@ def cmd_serve(cfg: BridgeConfig, args: argparse.Namespace) -> int:
 
     server = ThreadedServer((cfg.host, cfg.port), cfg)
 
-    print(f"gemini-bridge v{__version__}")
+    print(f"freegem v{__version__}")
     print(f"  OpenAI:    http://{cfg.host}:{cfg.port}/v1/chat/completions")
     print(f"  Google:    http://{cfg.host}:{cfg.port}/v1beta/models/<model>:generateContent")
     print(f"  Health:    http://{cfg.host}:{cfg.port}/health")
@@ -170,7 +170,7 @@ def cmd_doctor(cfg: BridgeConfig, args: argparse.Namespace) -> int:
     """Read-only diagnostics. Never sends a generation request."""
     from .gemini import account_prefix, load_cookie
 
-    print(f"gemini-bridge v{__version__}\n")
+    print(f"freegem v{__version__}\n")
     print("Configuration")
     for key, value in cfg.redacted().items():
         print(f"  {key:<20} {value}")

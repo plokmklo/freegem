@@ -41,3 +41,10 @@ htmlcov/
 # Runtime logs
 *.log
 logs/
+
+# Microsoft Office lock files (~$name.docx etc.)
+~$*
+
+# Editor lock files (Word/Office leaves these when a doc is open)
+~$*
+*.tmp

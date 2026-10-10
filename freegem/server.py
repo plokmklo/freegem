@@ -72,7 +72,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
     read-only, so concurrent requests cannot corrupt each other's settings.
     """
 
-    server_version = f"gemini-bridge/{__version__}"
+    server_version = f"freegem/{__version__}"
     protocol_version = "HTTP/1.1"
 
     # ── plumbing ─────────────────────────────────────────────────────────────

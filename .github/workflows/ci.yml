@@ -17,7 +17,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ["3.9", "3.10", "3.11", "3.12"]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
 
     steps:
       - uses: actions/checkout@v4
@@ -40,10 +40,10 @@ jobs:
         run: ruff format --check .
 
       - name: Type check
-        run: mypy gemini_bridge --ignore-missing-imports
+        run: mypy freegem --ignore-missing-imports
 
       - name: Test
-        run: pytest --cov=gemini_bridge --cov-report=term-missing
+        run: pytest --cov=freegem --cov-report=term-missing
 
   # The package is importable and the CLI runs with zero optional extras.
   smoke-no-extras:
@@ -56,9 +56,9 @@ jobs:
       - name: Install with no optional dependencies
         run: pip install -e .
       - name: Import bridge
-        run: python -c "import gemini_bridge; print(gemini_bridge.__version__)"
+        run: python -c "import freegem; print(freegem.__version__)"
       - name: CLI works
         run: |
-          gemini-bridge --version
-          gemini-bridge models
-          gemini-bridge doctor || true
+          freegem --version
+          freegem models
+          freegem doctor || true

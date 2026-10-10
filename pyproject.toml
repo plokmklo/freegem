@@ -3,13 +3,13 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "gemini-bridge"
+name = "freegem"
 version = "2.0.0"
 description = "Free Gemini, shaped as the APIs you already use: OpenAI-compatible, Google-native, and MCP."
 readme = "README.md"
 license = { text = "MIT" }
-requires-python = ">=3.9"
-authors = [{ name = "gemini-bridge contributors" }]
+requires-python = ">=3.10"
+authors = [{ name = "freegem contributors" }]
 keywords = [
     "gemini",
     "openai",
@@ -26,10 +26,10 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 
@@ -54,28 +54,28 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/plokmklo/gemini-bridge"
-Documentation = "https://github.com/plokmklo/gemini-bridge#readme"
-Issues = "https://github.com/plokmklo/gemini-bridge/issues"
+Homepage = "https://github.com/plokmklo/freegem"
+Documentation = "https://github.com/plokmklo/freegem#readme"
+Issues = "https://github.com/plokmklo/freegem/issues"
 
 [project.scripts]
-gemini-bridge = "gemini_bridge.cli:main"
+freegem = "freegem.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["gemini_bridge*"]
+include = ["freegem*"]
 
 [tool.setuptools.package-data]
-gemini_bridge = ["py.typed"]
+freegem = ["py.typed"]
 
 [tool.pytest.ini_options]
 minversion = "7"
-testpaths = ["gemini_bridge/tests"]
+testpaths = ["freegem/tests"]
 addopts = "-q --strict-markers"
 filterwarnings = ["error::DeprecationWarning"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py39"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = [
@@ -97,10 +97,13 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"gemini_bridge/tests/*" = ["B017", "SIM"]
+"freegem/tests/*" = ["B017", "SIM"]
 
 [tool.mypy]
-python_version = "3.9"
+# Floor is 3.10: mypy no longer accepts 3.9 as a target, and nothing on this
+# machine can test against 3.9 anyway. Raising it is more honest than claiming
+# an untested version.
+python_version = "3.10"
 warn_unused_configs = true
 warn_redundant_casts = true
 warn_unused_ignores = true

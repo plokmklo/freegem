@@ -1,4 +1,4 @@
-"""gemini-bridge: free Gemini access, shaped as the APIs you already use.
+"""freegem: free Gemini access, shaped as the APIs you already use.
 
 One bridge, three faces:
 

@@ -46,7 +46,8 @@ _FTYP_BRANDS = {
     b"hevx": "image/hevc",
 }
 
-_PAGE_TOKENS: dict[str, Any] = {"tokens": {}, "ts": 0.0}
+_PAGE_TOKENS: dict[str, Any] = {"tokens": {}, "ts": 0.0, "fetched": False}
+_TOKEN_TTL_SEC = 600.0
 _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
 
@@ -67,11 +68,18 @@ def detect_image_mime(data: bytes, fallback: str = "image/png") -> str:
 
 
 def _page_tokens(cfg: BridgeConfig) -> dict[str, str]:
-    """Fetch and cache the upload-session tokens embedded in Gemini's page."""
+    """Fetch and cache the upload-session tokens embedded in Gemini's page.
+
+    The cache records whether a fetch *happened*, separately from whether it
+    *succeeded*. Guarding on "tokens is non-empty" instead means a failed fetch
+    leaves the cache permanently unsatisfied, so every image after the first
+    triggers another authenticated page load — an avoidable request per image
+    exactly when the network is already struggling.
+    """
     import time
 
     now = time.time()
-    if now - float(_PAGE_TOKENS["ts"]) < 600 and _PAGE_TOKENS["tokens"]:
+    if _PAGE_TOKENS["fetched"] and now - float(_PAGE_TOKENS["ts"]) < _TOKEN_TTL_SEC:
         return _PAGE_TOKENS["tokens"]
 
     headers = {"User-Agent": _UA}
@@ -105,13 +113,13 @@ def _page_tokens(cfg: BridgeConfig) -> dict[str, str]:
     except Exception as exc:
         log(cfg, f"upload-token fetch failed: {exc}")
 
-    _PAGE_TOKENS.update({"tokens": tokens, "ts": now})
+    _PAGE_TOKENS.update({"tokens": tokens, "ts": now, "fetched": True})
     return tokens
 
 
 def reset_page_tokens() -> None:
     """Force the next upload to re-read tokens from the page (used by tests)."""
-    _PAGE_TOKENS.update({"tokens": {}, "ts": 0.0})
+    _PAGE_TOKENS.update({"tokens": {}, "ts": 0.0, "fetched": False})
 
 
 def upload_image(cfg: BridgeConfig, data: bytes, mime: str, filename: str = "image.png") -> str:
@@ -153,6 +161,7 @@ def upload_image(cfg: BridgeConfig, data: bytes, mime: str, filename: str = "ima
     )
     if not upload_url:
         raise BridgeError("upload endpoint returned no upload URL")
+    upload_url = _validate_upload_url(cfg, upload_url)
 
     upload_headers = {
         "X-Goog-Upload-Command": "upload, finalize",
@@ -176,6 +185,36 @@ def upload_image(cfg: BridgeConfig, data: bytes, mime: str, filename: str = "ima
         raise BridgeError(f"upload returned an unusable reference: {file_ref[:64]!r}")
     log(cfg, f"uploaded {filename} ({len(data)} bytes) -> {file_ref[:48]}...")
     return file_ref
+
+
+def _validate_upload_url(cfg: BridgeConfig, upload_url: str) -> str:
+    """Refuse an upload URL that is not on a Google upload host.
+
+    The second step of the resumable upload posts the image bytes *together
+    with the session cookie and the SAPISIDHASH header* to a URL taken from a
+    response header. Normally that header is a `googleapis.com` address, but a
+    malicious or compromised HTTP proxy — and `proxy` is a supported
+    configuration for exactly this project — can answer that header with any
+    host it likes and harvest the session. Constrain the host before sending
+    anything credential-bearing to it.
+    """
+    try:
+        parsed = urllib.parse.urlparse(upload_url)
+    except ValueError as exc:
+        raise BridgeError(f"upload endpoint returned an unparseable URL: {exc}") from exc
+
+    if parsed.scheme != "https":
+        raise BridgeError(f"refusing non-HTTPS upload URL (scheme {parsed.scheme!r})")
+
+    host = (parsed.hostname or "").lower()
+    allowed = {"content-push.googleapis.com", "upload.googleapis.com"}
+    if host not in allowed:
+        log(cfg, f"refusing upload URL on unexpected host {host!r}")
+        raise BridgeError(
+            "upload endpoint redirected to an unexpected host; refusing to send "
+            "the session cookie there"
+        )
+    return upload_url
 
 
 def fetch_image_bytes(cfg: BridgeConfig, url: str) -> bytes:
