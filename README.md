@@ -34,9 +34,7 @@ client = OpenAI(
 
 response = client.chat.completions.create(
     model="gemini-3.6-flash",
-    messages=[
-        {"role": "user", "content": "Explain quantum computing"}
-    ],
+    messages=[{"role": "user", "content": "Explain quantum computing"}],
 )
 
 print(response.choices[0].message.content)
