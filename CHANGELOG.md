@@ -9,6 +9,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Nothing yet.
 
+## [2.2.0] — 2026-10-11
+
+### Added
+
+- **`freegem research` CLI command and `web_research` MCP tool** — multi-source
+  cited research built on the scraper. Give it a question and 2-10 URLs; it
+  fetches each page with the same SSRF/robots/5 MB machinery as
+  `freegem scrape`, then returns one answer with inline `[S1]`, `[S2]`
+  citations, key points, and a Disagreements-and-gaps section.
+
+  - **Local fetch cache** (`~/.cache/freegem/research_cache.json`, 30-minute
+    TTL, `$FREEGEM_CACHE_DIR` to relocate): repeated agent calls over the same
+    URLs do not re-download pages. Successful fetches only; robots.txt and the
+    SSRF guard still run on every real fetch. `--no-cache` and `--refresh`
+    control it from the CLI.
+  - **Hard budgets**: at most 10 pages per call, a per-page character cap
+    (default 12 000, max 50 000), and a total fetched-character budget
+    (default 80 000). A URL that would push the run over the budget is not
+    fetched at all and is reported as skipped in the metadata.
+  - **Bounded prompts**: material that fits goes to Gemini in one pass;
+    larger material takes a map/reduce path (per-page chunked notes, capped,
+    then a reduce pass), so neither prompt grows with the raw page sizes.
+  - **Authoritative source table**: the `[S#] -> URL` table is rendered by
+    freegem from its own fetch metadata — never from model output — and a
+    model answer citing `[Sn]` beyond the real source count is rejected into
+    the deterministic fallback rather than shipped with a fabricated table.
+  - **Deterministic fallback**: when Gemini is unavailable (no session, rate
+    limit), the tool returns the labeled raw extracts instead of failing the
+    whole operation; failed sources are recorded per-URL and the run
+    continues with the rest.
+  - **Untrusted markers end to end**: every page stays wrapped in
+    `[UNTRUSTED WEB CONTENT]` in the prompts, with explicit "data, not
+    instructions" rules — multi-page aggregation widens the injection surface
+    and the markers limit, but do not eliminate, it.
+  - **Boilerplate dedup**: lines shared across most pages (cookie banners,
+    nav) are kept only once in the prompt.
+  - **Formats**: `--format text|markdown|json` (documented JSON schema with
+    per-source fetch status, cache hits, truncation, and timing).
+- MCP: `web_research(urls, question, max_pages=5, max_chars_per_page=12000)`,
+  text output with the source table; no robots bypass, same as `web_scrape`.
+- 36 new tests (386 total): cache roundtrip/TTL/corruption/eviction, budget
+  skipping, max-pages capping, citation preservation and out-of-range
+  rejection, map/reduce staging, dead-chunk survival, boilerplate dedup,
+  deterministic fallback, JSON schema, MCP dispatch and validation, CLI
+  parsing and exit codes.
+
 ## [2.1.1] — 2026-10-10
 
 ### Security

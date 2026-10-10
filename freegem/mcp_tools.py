@@ -101,6 +101,20 @@ TOOL_SPECS: list[dict[str, Any]] = [
             "found inside it."
         ),
     },
+    {
+        "name": "web_research",
+        "summary": "Answer one question from several pages, cited [S1]..[Sn]",
+        "description": (
+            "Fetch up to max_pages URLs with the same SSRF/robots/caps guard as "
+            "web_scrape, then answer one question across all of them with inline "
+            "[S1], [S2] citations, key points, and disagreements/gaps. Successful "
+            "fetches are cached locally with a TTL; per-page and total character "
+            "budgets are enforced; page text stays inside untrusted-content "
+            "markers end to end. When Gemini is unavailable, returns labeled raw "
+            "extracts instead of failing. Not a crawler: give it the specific "
+            "pages to compare or read."
+        ),
+    },
 ]
 
 
@@ -197,6 +211,11 @@ def run_tool(cfg: BridgeConfig, name: str, arguments: dict[str, Any]) -> str:
         from .web_scraper import run_scrape_tool
 
         return run_scrape_tool(cfg, arguments)
+
+    if name == "web_research":
+        from .web_research import run_research_tool
+
+        return run_research_tool(cfg, arguments)
 
     if name == "gemini_list_models":
         lines = ["Available models:", ""]
@@ -364,6 +383,41 @@ def build_server(cfg: BridgeConfig, name: str = "freegem") -> Any:
                 "include_links": include_links,
                 "max_chars": max_chars,
                 "question": question,
+            },
+        )
+
+    @server.tool()
+    def web_research(
+        urls: list,
+        question: str,
+        max_pages: int = 5,
+        max_chars_per_page: int = 12000,
+    ) -> str:
+        """Answer one question from several pages, with [S1]..[Sn] citations.
+
+        Fetches each URL with the same SSRF/robots/5MB guard as web_scrape,
+        extracts readable text, and returns a cited answer (Answer / Key
+        points / Disagreements and gaps) plus the authoritative source table.
+        Successful fetches are cached locally with a 30-minute TTL, so repeated
+        calls do not re-download pages. Per-page and total character budgets
+        apply. When Gemini is unavailable, labeled raw extracts come back
+        instead of an error.
+
+        Args:
+            urls: The pages to research, http/https (2-10 works best).
+            question: What to answer or compare across the pages.
+            max_pages: Fetch at most this many URLs (1-10, default 5).
+            max_chars_per_page: Truncate each page's text to this many
+                characters (500-50000, default 12000).
+        """
+        return run_tool(
+            cfg,
+            "web_research",
+            {
+                "urls": urls,
+                "question": question,
+                "max_pages": max_pages,
+                "max_chars_per_page": max_chars_per_page,
             },
         )
 

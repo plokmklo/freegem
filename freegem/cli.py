@@ -63,7 +63,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"freegem {__version__}")
 
-    sub = parser.add_subparsers(dest="command", metavar="{serve,mcp,ask,models,scrape,doctor}")
+    sub = parser.add_subparsers(
+        dest="command", metavar="{serve,mcp,ask,models,scrape,research,doctor}"
+    )
 
     serve = sub.add_parser("serve", help="run the HTTP API server", parents=[common])
     serve.add_argument("--port", type=int, help="port to listen on (default 8081)")
@@ -106,6 +108,65 @@ def _build_parser() -> argparse.ArgumentParser:
         "--ignore-robots",
         action="store_true",
         help="ignore robots.txt (CLI only: the web_scrape MCP tool cannot bypass it)",
+    )
+
+    research = sub.add_parser(
+        "research",
+        help="fetch several pages and answer one question with [S#] citations",
+        parents=[common],
+    )
+    research.add_argument("urls", nargs="+", metavar="URL", help="pages to research (http/https)")
+    research.add_argument(
+        "--query",
+        "--question",
+        "-q",
+        dest="query",
+        required=True,
+        help="the question to answer from the pages",
+    )
+    research.add_argument(
+        "--format",
+        choices=("text", "markdown", "json"),
+        default="text",
+        help="output format (default text)",
+    )
+    research.add_argument(
+        "--max-pages",
+        type=int,
+        default=5,
+        metavar="N",
+        help="fetch at most N pages (default 5, hard cap 10)",
+    )
+    research.add_argument(
+        "--max-chars-per-page",
+        type=int,
+        default=12000,
+        metavar="N",
+        help="truncate each page's text to N characters (default 12000)",
+    )
+    research.add_argument(
+        "--total-budget",
+        type=int,
+        default=80000,
+        metavar="N",
+        help="hard cap on total fetched characters kept across pages (default 80000)",
+    )
+    research.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="skip the local fetch cache for this run (still writes nothing)",
+    )
+    research.add_argument(
+        "--refresh",
+        action="store_true",
+        help="refetch every URL this run and refresh the cache entries",
+    )
+    research.add_argument(
+        "--cache-ttl",
+        type=int,
+        default=1800,
+        metavar="SEC",
+        help="how long cached fetches stay fresh (default 1800 seconds)",
     )
 
     sub.add_parser("models", help="list available models", parents=[common])
@@ -234,6 +295,30 @@ def cmd_scrape(cfg: BridgeConfig, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_research(cfg: BridgeConfig, args: argparse.Namespace) -> int:
+    """Fetch several pages (guarded, cached, budgeted) and print a cited answer."""
+    from .web_research import research_cli
+
+    try:
+        output = research_cli(
+            cfg,
+            urls=args.urls,
+            query=args.query,
+            fmt=args.format,
+            max_pages=args.max_pages,
+            max_chars_per_page=args.max_chars_per_page,
+            total_budget=args.total_budget,
+            cache_ttl=args.cache_ttl,
+            no_cache=args.no_cache,
+            refresh=args.refresh,
+        )
+    except (BridgeError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(output)
+    return 0
+
+
 def cmd_doctor(cfg: BridgeConfig, args: argparse.Namespace) -> int:
     """Read-only diagnostics. Never sends a generation request."""
     from .gemini import account_prefix, load_cookie
@@ -307,7 +392,7 @@ def main(argv: list[str] | None = None) -> int:
     # namespace (AttributeError on args.port). When no subcommand is present,
     # parse as if `serve` had been written. --help/--version keep the top-level
     # parser so the full command list stays visible.
-    _commands = {"serve", "mcp", "ask", "models", "scrape", "doctor"}
+    _commands = {"serve", "mcp", "ask", "models", "scrape", "research", "doctor"}
     if not any(a in _commands for a in raw) and not any(
         a in ("-h", "--help", "--version") for a in raw
     ):
@@ -347,6 +432,7 @@ def main(argv: list[str] | None = None) -> int:
         "ask": cmd_ask,
         "models": cmd_models,
         "scrape": cmd_scrape,
+        "research": cmd_research,
         "doctor": cmd_doctor,
     }
     return handlers[command](cfg, args)

@@ -124,6 +124,7 @@ Exposes Gemini as tools an agent can call:
 | `gemini_chat` | Raw multi-turn, full control |
 | `gemini_list_models` | Registry introspection |
 | `web_scrape` | Read a web page (SSRF-guarded, robots-aware) |
+| `web_research` | Answer one question from several pages, cited [S1]..[Sn] |
 
 ```bash
 pip install "freegem[mcp]"
@@ -199,6 +200,53 @@ the project's SSRF defenses (`freegem/ssrf.py`):
 empty — that needs a headless browser, deliberately not a dependency), sites
 that block non-browser agents stay blocked (the UA is honest), and scraping
 some sites violates their terms even when `robots.txt` allows it.
+
+## Web research
+
+`freegem research` is the layer above `scrape`: give it a question and several
+URLs, and it fetches every page with the same guarded, robots-aware, capped
+machinery, then returns one answer with inline `[S1]`, `[S2]` citations, key
+points, and a disagreements-and-gaps section. Agents get the same thing as
+the `web_research` MCP tool.
+
+```bash
+freegem research \
+  --query "Which option fits a small Python API?" \
+  https://docs.example.com/option-a \
+  https://docs.example.com/option-b \
+  --format markdown
+```
+
+What it does beyond N scrapes:
+
+- **Local fetch cache** — successful fetches are stored under
+  `~/.cache/freegem/` (30-minute TTL, `$FREEGEM_CACHE_DIR` to relocate), so
+  repeated agent calls do not re-download pages. `--no-cache` / `--refresh`
+  control it. robots.txt and the SSRF guard still run on every real fetch.
+- **Hard budgets** — at most 10 pages per call, a per-page character cap
+  (`--max-chars-per-page`, default 12 000), and a total fetched-character
+  budget (`--total-budget`, default 80 000). URLs that would push the run
+  over budget are reported as skipped, not fetched.
+- **Bounded prompts** — small material goes to Gemini in one pass; larger
+  material takes a map/reduce path (capped per-page notes, then a reduce
+  pass), so prompt size does not grow with raw page size.
+- **Authoritative citations** — the `[S#] -> URL` table is rendered from
+  freegem's own fetch metadata, never from model text, and an answer citing
+  sources that do not exist is rejected into the raw-extract fallback.
+- **Never fails on Gemini** — with no session or on rate limits, you get the
+  labeled raw extracts plus fetch metadata instead of an error; a dead source
+  is recorded per-URL and the rest of the run continues.
+- **Untrusted end to end** — every page stays inside
+  `[UNTRUSTED WEB CONTENT]` markers in every prompt. Folding several
+  attacker-writable pages into one prompt widens the injection surface; the
+  markers limit, but do not eliminate, it.
+- **Formats** — `--format text|markdown|json`; the JSON schema documents
+  per-source status (`ok`, `error`, `truncated`, `from_cache`, `skipped`,
+  `chars`) and run metadata (cache hits, failed pages, timing, version).
+
+Not a crawler: hand it the specific pages to compare. No JavaScript rendering
+(same posture as the scraper), and cache entries store extracted text only —
+never cookies or credentials.
 
 ---
 
@@ -432,6 +480,7 @@ freegem/
   gemini.py       Gemini protocol client
   ssrf.py         shared SSRF guard: resolve, check, pin (DNS-rebinding safe)
   web_scraper.py  page fetching: robots, caps, HTML -> text
+  web_research.py multi-source research: cache, budgets, [S#] citations
   multimodal.py   image upload
   tools.py        pure protocol translation (OpenAI/Google -> prompt)
   server.py       HTTP faces
