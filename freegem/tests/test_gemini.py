@@ -285,16 +285,12 @@ class GenerateTests(unittest.TestCase):
         self.cfg = BridgeConfig(retry_attempts=2, retry_delay_sec=0)
 
     def test_success(self) -> None:
-        with mock.patch(
-            "freegem.gemini._post", return_value=make_response(wrb_line("hello"))
-        ):
+        with mock.patch("freegem.gemini._post", return_value=make_response(wrb_line("hello"))):
             self.assertEqual(generate(self.cfg, "hi", 1, 4), "hello")
 
     def test_bard_error_not_retried(self) -> None:
         """A rejected request will fail identically on retry; do not hammer."""
-        with mock.patch(
-            "freegem.gemini._post", return_value=make_response(BARD_ERROR)
-        ) as post:
+        with mock.patch("freegem.gemini._post", return_value=make_response(BARD_ERROR)) as post:
             with self.assertRaises(BridgeError):
                 generate(self.cfg, "hi", 1, 4)
             self.assertEqual(post.call_count, 1)

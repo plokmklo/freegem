@@ -1,0 +1,90 @@
+name: Bug report
+description: Something is not working as documented
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not paste your `gemini-auth.json`, a cookie value, a `SAPISID`, or an
+        XSRF token.** Describe the symptom instead — those are live credentials.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The exact error or wrong behaviour.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Commands, not descriptions of commands.
+      placeholder: |
+        freegem --version
+        freegem serve
+        curl -s http://127.0.0.1:8081/v1/models
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: `freegem doctor` output
+      description: |
+        It redacts secrets automatically, so it is safe to paste. This single
+        output resolves most reports.
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: freegem, Python, OS
+      placeholder: freegem 2.0.0, Python 3.12.4, Windows 11
+    validations:
+      required: true
+
+  - type: dropdown
+    id: face
+    attributes:
+      label: Which face
+      options:
+        - HTTP API (serve)
+        - MCP tools
+        - One-shot CLI (ask / models / doctor)
+        - Docker
+        - Cookie-sync extension
+    validations:
+      required: true
+
+  - type: dropdown
+    id: session
+    attributes:
+      label: Session state
+      options:
+        - Anonymous (no cookie)
+        - With cookie, authenticated
+        - Not sure
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before filing
+      options:
+        - label: I searched existing issues
+          required: true
+        - label: I confirmed the build tag is current (see README)
+          required: false
+        - label: I am not reporting a Google rate limit or account action
+          required: true

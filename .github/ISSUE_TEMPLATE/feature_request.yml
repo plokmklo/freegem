@@ -1,0 +1,60 @@
+name: Feature request
+description: Suggest an improvement
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please search existing issues first — several common requests are already
+        tracked.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you cannot do today. Not the solution you want.
+      placeholder: I cannot point two different clients at different models...
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: What you would like instead
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - HTTP API surface (/v1, /v1beta)
+        - MCP tools
+        - CLI
+        - Session / cookie handling
+        - Models and thinking depth
+        - Images / multimodal
+        - Docs
+        - Packaging / install
+        - Docker
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Ground rules
+      options:
+        - label: I understand this project has no API-key authentication by
+            design, and requests to add one will be closed
+          required: true
+        - label: I understand tool calling is implemented in prose because Gemini
+            Web has no structured function-calling channel
+          required: true
+        - label: I am not asking for something Google's official API is required
+            for (real Pro routing, guaranteed SLA, official support)
+          required: true

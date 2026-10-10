@@ -72,9 +72,7 @@ class RedactionTests(unittest.TestCase):
 
     def test_session_detection(self) -> None:
         self.assertFalse(BridgeConfig().has_session_cookie())
-        self.assertTrue(
-            BridgeConfig(cookie_file="freegem/tests/__init__.py").has_session_cookie()
-        )
+        self.assertTrue(BridgeConfig(cookie_file="freegem/tests/__init__.py").has_session_cookie())
 
 
 class ConfigLoadingTests(unittest.TestCase):
