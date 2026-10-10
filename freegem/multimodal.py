@@ -12,7 +12,6 @@ import binascii
 import ipaddress
 import re
 import socket
-import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -27,6 +26,7 @@ from .gemini import (
     log,
     make_sapisidhash,
 )
+from .ssrf import SSRFRefused, build_guarded_opener, url_allowed
 
 __all__ = ["detect_image_mime", "fetch_image_bytes", "reset_page_tokens", "upload_image"]
 
@@ -280,35 +280,26 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         raise BridgeError(f"refusing redirect of credentialed request to {newurl!r}")
 
 
-class _PublicOnlyRedirect(urllib.request.HTTPRedirectHandler):
-    """Re-check every redirect hop of an uncredentialed image fetch."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
-        parsed = urllib.parse.urlparse(newurl)
-        if parsed.scheme not in ("http", "https"):
-            raise urllib.error.URLError(f"redirect to scheme {parsed.scheme!r} refused")
-        if not _host_resolves_public(parsed.hostname or ""):
-            raise urllib.error.URLError(f"redirect to non-public host refused: {newurl!r}")
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
-
-
 def fetch_image_bytes(cfg: BridgeConfig, url: str) -> bytes:
-    """Download a remote image. ``file://`` and private hosts are refused."""
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        log(cfg, f"refusing image fetch for scheme {parsed.scheme or 'none'!r}")
+    """Download a remote image. ``file://`` and private hosts are refused.
+
+    The fetch goes through :mod:`freegem.ssrf`, whose handlers resolve, check,
+    and PIN the connection to the checked IP -- the image fetcher used to have
+    a DNS-rebinding window here (check the host, then let urllib re-resolve it
+    and connect to whatever came back the second time).
+    """
+    try:
+        url = url_allowed(url)
+    except SSRFRefused as exc:
+        log(cfg, f"refusing image fetch: {exc}")
         return b""
+    parsed = urllib.parse.urlparse(url)
     if not _host_resolves_public(parsed.hostname or ""):
         log(cfg, f"refusing image fetch for non-public host {parsed.hostname!r}")
         return b""
     try:
         request = urllib.request.Request(url, headers={"User-Agent": _UA})
-        handlers: list = [urllib.request.HTTPSHandler(context=ssl.create_default_context())]
-        if cfg.proxy:
-            handlers.insert(0, urllib.request.ProxyHandler({"http": cfg.proxy, "https": cfg.proxy}))
-        handlers.append(_PublicOnlyRedirect())
-        opener = urllib.request.build_opener(*handlers)
-        response = opener.open(request, timeout=30)
+        response = build_guarded_opener(cfg.proxy).open(request, timeout=30)
         return response.read()
     except Exception as exc:
         log(cfg, f"image fetch failed: {exc}")
