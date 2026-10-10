@@ -11,8 +11,9 @@ import inspect
 import io
 import json
 import threading
+import time
 import unittest
-from typing import Any
+from typing import Any, ClassVar
 from unittest import mock
 
 from freegem.config import BridgeConfig
@@ -604,3 +605,208 @@ class MalformedRequestTests(EndpointTestCase):
         handler_source = inspect.getsource(GeminiHandler.do_POST)
         self.assertIn("408", handler_source)
         self.assertIn("TimeoutError", handler_source)
+
+
+class CrossOriginPOSTTests(EndpointTestCase):
+    """POSTs from non-loopback Origins must die before the Gemini call.
+
+    A cross-site "simple" POST (Content-Type: text/plain) never triggers a
+    CORS preflight, so the only defense is checking Origin and Content-Type
+    inside do_POST itself. These tests pin both layers: the request must be
+    refused AND generate() must never be reached (a 403 that still called
+    Gemini would bill the user's session for an attacker's prompt).
+    """
+
+    BODY: ClassVar[dict[str, Any]] = {
+        "model": "gemini-3.6-flash",
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+
+    @mock.patch("freegem.server.generate")
+    def test_evil_origin_text_plain_403(self, generate: Any) -> None:
+        """The reported attack: evil Origin + text/plain simple POST."""
+        status, _, raw = self.post(
+            "/v1/chat/completions",
+            self.BODY,
+            headers={"Origin": "https://evil.example", "Content-Type": "text/plain"},
+        )
+        self.assertEqual(status, 403)
+        self.assertIn("cross-origin", json.loads(raw)["error"]["message"])
+        generate.assert_not_called()
+
+    @mock.patch("freegem.server.generate")
+    def test_evil_origin_with_json_403(self, generate: Any) -> None:
+        """Even a perfectly formed JSON body is refused from a foreign Origin."""
+        status, _, _ = self.post(
+            "/v1/chat/completions", self.BODY, headers={"Origin": "https://evil.example"}
+        )
+        self.assertEqual(status, 403)
+        generate.assert_not_called()
+
+    @mock.patch("freegem.server.generate")
+    def test_origin_null_403(self, generate: Any) -> None:
+        """``Origin: null`` (sandboxed iframe, redirected post) is not loopback."""
+        status, _, _ = self.post("/v1/chat/completions", self.BODY, headers={"Origin": "null"})
+        self.assertEqual(status, 403)
+        generate.assert_not_called()
+
+    @mock.patch("freegem.server.generate")
+    def test_text_plain_without_origin_415(self, generate: Any) -> None:
+        """No Origin, but a non-JSON content type: the second layer refuses.
+
+        Browsers cannot send application/json without a preflight, so this
+        blocks the simple-request forgery even if the Origin check is ever
+        bypassed.
+        """
+        status, _, raw = self.post(
+            "/v1/chat/completions", self.BODY, headers={"Content-Type": "text/plain"}
+        )
+        self.assertEqual(status, 415)
+        self.assertIn("application/json", json.loads(raw)["error"]["message"])
+        generate.assert_not_called()
+
+    @mock.patch("freegem.server.generate")
+    def test_form_urlencoded_415(self, generate: Any) -> None:
+        status, _, _ = self.post(
+            "/v1/chat/completions",
+            self.BODY,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        self.assertEqual(status, 415)
+        generate.assert_not_called()
+
+    @mock.patch("freegem.server.generate")
+    def test_charset_suffix_accepted(self, generate: Any) -> None:
+        """``application/json; charset=utf-8`` is the same content type."""
+        generate.return_value = "ok"
+        status, _, _ = self.post(
+            "/v1/chat/completions",
+            self.BODY,
+            headers={"Content-Type": "application/json; charset=utf-8"},
+        )
+        self.assertEqual(status, 200)
+
+    @mock.patch("freegem.server.generate")
+    def test_loopback_origin_allowed(self, generate: Any) -> None:
+        """A page served from this machine's own loopback may talk to the API."""
+        generate.return_value = "ok"
+        status, _, raw = self.post(
+            "/v1/chat/completions",
+            self.BODY,
+            headers={
+                "Origin": "http://localhost:3000",
+                "Content-Type": "application/json",
+            },
+        )
+        self.assertEqual(status, 200)
+        # The CORS echo only ever goes to loopback origins (existing behavior).
+        self.assertEqual(json.loads(raw)["choices"][0]["message"]["content"], "ok")
+
+    @mock.patch("freegem.server.generate")
+    def test_missing_origin_curl_style_allowed(self, generate: Any) -> None:
+        """curl and SDKs send no Origin at all; they keep working."""
+        generate.return_value = "ok"
+        status, _, _ = self.post("/v1/chat/completions", self.BODY)
+        self.assertEqual(status, 200)
+
+
+class ThreadCapTests(unittest.TestCase):
+    """ThreadedServer must cap its worker threads and shed load with a 503.
+
+    Each in-flight request holds a thread for up to the 65s handler timeout;
+    without a cap, stalled connections grow the thread count without bound.
+    """
+
+    def _boot(self, cap: int) -> ThreadedServer:
+        server = ThreadedServer(
+            ("127.0.0.1", 0),
+            BridgeConfig(log_requests=False),
+            max_concurrent_requests=cap,
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+        self.addCleanup(thread.join, timeout=5)
+        return server
+
+    def _get(self, port: int, path: str) -> tuple[int, bytes]:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        try:
+            conn.request("GET", path)
+            response = conn.getresponse()
+            raw = response.read()
+            return response.status, raw
+        finally:
+            conn.close()
+
+    def _post_chat(self, port: int) -> tuple[int, bytes]:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=15)
+        try:
+            conn.request(
+                "POST",
+                "/v1/chat/completions",
+                json.dumps({"messages": [{"role": "user", "content": "hi"}]}),
+                {"Content-Type": "application/json"},
+            )
+            response = conn.getresponse()
+            raw = response.read()
+            return response.status, raw
+        finally:
+            conn.close()
+
+    def test_zero_cap_refuses_everything_without_a_thread(self) -> None:
+        """cap=0: every request gets 503 and no worker slot is ever held."""
+        server = self._boot(0)
+        port = server.server_address[1]
+        status, raw = self._get(port, "/health")
+        self.assertEqual(status, 503)
+        self.assertIn("server busy", raw.decode("utf-8"))
+        self.assertIn("bridge_error", raw.decode("utf-8"))
+        self.assertEqual(server._active_requests, 0)
+
+    def test_admit_release_round_trip(self) -> None:
+        server = self._boot(2)
+        self.assertTrue(server._admit())
+        self.assertTrue(server._admit())
+        self.assertFalse(server._admit())  # full
+        server._release()
+        self.assertTrue(server._admit())  # slot freed
+
+    def test_request_beyond_cap_gets_503_while_first_is_in_flight(self) -> None:
+        """A held Gemini call occupies the only slot; the next request sheds."""
+        server = self._boot(1)
+        port = server.server_address[1]
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_generate(*args: Any, **kwargs: Any) -> str:
+            started.set()
+            release.wait(timeout=10)
+            return "done"
+
+        first_result: dict[str, int] = {}
+
+        def first_request() -> None:
+            first_result["status"], _ = self._post_chat(port)
+
+        with mock.patch("freegem.server.generate", side_effect=slow_generate):
+            worker = threading.Thread(target=first_request, daemon=True)
+            worker.start()
+            self.assertTrue(started.wait(timeout=10), "generate was never reached")
+            self.assertEqual(server._active_requests, 1)
+
+            status, raw = self._get(port, "/health")
+            self.assertEqual(status, 503)
+            self.assertIn("server busy", raw.decode("utf-8"))
+
+            release.set()
+            worker.join(timeout=10)
+            self.assertEqual(first_result["status"], 200)
+
+        # The slot came back after the request finished.
+        for _ in range(200):
+            if server._active_requests == 0:
+                break
+            time.sleep(0.01)
+        self.assertEqual(server._active_requests, 0)

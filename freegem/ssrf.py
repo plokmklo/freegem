@@ -256,7 +256,9 @@ class PinnedHTTPSHandler(urllib.request.HTTPSHandler):
         return self.do_open(conn_class, req)
 
 
-def build_guarded_opener(proxy: str | None = None) -> urllib.request.OpenerDirector:
+def build_guarded_opener(
+    proxy: str | None = None, context: ssl.SSLContext | None = None
+) -> urllib.request.OpenerDirector:
     """An opener for untrusted, user-supplied URLs.
 
     Direct mode (no proxy): every request -- the first URL and every redirect
@@ -266,7 +268,13 @@ def build_guarded_opener(proxy: str | None = None) -> urllib.request.OpenerDirec
     Proxy mode: DNS is resolved by the proxy, so the client cannot pin the
     dial target; the client-side public-IP check still runs on the first URL
     (callers) and on every redirect hop (SafeRedirect).
+
+    ``context`` lets callers share one SSLContext (gemini._ssl_ctx caches one
+    process-wide; building a fresh context per fetch re-parses the CA bundle
+    every time). Defaults to a private ``create_default_context()`` so this
+    module stays safe to use standalone.
     """
+    tls = context if context is not None else ssl.create_default_context()
     if proxy:
         return urllib.request.build_opener(
             urllib.request.ProxyHandler({"http": proxy, "https": proxy}),
@@ -274,6 +282,6 @@ def build_guarded_opener(proxy: str | None = None) -> urllib.request.OpenerDirec
         )
     return urllib.request.build_opener(
         PinnedHTTPHandler(),
-        PinnedHTTPSHandler(ssl.create_default_context()),
+        PinnedHTTPSHandler(tls),
         SafeRedirect(),
     )

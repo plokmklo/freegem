@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import contextlib
 import json
+import socket
+import threading
 import time
 import urllib.parse
 import uuid
@@ -299,6 +301,36 @@ class GeminiHandler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def _post_may_run(self) -> bool:
+        """Cross-site gate for POSTs: loopback Origin, JSON content type.
+
+        Two independent layers, because either one alone can be bypassed:
+
+        - Origin: a browser sends ``Origin`` on every cross-site POST, and a
+          \"simple\" POST (text/plain or form-urlencoded) skips the CORS
+          preflight entirely, so the preflight-based defenses elsewhere in
+          this file never fire. Any Origin that is not this machine's own
+          loopback server is therefore refused outright. A missing Origin
+          header means a non-browser client (curl, an SDK, tests) and is
+          allowed; ``Origin: null`` (sandboxed iframes, redirected posts) is
+          NOT loopback and is refused.
+        - Content-Type: browsers cannot attach ``application/json`` to a
+          simple request -- the spec forces a preflight for it -- so requiring
+          JSON blocks the text/plain forgery even if a future caller forgets
+          the Origin check.
+        """
+        origin = self.headers.get("Origin")
+        if origin is not None and not _origin_is_loopback(origin):
+            log(self.cfg, f"rejected cross-origin POST from Origin {origin!r}")
+            self.send_error_json("cross-origin POSTs are not allowed", 403)
+            return False
+        content_type = (self.headers.get("Content-Type") or "").split(";", 1)[0]
+        if content_type.strip().lower() != "application/json":
+            log(self.cfg, f"rejected POST with Content-Type {content_type.strip()!r}")
+            self.send_error_json("Content-Type must be application/json", 415)
+            return False
+        return True
+
     def do_OPTIONS(self) -> None:
         if not self._client_may_speak():
             return
@@ -373,6 +405,8 @@ class GeminiHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         if not self._client_may_speak():
+            return
+        if not self._post_may_run():
             return
         try:
             path = self.path.split("?", 1)[0]
@@ -949,9 +983,89 @@ class GeminiHandler(BaseHTTPRequestHandler):
 
 
 class ThreadedServer(ThreadingMixIn, HTTPServer):
+    """A thread-per-request server with a hard cap on concurrent requests.
+
+    Every in-flight request holds a worker thread for up to the handler's
+    65-second timeout. Without a cap, a client that opens connections and
+    stalls them (accidentally or on purpose) grows the thread count without
+    bound. Requests beyond the cap get an immediate 503 -- written on the
+    socket before any thread is spawned -- instead of a thread.
+    """
+
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address: tuple[str, int], config: BridgeConfig):
+    # The default cap. Plenty for one user's local bridge; configure by
+    # constructing ThreadedServer(..., max_concurrent_requests=N).
+    max_concurrent_requests = 32
+
+    def __init__(
+        self,
+        address: tuple[str, int],
+        config: BridgeConfig,
+        *,
+        max_concurrent_requests: int | None = None,
+    ):
         super().__init__(address, GeminiHandler)
         self.config = config  # read-only for handlers
+        self._max_concurrent = (
+            self.max_concurrent_requests
+            if max_concurrent_requests is None
+            else max_concurrent_requests
+        )
+        self._active_requests = 0
+        self._admit_lock = threading.Lock()
+
+    def _admit(self) -> bool:
+        """Atomically claim one request slot; False when the server is full."""
+        with self._admit_lock:
+            if self._active_requests >= self._max_concurrent:
+                return False
+            self._active_requests += 1
+            return True
+
+    def _release(self) -> None:
+        with self._admit_lock:
+            self._active_requests -= 1
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        # ``request`` is always a connected socket for an HTTPServer, but the
+        # socketserver supertype types it as the wider stream/datagram union,
+        # so the override takes Any and _refuse_busy narrows it.
+        if not self._admit():
+            self._refuse_busy(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            # The worker thread was never spawned (or failed to start), so the
+            # slot it would have released on completion leaks. Give it back.
+            self._release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._release()
+
+    @staticmethod
+    def _refuse_busy(request: socket.socket) -> None:
+        """Answer 503 on the raw socket and close, before any thread spawns."""
+        body = b'{"error":{"message":"server busy: too many concurrent requests","type":"bridge_error"}}'
+        head = (
+            "HTTP/1.1 503 Service Unavailable\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(body)}\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+        ).encode("ascii")
+        try:
+            request.sendall(head + body)
+        except OSError:
+            pass  # the client hung up first; nothing to tell
+        finally:
+            with contextlib.suppress(OSError):
+                request.shutdown(socket.SHUT_RDWR)
+            with contextlib.suppress(OSError):
+                request.close()

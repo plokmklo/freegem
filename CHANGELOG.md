@@ -9,6 +9,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Nothing yet.
 
+## [2.1.1] — 2026-10-10
+
+### Security
+
+- **Server: cross-site POSTs are refused before any work happens.** A browser
+  can send a "simple" cross-origin POST (`Content-Type: text/plain`) without a
+  CORS preflight, and such requests previously ran to completion — including
+  the Gemini call on the user's session. Two independent layers now gate every
+  POST: (1) any `Origin` header that is not this machine's own loopback gets a
+  403 (`Origin: null` included; a missing Origin — curl, SDKs — still works),
+  and (2) the body must be `Content-Type: application/json` (415 otherwise),
+  which browsers cannot attach without a preflight. Charset suffixes
+  (`application/json; charset=utf-8`) are accepted.
+
+### Fixed
+
+- **Server: hard cap on concurrent request threads** (`ThreadedServer`,
+  default 32, configurable via `max_concurrent_requests=`). Every in-flight
+  request holds a worker for up to the 65 s handler timeout; beyond the cap,
+  new connections get an immediate 503 written on the raw socket before any
+  thread is spawned, instead of growing the thread count without bound.
+- **Retries now back off exponentially and honor `Retry-After`.** The fixed
+  `retry_delay_sec` sleep became `delay * 2^(attempt-1)`, capped at 30 s; when
+  the upstream sends `Retry-After` (delay-seconds or HTTP-date), the longer of
+  the two wins, capped the same way. Applies to both `generate()` and
+  `generate_stream()`.
+- **One shared SSLContext everywhere.** `build_guarded_opener()` accepts a
+  caller-supplied context, and every guarded fetch (scraper, robots.txt,
+  image fetcher) now passes the project's cached `gemini._ssl_ctx()` instead
+  of building a fresh context — and re-parsing the CA bundle — per request.
+- **CI: the `mcp` extra is actually tested.** A new `smoke-mcp` job installs
+  `.[mcp]`, builds the FastMCP server, and runs the tool-dispatch tests with
+  the real `mcp` package present, so a broken MCP face can no longer hide
+  behind "extra missing, skipped".
+
+### Added
+
+- **Daily breakage canary** (`.github/workflows/canary.yml`, cron 07:23 UTC).
+  This project talks to an unversioned web endpoint and live sites, so the
+  likely failure is an upstream change, not a commit. The canary runs without
+  credentials: `freegem doctor`, an end-to-end scrape of a stable page, a
+  robots.txt refusal, and two SSRF-refusal probes (loopback and the cloud
+  metadata address). Red canary = something upstream moved.
+- **26 new tests** (330 total): cross-origin/Content-Type refusals assert the
+  Gemini call is never reached, thread-cap shed-load behavior over a real
+  socket, exponential backoff curves and Retry-After parsing (both RFC forms),
+  and the shared-SSLContext invariant on the guarded opener.
+
 ## [2.1.0] — 2026-10-10
 
 ### Added

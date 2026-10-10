@@ -7,13 +7,19 @@ suite runs in CI on a public fork with no credentials.
 import io
 import json
 import unittest
-from typing import Any
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
+from typing import Any, ClassVar
 from unittest import mock
 from urllib.parse import parse_qs
 
 from freegem.config import BridgeConfig
 from freegem.gemini import (
+    _RETRY_BACKOFF_CAP_SEC,
     BridgeError,
+    _backoff_delay,
+    _exc_retry_after,
+    _retry_after_seconds,
     build_headers,
     build_payload,
     build_url,
@@ -503,3 +509,126 @@ class ModelResolutionIntegrationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _StatusResponse(io.BytesIO):
+    """A ``_post()`` stand-in that carries an HTTP status and headers.
+
+    Mirrors the real urlopen contract closely enough for the retry loop: it is
+    a context manager, exposes ``status``, and serves ``headers`` like the
+    addinfourl wrappers do. ``read()`` is never reached on error statuses.
+    """
+
+    def __init__(self, status: int, headers: dict[str, str] | None = None) -> None:
+        super().__init__(b"")
+        self.status = status
+        self.headers: dict[str, str] = headers or {}
+
+    def __enter__(self) -> Any:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+class BackoffTests(unittest.TestCase):
+    """Retries wait exponentially and honor the server's Retry-After."""
+
+    def test_backoff_is_exponential(self) -> None:
+        self.assertEqual(_backoff_delay(2, 1), 2.0)
+        self.assertEqual(_backoff_delay(2, 2), 4.0)
+        self.assertEqual(_backoff_delay(2, 3), 8.0)
+
+    def test_backoff_is_capped(self) -> None:
+        # 2 * 2^19 is ~1M seconds; the cap must win long before that.
+        self.assertEqual(_backoff_delay(2, 20), _RETRY_BACKOFF_CAP_SEC)
+        self.assertLessEqual(_backoff_delay(2, 20), 30.0)
+
+    def test_retry_after_overrides_when_longer(self) -> None:
+        self.assertEqual(_backoff_delay(2, 1, retry_after=7.0), 7.0)
+
+    def test_retry_after_also_capped(self) -> None:
+        self.assertEqual(_backoff_delay(2, 1, retry_after=3600.0), _RETRY_BACKOFF_CAP_SEC)
+
+    def test_retry_after_ignored_when_shorter(self) -> None:
+        # attempt 2 with base 2 waits 4s; a 3s Retry-After asks for less, so
+        # the exponential delay stands.
+        self.assertEqual(_backoff_delay(2, 2, retry_after=3.0), 4.0)
+
+    def test_retry_after_delay_seconds_form(self) -> None:
+        self.assertEqual(_retry_after_seconds({"Retry-After": "7"}), 7.0)
+        self.assertEqual(_retry_after_seconds({"Retry-After": " 120 "}), 120.0)
+
+    def test_retry_after_http_date_form(self) -> None:
+        future = format_datetime(datetime.now(timezone.utc) + timedelta(seconds=90), usegmt=True)
+        past = format_datetime(datetime.now(timezone.utc) - timedelta(seconds=90), usegmt=True)
+        in_ninety = _retry_after_seconds({"Retry-After": future})
+        assert in_ninety is not None
+        self.assertGreater(in_ninety, 60.0)
+        self.assertLessEqual(in_ninety, 90.0)
+        # A date in the past means "retry now": clamped to zero, not negative.
+        self.assertEqual(_retry_after_seconds({"Retry-After": past}), 0.0)
+
+    def test_retry_after_garbage_is_none(self) -> None:
+        self.assertIsNone(_retry_after_seconds({"Retry-After": "soon-ish"}))
+        self.assertIsNone(_retry_after_seconds({"Retry-After": ""}))
+        self.assertIsNone(_retry_after_seconds({}))
+        self.assertIsNone(_retry_after_seconds(None))
+
+    def test_exc_retry_after_reads_httpx_shape(self) -> None:
+        """httpx raises HTTPStatusError with headers on .response.headers."""
+
+        class _FakeResponse:
+            headers: ClassVar[dict[str, str]] = {"Retry-After": "9"}
+
+        class _FakeHTTPXError(Exception):
+            response = _FakeResponse()
+
+        self.assertEqual(_exc_retry_after(_FakeHTTPXError()), 9.0)
+
+    def test_exc_retry_after_reads_urllib_shape(self) -> None:
+        class _FakeHTTPError(Exception):
+            headers: ClassVar[dict[str, str]] = {"Retry-After": "5"}
+
+        self.assertEqual(_exc_retry_after(_FakeHTTPError()), 5.0)
+        self.assertIsNone(_exc_retry_after(ValueError("no headers here")))
+
+    def test_generate_honors_retry_after_header(self) -> None:
+        """A 429 with Retry-After sleeps exactly as long as the server said."""
+        cfg = BridgeConfig(retry_attempts=2, retry_delay_sec=2)
+        with (
+            mock.patch(
+                "freegem.gemini._post",
+                side_effect=[_StatusResponse(429, {"Retry-After": "7"}), _StatusResponse(429)],
+            ),
+            mock.patch("freegem.gemini.time.sleep") as sleep,
+        ):
+            with self.assertRaises(BridgeError) as ctx:
+                generate(cfg, "hi", 1, 0)
+        sleep.assert_called_once_with(7.0)
+        self.assertIn("upstream HTTP 429", str(ctx.exception))
+
+    def test_generate_backs_off_exponentially_without_header(self) -> None:
+        cfg = BridgeConfig(retry_attempts=3, retry_delay_sec=2)
+        with (
+            mock.patch(
+                "freegem.gemini._post",
+                side_effect=[_StatusResponse(500), _StatusResponse(500), _StatusResponse(500)],
+            ),
+            mock.patch("freegem.gemini.time.sleep") as sleep,
+        ):
+            with self.assertRaises(BridgeError):
+                generate(cfg, "hi", 1, 0)
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], [2.0, 4.0])
+
+    def test_generate_upstream_http_status_is_retried_not_fatal(self) -> None:
+        """A transient 429 recovers on the next attempt instead of failing."""
+        cfg = BridgeConfig(retry_attempts=2, retry_delay_sec=0)
+        with (
+            mock.patch(
+                "freegem.gemini._post",
+                side_effect=[_StatusResponse(429), make_response(wrb_line("recovered"))],
+            ),
+            mock.patch("freegem.gemini.time.sleep"),
+        ):
+            self.assertEqual(generate(cfg, "hi", 1, 0), "recovered")

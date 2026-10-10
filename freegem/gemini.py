@@ -17,6 +17,8 @@ import urllib.parse
 import urllib.request
 import uuid
 from collections.abc import Iterator
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 from .config import BridgeConfig
@@ -78,6 +80,83 @@ def _ssl_ctx() -> ssl.SSLContext:
     if _SSL_CTX is None:
         _SSL_CTX = ssl.create_default_context()
     return _SSL_CTX
+
+
+# Backoff never waits longer than this, even when Retry-After asks for more:
+# a bridge retrying in the foreground should not silently hang for minutes.
+_RETRY_BACKOFF_CAP_SEC = 30.0
+
+
+class _UpstreamHTTPStatus(RuntimeError):
+    """The upstream answered with an HTTP error status.
+
+    Carries the parsed Retry-After header (if any) so the retry loop can honor
+    it instead of guessing.
+    """
+
+    def __init__(self, status: int, retry_after: float | None = None) -> None:
+        super().__init__(f"upstream HTTP {status}")
+        self.status = status
+        self.retry_after = retry_after
+
+
+def _retry_after_seconds(headers: Any) -> float | None:
+    """Parse a Retry-After header into seconds.
+
+    Handles both forms the RFC allows: delay-seconds (``120``) and an HTTP
+    date. Anything unparseable, absent, or already in the past becomes None
+    ("no hint"), and the exponential backoff decides on its own.
+    """
+    if headers is None:
+        return None
+    try:
+        raw = headers.get("Retry-After")
+    except Exception:
+        return None
+    if not raw:
+        return None
+    raw = str(raw).strip()
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))  # delay-seconds form
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(raw)  # HTTP-date form
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
+
+
+def _exc_retry_after(exc: Exception) -> float | None:
+    """Best-effort Retry-After extraction from an exception.
+
+    urllib's HTTPError carries ``.headers`` directly; httpx's HTTPStatusError
+    carries them on ``.response.headers``. Both shapes are covered so the
+    streaming and non-streaming retry loops share one helper.
+    """
+    headers = getattr(exc, "headers", None)
+    if headers is None:
+        headers = getattr(getattr(exc, "response", None), "headers", None)
+    return _retry_after_seconds(headers)
+
+
+def _backoff_delay(base: float, attempt: int, retry_after: float | None = None) -> float:
+    """How long attempt N's failure should wait before retrying.
+
+    Exponential in the attempt number (``base * 2^(N-1)``), capped so a long
+    run of failures cannot wedge the caller. A server-provided Retry-After is
+    honored when it asks for more than the exponential delay would -- the
+    server knows its own capacity better than our curve does -- but is capped
+    by the same ceiling.
+    """
+    delay = min(base * (2 ** (attempt - 1)), _RETRY_BACKOFF_CAP_SEC)
+    if retry_after is not None and retry_after > delay:
+        delay = min(retry_after, _RETRY_BACKOFF_CAP_SEC)
+    return delay
 
 
 def account_prefix(cfg: BridgeConfig) -> str:
@@ -353,7 +432,9 @@ def generate(
                     # Retryable on purpose: 429/5xx are transient, and without
                     # this a rate-limit page streamed back as HTTP 200 with
                     # content: null while the retry loop never engaged.
-                    raise RuntimeError(f"upstream HTTP {status}")
+                    raise _UpstreamHTTPStatus(
+                        int(status), _retry_after_seconds(getattr(response, "headers", None))
+                    )
                 raw = response.read().decode("utf-8", errors="replace")
             text = extract_response_text(raw)
             if not text.strip():
@@ -364,11 +445,26 @@ def generate(
             return text
         except BridgeError:
             raise  # upstream said no; retrying the same request will not help
+        except _UpstreamHTTPStatus as exc:
+            last_error = exc
+            if attempt < cfg.retry_attempts:
+                delay = _backoff_delay(cfg.retry_delay_sec, attempt, exc.retry_after)
+                log(
+                    cfg,
+                    f"attempt {attempt}/{cfg.retry_attempts} failed: {exc}; "
+                    f"retrying in {delay:.1f}s",
+                )
+                time.sleep(delay)
         except Exception as exc:
             last_error = exc
             if attempt < cfg.retry_attempts:
-                log(cfg, f"attempt {attempt}/{cfg.retry_attempts} failed: {exc}; retrying")
-                time.sleep(cfg.retry_delay_sec)
+                delay = _backoff_delay(cfg.retry_delay_sec, attempt)
+                log(
+                    cfg,
+                    f"attempt {attempt}/{cfg.retry_attempts} failed: {exc}; "
+                    f"retrying in {delay:.1f}s",
+                )
+                time.sleep(delay)
     raise BridgeError(f"Gemini request failed after {cfg.retry_attempts} attempts: {last_error}")
 
 
@@ -460,8 +556,13 @@ def generate_stream(
                 ) from exc
             last_error = exc
             if attempt < cfg.retry_attempts:
-                log(cfg, f"stream attempt {attempt}/{cfg.retry_attempts} failed: {exc}; retrying")
-                time.sleep(cfg.retry_delay_sec)
+                delay = _backoff_delay(cfg.retry_delay_sec, attempt, _exc_retry_after(exc))
+                log(
+                    cfg,
+                    f"stream attempt {attempt}/{cfg.retry_attempts} failed: {exc}; "
+                    f"retrying in {delay:.1f}s",
+                )
+                time.sleep(delay)
     raise BridgeError(f"Gemini stream failed after {cfg.retry_attempts} attempts: {last_error}")
 
 

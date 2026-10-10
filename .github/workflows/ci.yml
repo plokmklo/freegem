@@ -45,6 +45,27 @@ jobs:
       - name: Test
         run: pytest --cov=freegem --cov-report=term-missing
 
+  # The MCP face is an optional extra, so the main matrix (dev only) never
+  # imports it. This job is the only place CI exercises the mcp extra: the
+  # FastMCP server must build and the tool-dispatch tests must pass WITH the
+  # real mcp package installed, not skipped as "extra missing".
+  smoke-mcp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install with the mcp extra
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[mcp]"
+      - name: MCP server builds
+        run: python -c "from freegem.config import BridgeConfig; from freegem.mcp_tools import build_server; build_server(BridgeConfig(log_requests=False))"
+      - name: MCP dispatch tests (with mcp installed)
+        run: pytest freegem/tests/test_tools.py -q
+
   # The package is importable and the CLI runs with zero optional extras.
   smoke-no-extras:
     runs-on: ubuntu-latest

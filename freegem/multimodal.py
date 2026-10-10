@@ -299,7 +299,9 @@ def fetch_image_bytes(cfg: BridgeConfig, url: str) -> bytes:
         return b""
     try:
         request = urllib.request.Request(url, headers={"User-Agent": _UA})
-        response = build_guarded_opener(cfg.proxy).open(request, timeout=30)
+        # _ssl_ctx(): the same cached TLS context the rest of the project
+        # uses, instead of a fresh one per fetch.
+        response = build_guarded_opener(cfg.proxy, _ssl_ctx()).open(request, timeout=30)
         return response.read()
     except Exception as exc:
         log(cfg, f"image fetch failed: {exc}")

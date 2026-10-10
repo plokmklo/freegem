@@ -88,6 +88,14 @@ freegem doctor
 | `GET  /v1beta/models` | Google model discovery |
 | `GET  /health` | Liveness and session status |
 
+The server is loopback-only and assumes no auth, so it hardens its own
+surface: POST bodies must be `Content-Type: application/json`, any request
+carrying a non-loopback `Origin` header is refused with 403 (blocks
+cross-site "simple" POSTs that skip CORS preflight), concurrent requests are
+capped (default 32; extra connections get 503 instead of an unbounded thread
+count), and a stalled client cannot hold a thread forever (65 s read timeout,
+reported as 408).
+
 Codex CLI:
 
 ```bash
@@ -281,7 +289,7 @@ cp config.example.json config.json
 | `gemini_bl` | built-in | Frontend build tag; auto-refreshed on `serve` |
 | `temporary_chats` | `false` | Keep requests out of your account history |
 | `retry_attempts` | `3` | Retries on transient failure |
-| `retry_delay_sec` | `2` | Delay between retries |
+| `retry_delay_sec` | `2` | Base delay between retries; grows exponentially (2 s, 4 s, 8 s … capped at 30 s), and a server-sent `Retry-After` header wins when it asks for longer |
 | `request_timeout_sec` | `180` | Per-request timeout |
 | `proxy` | `null` | HTTP proxy if `gemini.google.com` is blocked |
 | `log_requests` | `true` | Request log to stderr |

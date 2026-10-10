@@ -36,7 +36,7 @@ from html.parser import HTMLParser
 from typing import Any
 
 from .config import BridgeConfig
-from .gemini import BridgeError, log
+from .gemini import BridgeError, _ssl_ctx, log
 from .ssrf import SSRFRefused, build_guarded_opener, url_allowed
 
 __all__ = [
@@ -96,7 +96,7 @@ def _fetch(cfg: BridgeConfig, url: str, timeout: float = 30) -> Any:
     """GET one URL through the guarded opener. Raises ScrapeError on refusal."""
     request = urllib.request.Request(url, headers={"User-Agent": _UA, "Accept-Encoding": "gzip"})
     try:
-        return build_guarded_opener(cfg.proxy).open(request, timeout=timeout)
+        return build_guarded_opener(cfg.proxy, _ssl_ctx()).open(request, timeout=timeout)
     except SSRFRefused as exc:
         log(cfg, f"scrape refused: {exc}")
         raise ScrapeError(f"SSRF guard refused {url!r}: {exc}") from exc
@@ -171,7 +171,7 @@ def _check_robots(cfg: BridgeConfig, url: str) -> None:
     robots_url = urllib.parse.urljoin(url, "/robots.txt")
     request = urllib.request.Request(robots_url, headers={"User-Agent": _UA})
     try:
-        response = build_guarded_opener(cfg.proxy).open(request, timeout=15)
+        response = build_guarded_opener(cfg.proxy, _ssl_ctx()).open(request, timeout=15)
     except SSRFRefused as exc:
         log(cfg, f"robots fetch refused: {exc}")
         raise ScrapeError(f"SSRF guard refused {robots_url!r}: {exc}") from exc

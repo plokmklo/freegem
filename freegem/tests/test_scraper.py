@@ -18,6 +18,7 @@ from __future__ import annotations
 import gzip
 import io
 import socket
+import ssl
 import threading
 import unittest
 import urllib.error
@@ -26,6 +27,7 @@ import urllib.request
 from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
 from unittest import mock
 
 from freegem.cli import _build_parser, main
@@ -35,9 +37,11 @@ from freegem.mcp_tools import TOOL_SPECS, run_tool
 from freegem.multimodal import fetch_image_bytes
 from freegem.ssrf import (
     PinnedHTTPHandler,
+    PinnedHTTPSHandler,
     SafeRedirect,
     SSRFRefused,
     _pinned_https_class,
+    build_guarded_opener,
     pick_public_ip,
     pick_public_ips,
     url_allowed,
@@ -663,3 +667,33 @@ def _png_getter(png: bytes) -> Callable[[BaseHTTPRequestHandler], None]:
         self.wfile.write(png)
 
     return do_GET
+
+
+class GuardedOpenerContextTests(unittest.TestCase):
+    """build_guarded_opener must use the caller's SSLContext, not a fresh one.
+
+    The project keeps one cached TLS context (gemini._ssl_ctx) and every fetch
+    path is supposed to share it. A context built per fetch works but silently
+    re-parses the CA bundle on every scrape and splits trust stores across
+    callers -- the inconsistency this test pins shut.
+    """
+
+    @staticmethod
+    def _pinned_https_handler_of(opener: Any) -> PinnedHTTPSHandler:
+        """The single PinnedHTTPSHandler in an opener's runtime handler list.
+
+        ``OpenerDirector.handlers`` is a runtime instance attribute that the
+        typeshed stubs do not declare, hence the __dict__ access.
+        """
+        found = [h for h in opener.__dict__["handlers"] if isinstance(h, PinnedHTTPSHandler)]
+        assert len(found) == 1, f"expected exactly one pinned HTTPS handler, got {found}"
+        return found[0]
+
+    def test_shared_context_reaches_the_https_handler(self) -> None:
+        context = ssl.create_default_context()
+        opener = build_guarded_opener(None, context)
+        self.assertIs(self._pinned_https_handler_of(opener)._pinned_context, context)
+
+    def test_default_context_when_none_given(self) -> None:
+        opener = build_guarded_opener(None, None)
+        self.assertIsNotNone(self._pinned_https_handler_of(opener)._pinned_context)
