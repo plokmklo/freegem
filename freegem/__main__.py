@@ -1,4 +1,4 @@
-"""Backwards-compatible module entry point: ``python -m gemini_bridge``."""
+"""Backwards-compatible module entry point: ``python -m freegem``."""
 
 from .cli import main
 

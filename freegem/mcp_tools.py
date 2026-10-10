@@ -197,7 +197,7 @@ def run_tool(cfg: BridgeConfig, name: str, arguments: dict[str, Any]) -> str:
     raise ValueError(f"unknown tool: {name}")
 
 
-def build_server(cfg: BridgeConfig, name: str = "gemini-bridge") -> Any:
+def build_server(cfg: BridgeConfig, name: str = "freegem") -> Any:
     """Create a FastMCP server wired to this config.
 
     Raises ImportError with an actionable message if the optional ``mcp``
@@ -208,14 +208,14 @@ def build_server(cfg: BridgeConfig, name: str = "gemini-bridge") -> Any:
     except Exception as exc:  # pragma: no cover - depends on install
         raise ImportError(
             "the 'mcp' package is required for the MCP face. "
-            "Install it with:  pip install 'gemini-bridge[mcp]'"
+            "Install it with:  pip install 'freegem[mcp]'"
         ) from exc
 
     server = FastMCP(name)
     # FastMCP exposes no version= kwarg, and the low-level server reads
     # ``_mcp_server.version`` when building serverInfo -- left as None, the
     # SDK reports *its own* package version (e.g. "1.28.1") as ours, so every
-    # MCP client would log the wrong gemini-bridge version. Pin ours.
+    # MCP client would log the wrong freegem version. Pin ours.
     server._mcp_server.version = __version__
 
     @server.tool()
@@ -320,7 +320,7 @@ def build_server(cfg: BridgeConfig, name: str = "gemini-bridge") -> Any:
 
 def model_help(cfg: BridgeConfig) -> str:
     """Text for the CLI's model listing, including session status."""
-    lines = [f"gemini-bridge v{__version__}", ""]
+    lines = [f"freegem v{__version__}", ""]
     for model_name, spec in MODELS.items():
         lines.append(
             f"  {model_name:<30} {spec.desc}{' [needs cookie]' if spec.requires_cookie else ''}"

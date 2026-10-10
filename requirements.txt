@@ -1,4 +1,4 @@
 # No third-party dependencies are required to run the bridge.
 # Optional extras, install what you need:
 #   httpx>=0.25   -- token-by-token streaming instead of whole-reply chunks
-#   mcp>=1.0      -- the MCP face (`gemini-bridge mcp`)
+#   mcp>=1.0      -- the MCP face (`freegem mcp`)

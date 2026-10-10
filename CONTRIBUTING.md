@@ -47,8 +47,8 @@ that is what makes CI safe to run on a fork and safe to publish.
 
 ```bash
 pytest                          # all tests
-pytest --cov=gemini_bridge      # with coverage
-pytest gemini_bridge/tests/test_gemini.py -k stream   # one test
+pytest --cov=freegem      # with coverage
+pytest freegem/tests/test_gemini.py -k stream   # one test
 ```
 
 When adding a test, prefer a real endpoint over a unit of a private function.
@@ -58,7 +58,7 @@ would not.
 
 ## Adding a model
 
-Edit `MODELS` in `gemini_bridge/models.py`:
+Edit `MODELS` in `freegem/models.py`:
 
 ```python
 "gemini-4.0-flash": ModelSpec(
@@ -89,7 +89,7 @@ existing `messages_to_prompt` rather than forking the prompt logic.
 ```bash
 ruff check .
 ruff format --check .
-mypy gemini_bridge
+mypy freegem
 ```
 
 Type hints are required on public functions (`disallow_untyped_defs`). Docstrings
@@ -120,13 +120,13 @@ looked like a working one. Match both and report an empty result.
 
 **Do not file an issue containing your `gemini-auth.json` or any cookie value.**
 It is a live Google credential. Describe the symptom, the output of
-`gemini-bridge doctor`, and the error text — never the credential.
+`freegem doctor`, and the error text — never the credential.
 
 When reporting a failure, include:
 
 ```
-gemini-bridge --version
-gemini-bridge doctor
+freegem --version
+freegem doctor
 ```
 
 plus the exact error message and whether it reproduces anonymously.

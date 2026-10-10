@@ -1,6 +1,6 @@
 # Gemini Cookie Sync
 
-A Chrome extension that exports your Gemini session to a file `gemini-bridge` can read.
+A Chrome extension that exports your Gemini session to a file `freegem` can read.
 
 It exists because authenticating by hand is the worst part of using this
 project: you need cookies, an XSRF token, a build tag, and an account index,
@@ -15,7 +15,7 @@ all four in one click.
 
 Saved as `gemini-auth.json`:
 
-| Field | Purpose in gemini-bridge |
+| Field | Purpose in freegem |
 |---|---|
 | `cookie` | Session cookie string sent with every request |
 | `sapisid` | Used to derive the `Authorization: SAPISIDHASH ...` header |
@@ -40,16 +40,16 @@ Move the exported file next to your config, or point at it directly:
 ```bash
 # either: let the CLI find it automatically
 mv ~/Downloads/gemini-auth.json .
-gemini-bridge serve
+freegem serve
 
 # or: point at it explicitly
-gemini-bridge serve --cookie-file ~/Downloads/gemini-auth.json
+freegem serve --cookie-file ~/Downloads/gemini-auth.json
 ```
 
 Verify with:
 
 ```bash
-gemini-bridge doctor
+freegem doctor
 ```
 
 The doctor command reports whether the cookie file was found, whether the
@@ -65,7 +65,7 @@ Google sessions and build tags expire. When requests start failing with HTTP
 2. Re-export `gemini-auth.json`
 3. Restart the bridge
 
-`gemini-bridge serve` also refreshes the build tag from the page automatically
+`freegem serve` also refreshes the build tag from the page automatically
 at startup, so usually only the cookie needs re-exporting.
 
 ## Security

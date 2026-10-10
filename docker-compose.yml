@@ -1,15 +1,17 @@
 services:
-  gemini-bridge:
-    image: gemini-bridge
+  freegem:
+    image: freegem
     build: .
-    container_name: gemini-bridge
+    container_name: freegem
     # Loopback inside the container, published to loopback on the host.
     # Do not publish to 0.0.0.0 unless a reverse proxy fronts this with auth:
     # what is reachable here is your Google session, not just this API.
     ports:
       - "127.0.0.1:8081:8081"
     environment:
-      GEMINI_BRIDGE_HOST: 0.0.0.0
+      # Bind inside the container. The default is 127.0.0.1; the compose
+      # command passes 0.0.0.0 so the published port works. There is no
+      # GEMINI_*_HOST environment variable -- host is CLI/config only.
       # Point this at the mounted session file.
       GEMINI_COOKIE_FILE: /secrets/gemini-auth.json
     volumes:
@@ -19,10 +21,10 @@ services:
 
   # The MCP face, as an SSE endpoint for agents on your network.
   # Start with:  docker compose --profile mcp up -d
-  gemini-bridge-mcp:
-    image: gemini-bridge
+  freegem-mcp:
+    image: freegem
     profiles: ["mcp"]
-    container_name: gemini-bridge-mcp
+    container_name: freegem-mcp
     command: ["mcp", "--transport", "sse", "--host", "0.0.0.0", "--port", "8768"]
     ports:
       - "127.0.0.1:8768:8768"

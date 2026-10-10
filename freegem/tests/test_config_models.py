@@ -7,11 +7,11 @@ catch a regression.
 
 import unittest
 
-from gemini_bridge.config import (
+from freegem.config import (
     BridgeConfig,
     load_config,
 )
-from gemini_bridge.models import MODELS, describe_model, parse_think_override, resolve_model
+from freegem.models import MODELS, describe_model, parse_think_override, resolve_model
 
 
 class ImmutabilityTests(unittest.TestCase):
@@ -67,13 +67,13 @@ class RedactionTests(unittest.TestCase):
         """It is meant to be dumped into logs, so it must round-trip."""
         import json
 
-        cfg = BridgeConfig(cookie_file="gemini_bridge/tests/__init__.py")
+        cfg = BridgeConfig(cookie_file="freegem/tests/__init__.py")
         self.assertIsInstance(json.dumps(cfg.redacted()), str)
 
     def test_session_detection(self) -> None:
         self.assertFalse(BridgeConfig().has_session_cookie())
         self.assertTrue(
-            BridgeConfig(cookie_file="gemini_bridge/tests/__init__.py").has_session_cookie()
+            BridgeConfig(cookie_file="freegem/tests/__init__.py").has_session_cookie()
         )
 
 

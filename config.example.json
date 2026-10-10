@@ -7,7 +7,7 @@
 # over the file (useful for Docker and CI):
 #
 #   GEMINI_BL, GEMINI_AUTH_USER, GEMINI_XSRF_TOKEN, GEMINI_PROXY,
-#   GEMINI_COOKIE_FILE, GEMINI_BRIDGE_CONFIG
+#   GEMINI_COOKIE_FILE, FREEGEM_CONFIG
 #
 # NOTE: there is deliberately no api_keys field. This project has no
 # authentication layer. Access control is that the server binds to loopback.
@@ -23,7 +23,7 @@
   "auth_user": null,
   "xsrf_token": null,
 
-  "_comment_bl": "Gemini's frontend build tag. Refreshed automatically at startup by `gemini-bridge serve`; set it only to pin a version.",
+  "_comment_bl": "Gemini's frontend build tag. Refreshed automatically at startup by `freegem serve`; set it only to pin a version.",
   "gemini_bl": "boq_assistant-bard-web-server_20260716.08_p0",
 
   "_comment_behaviour": "temporary_chats=true keeps requests out of your Gemini account history.",

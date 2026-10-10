@@ -1,1 +1,1 @@
-"""Tests for gemini-bridge."""
+"""Tests for freegem."""
