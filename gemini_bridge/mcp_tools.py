@@ -210,6 +210,11 @@ def build_server(cfg: BridgeConfig, name: str = "gemini-bridge"):
         ) from exc
 
     server = FastMCP(name)
+    # FastMCP exposes no version= kwarg, and the low-level server reads
+    # ``_mcp_server.version`` when building serverInfo -- left as None, the
+    # SDK reports *its own* package version (e.g. "1.28.1") as ours, so every
+    # MCP client would log the wrong gemini-bridge version. Pin ours.
+    server._mcp_server.version = __version__
 
     @server.tool()
     def gemini_search(query: str, recency: str = None, model: str = None) -> str:

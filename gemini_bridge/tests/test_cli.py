@@ -300,6 +300,19 @@ class McpBuildTests(unittest.TestCase):
                 mt.build_server(BridgeConfig())
         self.assertIn("gemini-bridge[mcp]", str(ctx.exception))
 
+    def test_server_info_reports_our_version_not_sdk(self):
+        """serverInfo.version must be gemini-bridge's, not the mcp package's.
+
+        FastMCP has no version= kwarg, so an unset ``_mcp_server.version``
+        makes the SDK fall back to its own package version -- clients would
+        have logged e.g. ``1.28.1`` as our release.
+        """
+        import gemini_bridge as gb
+        from gemini_bridge.mcp_tools import build_server
+
+        server = build_server(BridgeConfig())
+        self.assertEqual(server._mcp_server.version, gb.__version__)
+
 
 if __name__ == "__main__":
     unittest.main()
