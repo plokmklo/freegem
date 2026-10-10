@@ -1,252 +1,109 @@
-# freegem
+# FreeGem
 
-**Free Gemini, shaped as the APIs you already use.**
+## A local bridge to Gemini Web for APIs, developer tools, and AI agents
 
-One bridge, three faces, no API key, no bill:
+FreeGem is an unofficial, local-first bridge that exposes Gemini Web through the interfaces developers already use:
 
-| Face | Protocol | Command |
-|---|---|---|
-| HTTP API | OpenAI-compatible + Google-native | `freegem serve` |
-| Agent tools | MCP (Model Context Protocol) | `freegem mcp` |
-| One-shot | plain CLI | `freegem ask "..."` |
+- **OpenAI-compatible HTTP API** for existing SDKs and applications
+- **Google-native HTTP API** for Gemini-compatible clients
+- **MCP server** for AI agents and developer tools
+- **Command-line interface** for direct questions, web extraction, and research
 
-Under the hood it talks to the same free Gemini web session your browser uses.
-Outwardly it looks like OpenAI, so existing clients and code work by changing
-one base URL.
+FreeGem communicates with the Gemini Web session used by your browser. This allows compatible clients to connect through a familiar API surface without requiring a separate Gemini API key or an additional per-request API provider.
 
-> **Based on [`Sophomoresty/gemini-web2api`](https://github.com/Sophomoresty/gemini-web2api).**
-> This project started as a rebuild of that codebase. The protocol knowledge —
-> the `StreamGenerate` wire format, the `[79]` model field, the `wrb.fr`
-> response shape, the Scotty upload flow — and the bundled cookie-sync
-> extension all come from it. See [Credits](#credits).
-
----
-
-## Contents
-
-- [Quick start](#quick-start)
-- [The three faces](#the-three-faces)
-- [Web scraping](#web-scraping)
-- [Models](#models)
-- [Authentication](#authentication)
-- [Configuration](#configuration)
-- [Docker](#docker)
-- [How it works](#how-it-works)
-- [Limitations](#limitations)
-- [Development](#development)
-- [Credits](#credits)
-- [License](#license)
-- [Disclaimer](#disclaimer)
-
----
-
-## Quick start
-
-```bash
-pip install freegem        # or: pip install "freegem[full]"
-freegem serve
+```text
+OpenAI-compatible clients ─┐
+Google-native clients     ─┼─► FreeGem ─► Gemini Web
+MCP agents                ─┤
+CLI users                 ─┘
 ```
 
-The server starts on `http://127.0.0.1:8081` — loopback only. Point any
-OpenAI-compatible client at it:
+## What FreeGem provides
+
+### Compatible API access
+
+Connect OpenAI-compatible tools and SDKs by changing the API base URL:
 
 ```python
 from openai import OpenAI
 
-client = OpenAI(base_url="http://127.0.0.1:8081/v1", api_key="not-needed")
-resp = client.chat.completions.create(
-    model="gemini-3.6-flash",
-    messages=[{"role": "user", "content": "Explain quantum computing"}],
+client = OpenAI(
+    base_url="http://127.0.0.1:8081/v1",
+    api_key="not-needed",
 )
-print(resp.choices[0].message.content)
+
+response = client.chat.completions.create(
+    model="gemini-3.6-flash",
+    messages=[
+        {"role": "user", "content": "Explain quantum computing"}
+    ],
+)
+
+print(response.choices[0].message.content)
 ```
 
-Cherry Studio, ChatBox, Open WebUI, LangChain, Cline, anything that speaks
-OpenAI — set the base URL and go.
+### Agent integration
 
-**Try it before installing anything:**
-
-```bash
-freegem ask "what is the time in Tokyo?"
-freegem ask --search "what changed in Python 3.14?"
-freegem doctor
-```
-
----
-
-## The three faces
-
-### 1. HTTP API — `freegem serve`
-
-| Endpoint | For |
-|---|---|
-| `POST /v1/chat/completions` | OpenAI clients |
-| `POST /v1/responses` | OpenAI Codex CLI |
-| `GET  /v1/models` | OpenAI model discovery |
-| `POST /v1beta/models/{model}:generateContent` | Gemini CLI, non-streaming |
-| `POST /v1beta/models/{model}:streamGenerateContent` | Gemini CLI, streaming |
-| `GET  /v1beta/models` | Google model discovery |
-| `GET  /health` | Liveness and session status |
-
-The server is loopback-only and assumes no auth, so it hardens its own
-surface: POST bodies must be `Content-Type: application/json`, any request
-carrying a non-loopback `Origin` header is refused with 403 (blocks
-cross-site "simple" POSTs that skip CORS preflight), concurrent requests are
-capped (default 32; extra connections get 503 instead of an unbounded thread
-count), and a stalled client cannot hold a thread forever (65 s read timeout,
-reported as 408).
-
-Codex CLI:
-
-```bash
-export OPENAI_BASE_URL=http://127.0.0.1:8081/v1
-export OPENAI_API_KEY=not-needed
-```
-
-Gemini CLI:
-
-```bash
-export GEMINI_API_KEY=none
-export GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:8081
-gemini
-```
-
-### 2. MCP tools — `freegem mcp`
-
-Exposes Gemini as tools an agent can call:
-
-| Tool | Use for |
-|---|---|
-| `gemini_search` | Current facts; must cite sources |
-| `gemini_ask` | Fast direct answers |
-| `gemini_deep_think` | Long-form reasoning on hard problems |
-| `gemini_advisor` | Structured second opinion on a decision |
-| `gemini_chat` | Raw multi-turn, full control |
-| `gemini_list_models` | Registry introspection |
-| `web_scrape` | Read a web page (SSRF-guarded, robots-aware) |
-| `web_research` | Answer one question from several pages, cited [S1]..[Sn] |
+Run FreeGem as an MCP server and expose Gemini capabilities to compatible AI agents:
 
 ```bash
 pip install "freegem[mcp]"
-
-# stdio: your client launches it
 freegem mcp --transport stdio
-
-# sse: it stays up and clients connect over HTTP
-freegem mcp --transport sse --port 8768
 ```
 
-Client config (`.mcp.example.json`):
+Available capabilities include:
 
-```json
-{
-  "mcpServers": {
-    "freegem": {
-      "type": "stdio",
-      "command": "freegem",
-      "args": ["mcp", "--transport", "stdio"]
-    }
-  }
-}
-```
+- Current-information search with sources
+- Direct questions and explanations
+- Extended reasoning
+- Structured decision advice
+- Multi-turn conversations
+- Web-page extraction
+- Multi-source research with citations
+- Model discovery
 
-### 3. One-shot CLI
+### Web extraction and research
+
+FreeGem includes a guarded web extraction layer for reading public pages:
 
 ```bash
-freegem ask "summarise the plot of Dune"        # direct answer
-freegem ask --search "latest Python release"    # web-grounded + sources
-freegem scrape https://example.com --links      # read a web page
-freegem models                                  # registry + session state
-freegem doctor                                  # diagnostics, no generation
+freegem scrape https://example.com
 ```
 
----
-
-## Web scraping
-
-`freegem scrape <url>` fetches a page and prints readable text — title, body,
-no scripts, styles, or nav junk. The same capability is exposed to agents as
-the `web_scrape` MCP tool.
-
-```bash
-freegem scrape https://example.com                     # text + title
-freegem scrape https://example.com --links             # + resolved links
-freegem scrape https://example.com --max-chars 5000    # cap the output
-freegem scrape https://example.com --ask "what is this site?"
-freegem scrape https://example.com --ignore-robots     # CLI only; MCP cannot
-```
-
-**Security model** — this fetches *untrusted* URLs, so it reuses and hardens
-the project's SSRF defenses (`freegem/ssrf.py`):
-
-- Every URL and every redirect hop is **resolved, checked, and pinned**: the
-  connection dials only the verified-public IPs the check inspected, closing
-  the resolve→check→reconnect window (DNS rebinding) the image fetcher
-  previously had. TLS keeps verifying the original hostname (SNI + certs).
-- Private ranges, loopback, link-local (including `169.254.169.254`),
-  reserved, and multicast targets are refused before any socket exists, as
-  are `file://`, `ftp://`, and URLs with embedded credentials.
-- The session cookie is **never** sent to scraped sites.
-- Responses are capped at 5 MB on the wire *and* after decompression, so gzip
-  bombs die at the cap instead of in RAM. Only HTML and text are accepted.
-- `robots.txt` is honored by default. The MCP tool cannot bypass it —
-  `--ignore-robots` exists only on the interactive CLI.
-- Output is wrapped in `[UNTRUSTED WEB CONTENT]` markers, and `--ask` mode
-  instructs Gemini to treat everything between them as data, never as
-  instructions. A page can still contain text aimed at your agent; the
-  markers limit, but do not eliminate, that injection surface.
-
-**Limitations**: no JavaScript rendering (React/SPA sites come back mostly
-empty — that needs a headless browser, deliberately not a dependency), sites
-that block non-browser agents stay blocked (the UA is honest), and scraping
-some sites violates their terms even when `robots.txt` allows it.
-
-## Web research
-
-`freegem research` is the layer above `scrape`: give it a question and several
-URLs, and it fetches every page with the same guarded, robots-aware, capped
-machinery, then returns one answer with inline `[S1]`, `[S2]` citations, key
-points, and a disagreements-and-gaps section. Agents get the same thing as
-the `web_research` MCP tool.
+It also supports multi-source research from URLs supplied by the user:
 
 ```bash
 freegem research \
-  --query "Which option fits a small Python API?" \
-  https://docs.example.com/option-a \
-  https://docs.example.com/option-b \
+  --query "Compare these two options and recommend one" \
+  https://example.com/option-a \
+  https://example.com/option-b \
   --format markdown
 ```
 
-What it does beyond N scrapes:
+Research results can include:
 
-- **Local fetch cache** — successful fetches are stored under
-  `~/.cache/freegem/` (30-minute TTL, `$FREEGEM_CACHE_DIR` to relocate), so
-  repeated agent calls do not re-download pages. `--no-cache` / `--refresh`
-  control it. robots.txt and the SSRF guard still run on every real fetch.
-- **Hard budgets** — at most 10 pages per call, a per-page character cap
-  (`--max-chars-per-page`, default 12 000), and a total fetched-character
-  budget (`--total-budget`, default 80 000). URLs that would push the run
-  over budget are reported as skipped, not fetched.
-- **Bounded prompts** — small material goes to Gemini in one pass; larger
-  material takes a map/reduce path (capped per-page notes, then a reduce
-  pass), so prompt size does not grow with raw page size.
-- **Authoritative citations** — the `[S#] -> URL` table is rendered from
-  freegem's own fetch metadata, never from model text, and an answer citing
-  sources that do not exist is rejected into the raw-extract fallback.
-- **Never fails on Gemini** — with no session or on rate limits, you get the
-  labeled raw extracts plus fetch metadata instead of an error; a dead source
-  is recorded per-URL and the rest of the run continues.
-- **Untrusted end to end** — every page stays inside
-  `[UNTRUSTED WEB CONTENT]` markers in every prompt. Folding several
-  attacker-writable pages into one prompt widens the injection surface; the
-  markers limit, but do not eliminate, it.
-- **Formats** — `--format text|markdown|json`; the JSON schema documents
-  per-source status (`ok`, `error`, `truncated`, `from_cache`, `skipped`,
-  `chars`) and run metadata (cache hits, failed pages, timing, version).
+- Inline source citations such as `[S1]` and `[S2]`
+- Source metadata
+- Local fetch caching
+- Per-page and total-content budgets
+- Markdown, text, and JSON output
+- Deterministic fallback when Gemini is unavailable
 
-Not a crawler: hand it the specific pages to compare. No JavaScript rendering
-(same posture as the scraper), and cache entries store extracted text only —
-never cookies or credentials.
+`freegem research` compares the URLs provided by the user. It does not independently discover or search for URLs.
+
+## Important project status
+
+FreeGem is an unofficial integration with Gemini Web. It is intended for personal projects, development, experimentation, and learning.
+
+Gemini Web sessions, availability, rate limits, account restrictions, and Google's policies still apply. This project is not affiliated with, sponsored by, or endorsed by Google.
+
+## Project origin
+
+FreeGem is an independent rebuild and extension of the Python project [`Sophomoresty/gemini-web2api`](https://github.com/Sophomoresty/gemini-web2api), released under the MIT License.
+
+The upstream project provided important protocol research and implementation foundations, including the Gemini Web request format, model selection fields, response parsing, multimodal upload flow, and session-cookie tooling.
+
+FreeGem preserves that attribution and adds a layered package architecture, multiple API faces, MCP integration, CLI workflows, security hardening, guarded web extraction, and cited multi-source research.
 
 ---
 
@@ -495,44 +352,39 @@ docs/
 
 ## Credits
 
-**This project is derived from [`Sophomoresty/gemini-web2api`](https://github.com/Sophomoresty/gemini-web2api)**
-(MIT, © 2026 Sophomoresty), and is published under the same licence.
+FreeGem is derived from and acknowledges the work in:
 
-What came from upstream unchanged or nearly so:
+[`Sophomoresty/gemini-web2api`](https://github.com/Sophomoresty/gemini-web2api)
 
-- **The Gemini Web protocol implementation** — the `StreamGenerate`
-  positional-array wire format, `[79]` as the model selector, `[17]` as the
-  thinking depth, `SAPISIDHASH` authentication, and the `wrb.fr`
-  progressive-snapshot response shape.
-- **The model registry** — the `MODE_CATEGORY` mapping
-  (1=FAST, 2=THINKING, 3=PRO, 4=AUTO, 5=DYNAMIC_THINKING, 6=FLASH_LITE) and the
-  `gemini-*` model ids.
-- **The multimodal path** — Gemini's Scotty resumable-upload protocol and the
-  page-token scraping it depends on.
-- **The cookie-sync extension** — `gemini-cookie-sync-extension/` is a lightly
-  adapted copy of upstream's, with the export filename and project name
-  updated.
-- **The Cloudflare Workers port** — upstream's `cloudflare/worker.js` informed
-  the request-scoped-config design, which was itself the fix for a
-  cookie-cross-contamination bug under concurrent warm-isolate requests.
+The upstream project is licensed under the MIT License and is Copyright © 2026 Sophomoresty.
 
-What this project adds:
+The upstream project provided foundational research and implementation work for:
 
-- A layered package layout (`config` / `models` / `gemini` / `multimodal` /
-  `tools` / `server` / `mcp_tools` / `cli`) in place of the single-file
-  original.
-- Immutable, request-safe configuration instead of a module-global mutable dict.
-- A unified CLI running the HTTP, MCP, and one-shot faces.
-- `gemini_advisor` and the `gemini_deep_think` output contract.
-- A 177-test suite that runs offline with no credentials.
+- Gemini Web's `StreamGenerate` request format
+- Model selection and thinking-depth fields
+- `wrb.fr` progressive response parsing
+- `SAPISIDHASH` session authentication
+- Gemini Web model routing
+- Multimodal upload behavior
+- Session-cookie synchronization
+- The related Cloudflare Workers implementation
 
-Upstream's own README credits its development agent capability to
-[GenericAgent](https://github.com/lsdefine/GenericAgent), originally shared via
-the [linux.do](https://linux.do) community — credit passed along here.
+FreeGem is an independent rebuild and extension. Project-specific work includes:
 
-Also worth knowing: an unrelated Go implementation publishes under the same
-name ([`ikhsan3adi/gemini-web2api`](https://github.com/ikhsan3adi/gemini-web2api)).
-It is a separate project; this one derives only from the Python original.
+- Layered Python package architecture
+- OpenAI-compatible HTTP endpoints
+- Google-native HTTP endpoints
+- MCP server integration
+- CLI commands
+- Secure SSRF-guarded web extraction
+- Robots-aware page fetching
+- Multi-source research with citations
+- Local research caching and content budgets
+- Request validation and CSRF protections
+- Thread limiting and retry backoff
+- Cross-platform test coverage and CI workflows
+
+FreeGem is not an official Google product and is not affiliated with or endorsed by Google.
 
 ## License
 

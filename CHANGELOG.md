@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- **README rewritten** — new positioning ("a local bridge to Gemini Web for
+  APIs, developer tools, and AI agents"), a What-FreeGem-provides overview,
+  an Important-project-status section, a Project-origin section, and an
+  expanded Credits section. The GitHub About description and homepage were
+  updated separately from the README.
 
 ## [2.2.0] — 2026-10-11
 
