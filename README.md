@@ -1,8 +1,8 @@
-# freegem
+# FreeGem
 
-**Free Gemini, shaped as the APIs you already use.**
+**A local bridge for Gemini Web, presented through the interfaces you already use.**
 
-One bridge, three faces, no API key, no bill:
+FreeGem provides three compatible ways to work with Gemini:
 
 | Face | Protocol | Command |
 |---|---|---|
@@ -10,15 +10,18 @@ One bridge, three faces, no API key, no bill:
 | Agent tools | MCP (Model Context Protocol) | `freegem mcp` |
 | One-shot | plain CLI | `freegem ask "..."` |
 
-Under the hood it talks to the same free Gemini web session your browser uses.
-Outwardly it looks like OpenAI, so existing clients and code work by changing
-one base URL.
+Under the hood, FreeGem communicates with the Gemini Web session used by your
+browser. On the client side, it exposes familiar protocols so existing tools
+can usually be connected by changing a single base URL. It requires no
+separate Gemini API key and introduces no additional per-request API charge,
+although Gemini Web sessions remain subject to Google's availability,
+rate-limits, policies, and account restrictions.
 
-> **Based on [`Sophomoresty/gemini-web2api`](https://github.com/Sophomoresty/gemini-web2api).**
-> This project started as a rebuild of that codebase. The protocol knowledge —
-> the `StreamGenerate` wire format, the `[79]` model field, the `wrb.fr`
-> response shape, the Scotty upload flow — and the bundled cookie-sync
-> extension all come from it. See [Credits](#credits).
+> **Project origin and attribution:** FreeGem is a maintained rebuild and
+> extension of [`Sophomoresty/gemini-web2api`](https://github.com/Sophomoresty/gemini-web2api),
+> released under the MIT License. The upstream project's protocol research and
+> implementation knowledge remain fundamental to this project. See
+> [Credits](#credits) for detailed attribution.
 
 ---
 
@@ -203,11 +206,12 @@ some sites violates their terms even when `robots.txt` allows it.
 
 ## Web research
 
-`freegem research` is the layer above `scrape`: give it a question and several
-URLs, and it fetches every page with the same guarded, robots-aware, capped
-machinery, then returns one answer with inline `[S1]`, `[S2]` citations, key
-points, and a disagreements-and-gaps section. Agents get the same thing as
-the `web_research` MCP tool.
+`freegem research` is the layer above `scrape`: provide a question and the
+specific URLs you want compared. It does not discover or search for URLs on
+your behalf. FreeGem fetches the supplied pages with the same guarded,
+robots-aware, capped machinery, then returns one answer with inline `[S1]`,
+`[S2]` citations, key points, and a disagreements-and-gaps section. Agents get
+the same capability through the `web_research` MCP tool.
 
 ```bash
 freegem research \
@@ -339,7 +343,7 @@ cp config.example.json config.json
 | `retry_attempts` | `3` | Retries on transient failure |
 | `retry_delay_sec` | `2` | Base delay between retries; grows exponentially (2 s, 4 s, 8 s … capped at 30 s), and a server-sent `Retry-After` header wins when it asks for longer |
 | `request_timeout_sec` | `180` | Per-request timeout |
-| `proxy` | `null` | HTTP proxy if `gemini.google.com` is blocked |
+| `proxy` | `null` | HTTP proxy if `gemini.google.com` is blocked; proxy-side DNS means local IP pinning cannot be guaranteed |
 | `log_requests` | `true` | Request log to stderr |
 
 Environment variables override the file: `GEMINI_BL`, `GEMINI_AUTH_USER`,
@@ -467,7 +471,7 @@ pytest                  # tests
 ```
 
 The test suite runs entirely offline: every Gemini call is mocked, so CI needs
-no credentials and no network. See
+no credentials and no network. The current suite contains 366 tests. See
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the layering rules and
 [`CONTRIBUTING.md`](CONTRIBUTING.md) for how to add a model or an endpoint.
 
@@ -495,10 +499,14 @@ docs/
 
 ## Credits
 
-**This project is derived from [`Sophomoresty/gemini-web2api`](https://github.com/Sophomoresty/gemini-web2api)**
-(MIT, © 2026 Sophomoresty), and is published under the same licence.
+FreeGem is derived from and acknowledges the work in
+[`Sophomoresty/gemini-web2api`](https://github.com/Sophomoresty/gemini-web2api),
+licensed under the MIT License (© 2026 Sophomoresty). FreeGem is an
+independent rebuild and extension of that Python project, not an official
+Google product or an official upstream release.
 
-What came from upstream unchanged or nearly so:
+The following foundational work came from upstream unchanged or with limited
+adaptation:
 
 - **The Gemini Web protocol implementation** — the `StreamGenerate`
   positional-array wire format, `[79]` as the model selector, `[17]` as the
@@ -516,7 +524,7 @@ What came from upstream unchanged or nearly so:
   the request-scoped-config design, which was itself the fix for a
   cookie-cross-contamination bug under concurrent warm-isolate requests.
 
-What this project adds:
+FreeGem adds and maintains the following project-specific work:
 
 - A layered package layout (`config` / `models` / `gemini` / `multimodal` /
   `tools` / `server` / `mcp_tools` / `cli`) in place of the single-file
@@ -524,7 +532,7 @@ What this project adds:
 - Immutable, request-safe configuration instead of a module-global mutable dict.
 - A unified CLI running the HTTP, MCP, and one-shot faces.
 - `gemini_advisor` and the `gemini_deep_think` output contract.
-- A 177-test suite that runs offline with no credentials.
+- A 366-test suite that runs offline with no credentials.
 
 Upstream's own README credits its development agent capability to
 [GenericAgent](https://github.com/lsdefine/GenericAgent), originally shared via
