@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import json
 import socket
+import struct
 import threading
 import time
 import urllib.parse
@@ -982,6 +983,14 @@ class GeminiHandler(BaseHTTPRequestHandler):
             log(self.cfg, f"google stream error: {exc}")
 
 
+# Refusal-path bounds. _refuse_busy runs on the accept thread, so every wait
+# it performs must be bounded: 0.1 s to drain the request bytes, 1 s at most
+# for the kernel to hand the 503 to the peer at close time.
+_REFUSE_DRAIN_SEC = 0.1
+_REFUSE_DRAIN_READS = 64  # against a client that never stops sending
+_REFUSE_LINGER_SEC = 1
+
+
 class ThreadedServer(ThreadingMixIn, HTTPServer):
     """A thread-per-request server with a hard cap on concurrent requests.
 
@@ -1051,7 +1060,29 @@ class ThreadedServer(ThreadingMixIn, HTTPServer):
 
     @staticmethod
     def _refuse_busy(request: socket.socket) -> None:
-        """Answer 503 on the raw socket and close, before any thread spawns."""
+        """Answer 503 on the raw socket and close, before any thread spawns.
+
+        Two ordering rules make the 503 reach the client on every platform
+        (a bare send-then-close drops it on Windows with WinError
+        10053/10054 on the client):
+
+        - Drain the request bytes FIRST. ``close()`` with unread data still
+          in the receive buffer aborts the connection with a RST, and that
+          RST races the 503 out the door. The client's bytes are normally
+          already buffered locally, so the drain returns immediately; the
+          timeout only covers a client still mid-body.
+        - Close with a short finite ``SO_LINGER``. An immediate close while
+          the send buffer holds unACKed data resets the connection too;
+          lingering lets the kernel wait (bounded) for the response to be
+          acknowledged instead of discarding it.
+        """
+        try:
+            request.settimeout(_REFUSE_DRAIN_SEC)
+            for _ in range(_REFUSE_DRAIN_READS):
+                if not request.recv(65536):
+                    break  # client closed its end: nothing more can arrive
+        except OSError:
+            pass  # timeout, reset, or hung up -- the receive side is drained
         body = b'{"error":{"message":"server busy: too many concurrent requests","type":"bridge_error"}}'
         head = (
             "HTTP/1.1 503 Service Unavailable\r\n"
@@ -1061,11 +1092,17 @@ class ThreadedServer(ThreadingMixIn, HTTPServer):
             "\r\n"
         ).encode("ascii")
         try:
+            with contextlib.suppress(OSError):
+                request.setsockopt(
+                    socket.SOL_SOCKET,
+                    socket.SO_LINGER,
+                    struct.pack("ii", 1, _REFUSE_LINGER_SEC),
+                )
             request.sendall(head + body)
         except OSError:
             pass  # the client hung up first; nothing to tell
         finally:
             with contextlib.suppress(OSError):
-                request.shutdown(socket.SHUT_RDWR)
+                request.shutdown(socket.SHUT_WR)
             with contextlib.suppress(OSError):
                 request.close()

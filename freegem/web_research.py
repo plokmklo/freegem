@@ -147,7 +147,11 @@ class ResearchCache:
             return None
         if not isinstance(fetched_at, (int, float)):
             return None
-        if time.time() - fetched_at > self.ttl:
+        # ttl <= 0 means "never serve from cache": test that BEFORE the clock,
+        # because ``time.time() - fetched_at > 0`` needs the clock to have
+        # advanced since put(), and coarse platform clocks (Windows ticks at
+        # ~15 ms) make put/get in the same tick a false fresh hit.
+        if self.ttl <= 0 or time.time() - fetched_at > self.ttl:
             return None
         if not isinstance(digest, str) or hashlib.sha256(text.encode()).hexdigest() != digest:
             return None
