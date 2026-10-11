@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.7.0] — 2026-10-11
 
+### Changed — v3 escalation pass (campaign 806 → 812/1000 readable; more from an unrestricted network)
+
+- **Shared cookie jar** (`ssrf.py`, `resilient.py`, `campaign.py`): the guard's
+  opener accepts a `cookie_jar` and the ladder keeps origin-granted cookies
+  across attempts (one jar per campaign). A 302 that sets an anonymous
+  entitlement token and loops back — tagesanzeiger.ch's consent gate — now
+  resolves the way a browser resolves it. Fixes an empty-CookieJar falsy bug
+  (`if jar` → `if jar is not None`): an empty `CookieJar` is falsy.
+- **DNS-over-HTTPS fallback** (`resilient.py`): when the local resolver
+  cannot answer for a name, the ladder resolves via DoH (Google, then
+  Cloudflare, A + AAAA) and hands the addresses to the SAME public-only
+  check (`_checked_addresses`) before any dial — the anti-rebinding contract
+  is unchanged. Dead domains (NXDOMAIN at DoH too) still fail, honestly.
+- **Wayback last resort** (`resilient.py`): a page the live origin still
+  refuses (hard bot walls, dead domains, legal blocks, persistent 429s) ends
+  at the Internet Archive's raw-capture snapshot
+  (`web.archive.org/web/2id_/<url>`) — reading a published page's public
+  copy attacks no one. Successful reads are flagged `via="wayback"` and
+  `fallback="wayback"` so reports count them as copies, not origin reads.
+  From networks that can reach the archive this covers most of the
+  remaining 403/401/402/451/dead-host bucket.
+- **5xx → origin-root fallback**: a path-specific origin error (sohu.com
+  `/about` 502s while `/` serves) now falls back to the origin root after
+  one backoff, same as dead 404 paths.
+- **Third browser profile** (Safari, minimal header set) and a deeper
+  attempt budget (9 → 16); 429s wait out three `Retry-After` windows before
+  the archive decides.
+- **Injection points** (`ssrf.py`): `build_guarded_opener(proxy, context,
+  resolver, cookie_jar)` — `resolver` swaps the resolve-and-check step
+  (must raise `SSRFRefused` for anything it cannot vouch for); both pinned
+  handlers accept it. `crawl_fetch` threads both through.
+- Campaign v3 pass over the 1000-page corpus: 812/1000 readable live
+  (81.2%). Recoveries this pass: wordpress.org (429 window reset),
+  standaard.be ×2 (Chrome profile), tagesanzeiger.ch ×2 (cookie jar),
+  sohu.com/about (5xx → root). The remaining 188: 143 hard CDN walls
+  (datacenter-IP reputation), 23 timeouts (incl. archive-unreachable
+  probes), 7 dead paths whose root also fails, 5 paywall/legal, 3
+  persistent 429s, plus a tail of dead DNS/TLS/5xx — each documented in
+  `report_v3_final.json`.
+
 ### Changed — fetch-for-readability policy (no robots.txt, by design)
 
 - **robots.txt is never fetched and never consulted anywhere in freegem.**
