@@ -329,11 +329,25 @@ class GeminiHandler(BaseHTTPRequestHandler):
           header means a non-browser client (curl, an SDK, tests) and is
           allowed; ``Origin: null`` (sandboxed iframes, redirected posts) is
           NOT loopback and is refused.
+        - Sec-Fetch-Site: browsers that implement Fetch Metadata send this on
+          every request, including simple ones that skip preflight, and they
+          do not let page scripts forge it (it is a forbidden header name).
+          A value of ``cross-site`` is the browser itself swearing the request
+          was initiated from another site -- the exact CSRF shape the Origin
+          check catches -- so refusing it adds a third, independent gate that
+          also covers cases where Origin is present but oddly formed. Missing
+          header means a non-browser client (curl, an SDK, tests) and is
+          allowed; ``same-site``/``same-origin``/``none`` are allowed.
         - Content-Type: browsers cannot attach ``application/json`` to a
           simple request -- the spec forces a preflight for it -- so requiring
           JSON blocks the text/plain forgery even if a future caller forgets
           the Origin check.
         """
+        site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        if site == "cross-site":
+            log(self.cfg, "rejected cross-site POST (Sec-Fetch-Site: cross-site)")
+            self.send_error_json("cross-site POSTs are not allowed", 403)
+            return False
         origin = self.headers.get("Origin")
         if origin is not None and not _origin_is_loopback(origin):
             log(self.cfg, f"rejected cross-origin POST from Origin {origin!r}")
