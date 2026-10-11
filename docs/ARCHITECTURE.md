@@ -18,7 +18,7 @@ file and translation is testable without a credential.
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  cli.py            argparse: serve | mcp | ask | scrape | models | doctor
+│  cli.py            argparse: serve | mcp | ask | scrape | research | verify | models | doctor
 ├──────────────────────────────────────────────────────────────┤
 │  server.py         OpenAI + Google-native HTTP faces         │
 │  mcp_tools.py      MCP tool definitions and dispatch         │
@@ -28,7 +28,10 @@ file and translation is testable without a credential.
 │  gemini.py         Gemini StreamGenerate client              │
 │  multimodal.py     Scotty resumable image upload             │
 │  web_scraper.py    untrusted-page fetcher (robots, caps)     │
+│  web_research.py   multi-source research (cache, budgets)    │
+│  claim_verify.py   claim verification (statuses, evidence)   │
 ├──────────────────────────────────────────────────────────────┤
+│  metrics.py        run + server metrics (no freegem deps)    │
 │  ssrf.py           shared guard: resolve, check, pin         │
 ├──────────────────────────────────────────────────────────────┤
 │  config.py         frozen config, env overrides              │
@@ -36,7 +39,10 @@ file and translation is testable without a credential.
 └──────────────────────────────────────────────────────────────┘
 ```
 
-Dependencies point downward only.
+Dependencies point downward only. `web_research.py` and `claim_verify.py`
+reuse the guarded fetch machinery through `web_scraper.py` and never fetch
+URLs any other way; `metrics.py` imports nothing from freegem so any module
+(including `gemini.py`'s retry paths) can count without cycles.
 
 ## Why each boundary exists
 

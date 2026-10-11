@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Void element jam regression fixture</title>
+</head>
+<body>
+<main>
+<h1>Paragraph with a void element mid-sentence</h1>
+<p>This paragraph contains a void<input type="text" name="a">element right
+in the middle, and the parser used to push void tags onto the skip stack,
+poisoning it so that every later paragraph was silently dropped.</p>
+<p>This second paragraph must survive extraction. Before the fix the skip
+stack stayed jammed forever and this paragraph vanished from the output.</p>
+<p>A third paragraph with <img src="x.png" alt="an image"> an embedded image,
+which is also a void element and must not affect the stack either.</p>
+</main>
+</body>
+</html>

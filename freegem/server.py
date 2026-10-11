@@ -23,6 +23,7 @@ from typing import Any
 from . import __version__
 from .config import BridgeConfig
 from .gemini import BridgeError, generate, generate_stream, log
+from .metrics import ServerMetrics, new_request_id
 from .models import MODELS, resolve_model
 from .multimodal import detect_image_mime, fetch_image_bytes, upload_image
 from .tools import (
@@ -154,6 +155,10 @@ class GeminiHandler(BaseHTTPRequestHandler):
     def cfg(self) -> BridgeConfig:
         return self.server.config  # type: ignore[attr-defined]
 
+    @property
+    def _metrics(self) -> ServerMetrics:
+        return self.server.server_metrics  # type: ignore[attr-defined]
+
     def log_message(self, fmt: str, *args: Any) -> None:
         client = self.client_address[0] if self.client_address else "-"
         log(self.cfg, f"{client} {fmt % args}")
@@ -162,6 +167,9 @@ class GeminiHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        request_id = getattr(self, "_request_id", None)
+        if request_id:
+            self.send_header("X-Request-Id", request_id)
         # CORS only for loopback origins. "*" would let ANY webpage the user
         # visits drive this server and read its responses (browsers reach
         # loopback from any origin); non-browser clients need no CORS at all.
@@ -170,6 +178,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
         self.end_headers()
+        self._metrics.note_status(status)
         if self.command != "HEAD":
             self.wfile.write(body)
 
@@ -190,11 +199,15 @@ class GeminiHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
+        request_id = getattr(self, "_request_id", None)
+        if request_id:
+            self.send_header("X-Request-Id", request_id)
         origin = self.headers.get("Origin")
         if origin and _origin_is_loopback(origin):
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
         self.end_headers()
+        self._metrics.note_status(200)
         self.close_connection = True
 
     def _sse(self, event: str | None, payload: Any) -> None:
@@ -379,6 +392,11 @@ class GeminiHandler(BaseHTTPRequestHandler):
                         ],
                     }
                 )
+            elif path == "/metrics":
+                # Operational read: counts, latency percentiles, retries,
+                # memory. Aggregates only -- no request bodies, no session
+                # data, nothing secret; the server is loopback-bound anyway.
+                self.send_json(self._metrics.snapshot())
             elif path == "/v1beta/models":
                 self.send_json(
                     {
@@ -406,6 +424,14 @@ class GeminiHandler(BaseHTTPRequestHandler):
                 self.send_error_json(str(exc), 500)
 
     def do_POST(self) -> None:
+        started = time.monotonic()
+        self._request_id = new_request_id()
+        try:
+            self._do_post()
+        finally:
+            self._metrics.latency.record(time.monotonic() - started)
+
+    def _do_post(self) -> None:
         if not self._client_may_speak():
             return
         if not self._post_may_run():
@@ -1066,6 +1092,8 @@ class ThreadedServer(ThreadingMixIn, HTTPServer):
         self._active_requests = 0
         self._admit_lock = threading.Lock()
         self._active_slots = threading.BoundedSemaphore(self._max_concurrent)
+        #: Process-wide operational metrics, rendered by GET /metrics.
+        self.server_metrics = ServerMetrics()
 
     def _admit(self) -> bool:
         """Atomically claim one in-flight slot; False when the server is full."""
@@ -1096,6 +1124,7 @@ class ThreadedServer(ThreadingMixIn, HTTPServer):
         # socketserver supertype types it as the wider stream/datagram union,
         # so the override takes Any and _refuse_busy narrows it.
         if not self._admit():
+            self.server_metrics.note_refusal()
             self._refuse_busy(request)
             return
         try:
@@ -1110,6 +1139,7 @@ class ThreadedServer(ThreadingMixIn, HTTPServer):
         try:
             # Queue-or-run: wait (bounded) for a concurrency permit, or shed.
             if not self._promote():
+                self.server_metrics.note_refusal()
                 self._refuse_busy(request)
                 return
             try:

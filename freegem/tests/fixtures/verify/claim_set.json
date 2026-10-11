@@ -1,0 +1,49 @@
+{
+  "_comment": "Deterministic claim-verification benchmark. Feed source_text to the verifier as the only fetched source, feed model_answer as the stubbed Gemini reply, and require the expected statuses, quote verification, and locations. This is the regression contract for the deterministic half of verify(): schema validation, quote checking, and location mapping must hold no matter what the model layer does.",
+  "source": {
+    "url": "https://en.wikipedia.org/wiki/Alexander_the_Great",
+    "title": "Alexander the Great",
+    "via": "mediawiki-api",
+    "text_file": "alexander_source.txt"
+  },
+  "claims": [
+    "Alexander became king of Macedon in 336 BC.",
+    "Alexander died in Babylon in 323 BC.",
+    "Alexander died in 330 BC.",
+    "Alexander had a sister named Cleopatra.",
+    "Alexander's empire stretched from Greece to India and he ruled it until his death."
+  ],
+  "model_answer_file": "gemini_claims_ok.txt",
+  "expected": [
+    {
+      "number": 1,
+      "status": "supported",
+      "all_verified": true,
+      "location": "Introduction"
+    },
+    {
+      "number": 2,
+      "status": "supported",
+      "all_verified": true,
+      "location": "Death and legacy"
+    },
+    {
+      "number": 3,
+      "status": "contradicted",
+      "all_verified": true,
+      "location": "Death and legacy"
+    },
+    {
+      "number": 4,
+      "status": "not_found",
+      "all_verified": false,
+      "location": null
+    },
+    {
+      "number": 5,
+      "status": "partially_supported",
+      "all_verified": true,
+      "location": "Introduction"
+    }
+  ]
+}

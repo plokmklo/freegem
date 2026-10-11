@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Nasty nesting fixture</title>
+</head>
+<body>
+<table>
+<tr>
+<td>
+<table>
+<tr><td>
+<div>
+<p>Deeply nested content inside unclosed table cells and divs.
+<ul>
+<li>list item one
+<li>list item two with <b>bold <i>crossing emphasis that never closes
+</ul>
+<p>Another paragraph after an unclosed list, inside an unclosed div, inside
+unclosed table cells. A real-world page shaped like this must still extract
+its text instead of crashing the parser or dropping everything.
+<script>document.write("<p>script-generated content that must NOT appear</p>");</script>
+<style>.injected { display: none; content: "</p>"; }</style>
+</td>
+</table>
+</td>
+</tr>
+</table>
+<footer>Trailing footer text after all the damage.</footer>
+</body>
+</html>

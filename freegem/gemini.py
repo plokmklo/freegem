@@ -23,6 +23,7 @@ from email.utils import parsedate_to_datetime
 from typing import Any
 
 from .config import BridgeConfig
+from .metrics import note_gemini_retry
 
 __all__ = [
     "HAS_HTTPX",
@@ -501,6 +502,7 @@ def generate(
             last_error = exc
             if attempt < cfg.retry_attempts:
                 delay = _backoff_delay(cfg.retry_delay_sec, attempt, exc.retry_after)
+                note_gemini_retry()
                 log(
                     cfg,
                     f"attempt {attempt}/{cfg.retry_attempts} failed: {exc}; "
@@ -511,6 +513,7 @@ def generate(
             last_error = exc
             if attempt < cfg.retry_attempts:
                 delay = _backoff_delay(cfg.retry_delay_sec, attempt)
+                note_gemini_retry()
                 log(
                     cfg,
                     f"attempt {attempt}/{cfg.retry_attempts} failed: {exc}; "
@@ -609,6 +612,7 @@ def generate_stream(
             last_error = exc
             if attempt < cfg.retry_attempts:
                 delay = _backoff_delay(cfg.retry_delay_sec, attempt, _exc_retry_after(exc))
+                note_gemini_retry()
                 log(
                     cfg,
                     f"stream attempt {attempt}/{cfg.retry_attempts} failed: {exc}; "

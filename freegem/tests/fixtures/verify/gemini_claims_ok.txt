@@ -1,0 +1,13 @@
+```claims
+[
+  {"claim_number": 1, "status": "supported",
+   "evidence": [{"source": 1, "quotes": ["He succeeded his father, Philip II, to the throne in 336 BC, at the age of 20"]}]},
+  {"claim_number": 2, "status": "supported",
+   "evidence": [{"source": 1, "quotes": ["Alexander died in the palace of Nebuchadnezzar II, in Babylon, on 10 or 11 June 323 BC"]}]},
+  {"claim_number": 3, "status": "contradicted",
+   "evidence": [{"source": 1, "quotes": ["Alexander died in the palace of Nebuchadnezzar II, in Babylon, on 10 or 11 June 323 BC, at the age of 32"]}]},
+  {"claim_number": 4, "status": "not_found", "evidence": []},
+  {"claim_number": 5, "status": "partially_supported",
+   "evidence": [{"source": 1, "quotes": ["stretching from Greece to northwestern India"]}]}
+]
+```

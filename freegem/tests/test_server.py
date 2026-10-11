@@ -601,8 +601,10 @@ class MalformedRequestTests(EndpointTestCase):
 
         BaseHTTPRequestHandler converts a socket TimeoutError into a bare 500
         before do_POST runs, which misattributes a client fault to the server.
+        The 408 mapping lives in _do_post (do_POST only wraps it with the
+        latency metric).
         """
-        handler_source = inspect.getsource(GeminiHandler.do_POST)
+        handler_source = inspect.getsource(GeminiHandler._do_post)
         self.assertIn("408", handler_source)
         self.assertIn("TimeoutError", handler_source)
 

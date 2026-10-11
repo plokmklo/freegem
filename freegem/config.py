@@ -53,6 +53,10 @@ DEFAULT_CONFIG: Mapping[str, Any] = {
     # concurrency cap wait up to this many seconds for a slot instead of
     # getting an immediate 503. 0 keeps today's refuse-fast behavior.
     "request_queue_wait_sec": 0.0,
+    # Claim verification's optional URL discovery searches this wiki through
+    # the Wikimedia API portal (or the site's own OpenSearch API for
+    # non-Wikimedia MediaWiki hosts). robots.txt is honored either way.
+    "discover_wiki": "en.wikipedia.org",
 }
 
 
@@ -81,6 +85,7 @@ class BridgeConfig:
     robots_cache_ttl_sec: int = DEFAULT_CONFIG["robots_cache_ttl_sec"]
     request_queue_wait_sec: float = DEFAULT_CONFIG["request_queue_wait_sec"]
     research_evidence: bool = DEFAULT_CONFIG["research_evidence"]
+    discover_wiki: str = DEFAULT_CONFIG["discover_wiki"]
 
     # ---- construction -------------------------------------------------------
 
@@ -140,6 +145,7 @@ class BridgeConfig:
             "robots_cache_ttl_sec": self.robots_cache_ttl_sec,
             "request_queue_wait_sec": self.request_queue_wait_sec,
             "research_evidence": self.research_evidence,
+            "discover_wiki": self.discover_wiki,
             # Booleans and paths only; never the token itself.
             "xsrf_token_set": bool(self.xsrf_token),
             "cookie": "configured" if self.cookie_file else "none (anonymous)",

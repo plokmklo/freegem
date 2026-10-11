@@ -8,6 +8,8 @@ One command runs either face of the bridge:
 Plus one-shot utilities for checking a setup without starting a server:
     freegem ask "what is the time in Tokyo?"
     freegem scrape https://example.com --links --ask "what is this site?"
+    freegem research URL1 URL2 -q "question"
+    freegem verify "claim one" "claim two" --urls URL1 URL2
     freegem models
     freegem doctor
 """
@@ -64,7 +66,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"freegem {__version__}")
 
     sub = parser.add_subparsers(
-        dest="command", metavar="{serve,mcp,ask,models,scrape,research,doctor}"
+        dest="command", metavar="{serve,mcp,ask,models,scrape,research,verify,doctor}"
     )
 
     serve = sub.add_parser("serve", help="run the HTTP API server", parents=[common])
@@ -186,6 +188,100 @@ def _build_parser() -> argparse.ArgumentParser:
             "ask for, and verify, verbatim evidence quotes per cited source "
             "(default: research_evidence config, on)"
         ),
+    )
+
+    verify = sub.add_parser(
+        "verify",
+        help="verify claims against fetched sources with per-claim statuses",
+        parents=[common],
+    )
+    verify.add_argument(
+        "claims", nargs="+", metavar="CLAIM", help="claims to verify (1 to 8, quoted)"
+    )
+    verify.add_argument(
+        "--urls",
+        nargs="+",
+        metavar="URL",
+        default=None,
+        help="pages to verify against (http/https); or use --discover",
+    )
+    verify.add_argument(
+        "--discover",
+        action="store_true",
+        help=(
+            "find candidate URLs through a supported search API (Wikimedia "
+            "portal / site OpenSearch) instead of listing them"
+        ),
+    )
+    verify.add_argument(
+        "--discovery-query",
+        metavar="QUERY",
+        default=None,
+        help="custom search query for --discover (default: the claims joined)",
+    )
+    verify.add_argument(
+        "--discovery-limit",
+        type=int,
+        default=3,
+        metavar="N",
+        help="how many URLs discovery may return (default 3, cap 5)",
+    )
+    verify.add_argument(
+        "--wiki",
+        metavar="HOST",
+        default=None,
+        help="wiki host discovery searches (default: discover_wiki config, en.wikipedia.org)",
+    )
+    verify.add_argument(
+        "--format",
+        choices=("text", "markdown", "json"),
+        default="text",
+        help="output format (default text)",
+    )
+    verify.add_argument(
+        "--max-pages",
+        type=int,
+        default=5,
+        metavar="N",
+        help="fetch at most N pages (default 5, hard cap 10)",
+    )
+    verify.add_argument(
+        "--max-chars-per-page",
+        type=int,
+        default=12000,
+        metavar="N",
+        help="truncate each page's text to N characters (default 12000)",
+    )
+    verify.add_argument(
+        "--total-budget",
+        type=int,
+        default=80000,
+        metavar="N",
+        help="hard cap on total fetched characters kept (default 80000)",
+    )
+    verify.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="skip the local fetch cache for this run",
+    )
+    verify.add_argument(
+        "--refresh",
+        action="store_true",
+        help="refetch every URL this run and refresh cache entries",
+    )
+    verify.add_argument(
+        "--cache-ttl",
+        type=int,
+        default=1800,
+        metavar="SEC",
+        help="how long cached fetches stay fresh (default 1800 seconds)",
+    )
+    verify.add_argument(
+        "--fetch-concurrency",
+        type=int,
+        default=None,
+        metavar="N",
+        help="fetch pages N at a time (default: research_concurrency config, 3)",
     )
 
     sub.add_parser("models", help="list available models", parents=[common])
@@ -340,6 +436,35 @@ def cmd_research(cfg: BridgeConfig, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_verify(cfg: BridgeConfig, args: argparse.Namespace) -> int:
+    """Verify claims against fetched sources with per-claim statuses."""
+    from .claim_verify import verify_cli
+
+    try:
+        output = verify_cli(
+            cfg,
+            claims=args.claims,
+            urls=args.urls,
+            discover=args.discover,
+            discovery_query=args.discovery_query,
+            discovery_limit=args.discovery_limit,
+            wiki_host=args.wiki,
+            fmt=args.format,
+            max_pages=args.max_pages,
+            max_chars_per_page=args.max_chars_per_page,
+            total_budget=args.total_budget,
+            cache_ttl=args.cache_ttl,
+            no_cache=args.no_cache,
+            refresh=args.refresh,
+            fetch_concurrency=args.fetch_concurrency,
+        )
+    except (BridgeError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(output)
+    return 0
+
+
 def cmd_doctor(cfg: BridgeConfig, args: argparse.Namespace) -> int:
     """Read-only diagnostics. Never sends a generation request."""
     from .gemini import account_prefix, load_cookie
@@ -413,7 +538,7 @@ def main(argv: list[str] | None = None) -> int:
     # namespace (AttributeError on args.port). When no subcommand is present,
     # parse as if `serve` had been written. --help/--version keep the top-level
     # parser so the full command list stays visible.
-    _commands = {"serve", "mcp", "ask", "models", "scrape", "research", "doctor"}
+    _commands = {"serve", "mcp", "ask", "models", "scrape", "research", "verify", "doctor"}
     if not any(a in _commands for a in raw) and not any(
         a in ("-h", "--help", "--version") for a in raw
     ):
@@ -454,6 +579,7 @@ def main(argv: list[str] | None = None) -> int:
         "models": cmd_models,
         "scrape": cmd_scrape,
         "research": cmd_research,
+        "verify": cmd_verify,
         "doctor": cmd_doctor,
     }
     return handlers[command](cfg, args)

@@ -9,6 +9,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Nothing yet.
 
+## [2.5.0] — 2026-10-11
+
+### Added
+
+- **Claim verification (`freegem verify` CLI, `web_verify` MCP tool)** —
+  judge a list of claims (1–8) against fetched sources and get, per claim,
+  exactly one machine-checked status: `supported`, `partially_supported`,
+  `contradicted`, `not_found`, or `source_unavailable`. "The source
+  contradicts the claim" is finally distinct from "the sources did not
+  contain enough evidence", and a failed fetch is never evidence of falsity.
+  Sources use the same guarded, robots-aware, budget-capped fetch machinery
+  as research, and fetches share the same local cache.
+- **Evidence passages with Source / Location / Retrieved** — every status
+  quote is checked verbatim against the text actually fetched (flagged
+  verified or `UNVERIFIED`, never silently deleted), each verified quote
+  gets a deterministic Location computed by finding it inside the source's
+  sectioned text ("Introduction", "§ History", "para 7" — the model never
+  asserts where evidence lives), and a Retrieved date from the fetch
+  metadata. Text output follows the documented Claim / Status / Evidence /
+  Source / Location / Retrieved shape; markdown and JSON render the same
+  data.
+- **Status schema enforcement** — the model's verdicts are validated
+  against the closed vocabulary: unknown statuses become `not_found`, a
+  "supported" verdict without quotable evidence is downgraded with a note,
+  missing verdicts are reported as `not_found` ("no verdict was returned"),
+  evidence citing unloaded sources is dropped, and every repair is counted
+  and surfaced (`schema_repairs` in the metrics). When all sources are
+  dead, no model call happens at all: every claim is `source_unavailable`
+  by construction. When Gemini is unavailable, verdicts are left unjudged
+  with the raw material attached — never fabricated.
+- **Optional URL discovery** — with `discover=True` and no URLs, candidate
+  pages come from a supported search API instead of the user: the
+  Wikimedia API portal (api.wikimedia.org) for Wikimedia wikis and the
+  site's own OpenSearch API for other MediaWiki hosts (config
+  `discover_wiki`). Every discovery request is robots-checked like any
+  other fetch — Wikimedia's robots.txt disallows its `/w/` search APIs to
+  generic agents, so the portal host is used rather than working around a
+  rule — and discovery is one bounded API call, never a crawl. If robots
+  refuses, discovery refuses with an explicit message.
+- **Metrics layer (`freegem/metrics.py`)** — per-run request IDs, stage
+  timings (discover / fetch / generate / parse), and counters (fetches,
+  cache hits, evidence offered/verified, schema repairs) attached to
+  verify output and surfaced in JSON `meta.metrics`; process-wide
+  `ServerMetrics` for the HTTP face with a bounded latency window and
+  p50/p95/p99 (nearest-rank), response-status counts, queue-refusal
+  counts, upstream retry counters, and RSS memory — rendered by the new
+  **`GET /metrics`** endpoint (aggregates only). POST responses carry an
+  `X-Request-Id` header.
+- **Hardening fixture corpus (`tests/fixtures/verify/`)** — malformed-HTML
+  pages (void-element jam, nested unclosed markup) run through the real
+  extractor and must degrade honestly; a prompt-injection page that
+  fabricates verdicts ("Status: Supported") must never move the
+  deterministic status machinery; changed-Gemini-response fixtures pin the
+  claims-block parser against unknown statuses, missing evidence,
+  duplicate/out-of-range entries, and a second fence; and
+  `claim_set.json` is an executable benchmark contract pairing claims,
+  source text, a model answer, and the expected statuses, quote
+  verification, and Locations.
+
+### Fixed
+
+- A `supported`/`partially_supported`/`contradicted` verdict whose every
+  quote was dropped (evidence cited an unloaded source) is now downgraded
+  to `not_found` with a note — the evidence rule holds after drops, not
+  only at parse time.
+
 ## [2.4.0] — 2026-10-11
 
 ### Added

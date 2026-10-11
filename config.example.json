@@ -34,9 +34,10 @@
   "proxy": null,
   "log_requests": true,
 
-  "_comment_performance": "research_concurrency = parallel page fetches per research call (same-host fetches always serialize). robots_cache_ttl_sec = robots.txt cache lifetime per origin. request_queue_wait_sec > 0 lets bursts wait briefly for a free slot instead of getting an immediate 503. research_evidence = quote and verify verbatim evidence per cited source in research answers.",
+  "_comment_performance": "research_concurrency = parallel page fetches per research call (same-host fetches always serialize). robots_cache_ttl_sec = robots.txt cache lifetime per origin. request_queue_wait_sec > 0 lets bursts wait briefly for a free slot instead of getting an immediate 503. research_evidence = quote and verify verbatim evidence per cited source in research answers. discover_wiki = the wiki web_verify's optional URL discovery searches (through the Wikimedia API portal, or the site's own OpenSearch API for non-Wikimedia MediaWiki hosts; robots.txt honored either way).",
   "research_concurrency": 3,
   "robots_cache_ttl_sec": 600,
   "request_queue_wait_sec": 0.0,
-  "research_evidence": true
+  "research_evidence": true,
+  "discover_wiki": "en.wikipedia.org"
 }

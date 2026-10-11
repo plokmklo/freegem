@@ -33,6 +33,10 @@ implementation knowledge remain fundamental to this project. See
 
 - [Web scraping](#web-scraping)
 
+- [Web research](#web-research)
+
+- [Claim verification](#claim-verification)
+
 - [Models](#models)
 
 - [Authentication](#authentication)
@@ -102,6 +106,7 @@ freegem doctor
 | `POST /v1beta/models/{model}:streamGenerateContent` | Gemini CLI, streaming |
 | `GET /v1beta/models` | Google model discovery |
 | `GET /health` | Liveness and session status |
+| `GET /metrics` | Latency percentiles, status counts, retries, memory |
 
 The server is loopback-only and assumes no auth, so it hardens its own
 surface: POST bodies must be `Content-Type: application/json`, any request
@@ -140,6 +145,7 @@ Exposes Gemini as tools an agent can call:
 | `gemini_list_models` | Registry introspection |
 | `web_scrape` | Read a web page (SSRF-guarded, robots-aware) |
 | `web_research` | Answer one question from several pages, cited [S1]..[Sn] |
+| `web_verify` | Verify claims against sources: per-claim status + located evidence |
 
 ```bash
 pip install "freegem[mcp]"
@@ -171,6 +177,7 @@ Client config (`.mcp.example.json`):
 freegem ask "summarise the plot of Dune"        # direct answer
 freegem ask --search "latest Python release"    # web-grounded + sources
 freegem scrape https://example.com --links      # read a web page
+freegem verify "claim one" "claim two" --urls URL1 URL2   # per-claim verdicts
 freegem models                                  # registry + session state
 freegem doctor                                  # diagnostics, no generation
 ```
@@ -309,6 +316,105 @@ never cookies or credentials.
 
 ---
 
+## Claim verification
+
+`freegem verify` is the layer above research: instead of one answer to one
+question, you hand it a list of claims (1–8) and it judges each against the
+fetched sources. Agents get the same capability through the `web_verify` MCP
+tool. Each claim comes back with exactly one status:
+
+| Status | Meaning |
+| --- | --- |
+| `supported` | The sources contain clear verbatim support for the whole claim |
+| `partially_supported` | Verbatim support exists, but covers only part of the claim |
+| `contradicted` | A source statement conflicts with the claim |
+| `not_found` | The sources do not settle the claim either way |
+| `source_unavailable` | The sources that would settle it failed to load |
+
+The last two are the point: **"the source contradicts the claim" stays
+distinct from "the source did not contain enough evidence"**, and a failed
+fetch is never evidence of falsity.
+
+```bash
+freegem verify \
+  "Alexander became king of Macedon in 336 BC." \
+  "Alexander died in 330 BC." \
+  --urls https://en.wikipedia.org/wiki/Alexander_the_Great
+```
+
+Output follows the documented shape, per claim:
+
+```text
+Claim: Alexander became king of Macedon in 336 BCE
+Status: Supported
+
+Evidence:
+"Alexander succeeded his father Philip II in 336 BCE." (verified)
+
+Source: [S1]
+Location: Introduction
+Retrieved: 2026-10-11
+```
+
+What the machine enforces, not just asks for:
+
+- **Verbatim quote verification** — every status quote is checked against the
+text FreeGem actually fetched (whitespace/case-insensitive). A quote the model
+fabricated stays visible but is marked `UNVERIFIED` — fabrication stays
+distinguishable from a verifier miss.
+
+- **Deterministic Location** — each verified quote gets the section of the
+source it came from ("Introduction", "§ History", "para 7"), computed by
+finding the quote inside the sectioned text. The model never asserts where
+evidence lives. MediaWiki extracts split on their own `== Heading ==`
+markup; extracted HTML splits into labeled paragraphs.
+
+- **Status schema enforcement** — unknown statuses are repaired to
+`not_found`, a "supported" verdict without quotable evidence is downgraded
+with an explanatory note, missing verdicts are reported as `not_found`, and
+evidence citing unloaded sources is dropped. Every repair is counted
+(`schema_repairs`) and shown. If every source is dead, no model call happens
+at all: every claim is `source_unavailable` by construction. If Gemini is
+unavailable, verdicts are left unjudged (`Note: gemini unavailable…`) with
+the raw material attached — never fabricated.
+
+- **Retrieved dates** — every evidence block carries the date its source was
+fetched, from fetch metadata (cache hits keep the original fetch time), so
+staleness is visible per claim.
+
+**Optional URL discovery** — with `--discover` (MCP `discover: true`) and no
+URLs, candidate pages come from a supported search API instead of you: the
+Wikimedia API portal for Wikimedia wikis, or the site's own OpenSearch API
+for other MediaWiki hosts (`discover_wiki` config, `--wiki` to override,
+`--discovery-query` for a custom search). Every discovery request is
+robots-checked like any other fetch — Wikimedia's robots.txt disallows its
+`/w/` search APIs to generic agents, so the portal host is used rather than
+working around the rule — and discovery is one bounded API call, never a
+crawl. If robots refuses, discovery refuses and says to supply URLs.
+
+```bash
+freegem verify "Alexander tutored by Aristotle?" --discover \
+  --discovery-query "Alexander the Great education"
+```
+
+**Run metrics** — verify (and research) attach a metrics block to JSON
+output: a request id, per-stage timings (discover / fetch / generate /
+parse), counters (fetches ok/failed, cache hits, evidence offered vs
+verified, schema repairs), and process RSS. The HTTP face exposes process
+aggregates at `GET /metrics` — p50/p95/p99 latency over a bounded window,
+response-status counts, queue refusals, upstream retry totals, memory. POST
+responses carry an `X-Request-Id` header for correlating logs.
+
+```bash
+curl -s http://127.0.0.1:8081/metrics
+```
+
+Not a crawler either: discovery returns a handful of article URLs which then
+go through the same guarded fetch pipeline; no link extraction, no following
+results-of-results, no browser rendering.
+
+---
+
 ## Models
 
 | Model | Mode | Notes |
@@ -406,6 +512,7 @@ cp config.example.json config.json
 | `robots_cache_ttl_sec` | `600` | robots.txt cache lifetime per origin; revalidated with ETag / Last-Modified after expiry |
 | `request_queue_wait_sec` | `0.0` | Seconds a burst may wait for a free slot before getting 503 + `Retry-After`; `0` sheds immediately |
 | `research_evidence` | `true` | Quote and verify verbatim evidence per cited source in research answers |
+| `discover_wiki` | `en.wikipedia.org` | Wiki claim-verification's optional URL discovery searches (Wikimedia API portal, or the site's own OpenSearch for non-Wikimedia MediaWiki hosts; robots.txt honored) |
 
 Environment variables override the file: `GEMINI_BL`, `GEMINI_AUTH_USER`,
 `GEMINI_XSRF_TOKEN`, `GEMINI_PROXY`, `GEMINI_COOKIE_FILE`, `FREEGEM_CONFIG`.
@@ -544,7 +651,7 @@ pytest                  # tests
 ```
 
 The test suite runs entirely offline: every Gemini call is mocked, so CI needs
-no credentials and no network. The current suite contains 416 tests. See
+no credentials and no network. The current suite contains 494 tests. See
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the layering rules and
 [`CONTRIBUTING.md`](CONTRIBUTING.md) for how to add a model or an endpoint.
 
@@ -558,6 +665,8 @@ freegem/
   ssrf.py         shared SSRF guard: resolve, check, pin (DNS-rebinding safe)
   web_scraper.py  page fetching: robots (cached), adapters, HTML -> text
   web_research.py multi-source research: cache, budgets, [S#] citations
+  claim_verify.py claim verification: statuses, evidence, discovery
+  metrics.py      run + server metrics: timing, percentiles, counters
   multimodal.py   image upload
   tools.py        pure protocol translation (OpenAI/Google -> prompt)
   server.py       HTTP faces

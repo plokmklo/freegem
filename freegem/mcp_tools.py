@@ -118,6 +118,23 @@ TOOL_SPECS: list[dict[str, Any]] = [
             "pages to compare or read."
         ),
     },
+    {
+        "name": "web_verify",
+        "summary": "Verify claims against sources: per-claim status + located evidence",
+        "description": (
+            "Judge a list of claims against fetched web sources. Each claim gets "
+            "exactly one status: supported, partially_supported, contradicted, "
+            "not_found, or source_unavailable -- so 'the source contradicts the "
+            "claim' stays distinct from 'the source did not contain enough "
+            "evidence' and from 'the fetch failed'. Every status quote is checked "
+            "verbatim against the text actually fetched and each verified quote "
+            "gets a deterministic Location (which section of the source it came "
+            "from) and a Retrieved date. Sources use the same SSRF/robots/caps "
+            "guard as web_scrape and are cached. With discover=true and no urls, "
+            "candidate URLs come from a supported search API (Wikimedia portal or "
+            "the site's own OpenSearch) -- robots-checked, never a crawl."
+        ),
+    },
 ]
 
 
@@ -219,6 +236,11 @@ def run_tool(cfg: BridgeConfig, name: str, arguments: dict[str, Any]) -> str:
         from .web_research import run_research_tool
 
         return run_research_tool(cfg, arguments)
+
+    if name == "web_verify":
+        from .claim_verify import run_verify_tool
+
+        return run_verify_tool(cfg, arguments)
 
     if name == "gemini_list_models":
         lines = ["Available models:", ""]
@@ -426,6 +448,56 @@ def build_server(cfg: BridgeConfig, name: str = "freegem") -> Any:
                 "max_pages": max_pages,
                 "max_chars_per_page": max_chars_per_page,
                 "evidence": evidence,
+            },
+        )
+
+    @server.tool()
+    def web_verify(
+        claims: list,
+        urls: list | None = None,
+        discover: bool = False,
+        discovery_query: str | None = None,
+        discovery_limit: int = 3,
+        max_pages: int = 5,
+        max_chars_per_page: int = 12000,
+        fetch_concurrency: int = 3,
+    ) -> str:
+        """Verify claims against fetched sources with per-claim statuses.
+
+        Each claim returns exactly one status -- supported,
+        partially_supported, contradicted, not_found, or source_unavailable
+        -- with verbatim evidence quotes that are machine-checked against the
+        fetched text, a deterministic Location (section), and a Retrieved
+        date. 'The source contradicts the claim' stays distinct from 'the
+        sources did not contain enough evidence' and from 'the fetch failed'.
+
+        Args:
+            claims: Claims to verify, 1-8 strings.
+            urls: Pages to verify against, http/https. Required unless
+                discover is true.
+            discover: Find candidate URLs through a supported search API
+                (Wikimedia portal / site OpenSearch) instead of listing them.
+            discovery_query: Custom search query for discovery (default: the
+                claims joined).
+            discovery_limit: How many URLs discovery may return (1-5).
+            max_pages: Fetch at most this many URLs (1-10, default 5).
+            max_chars_per_page: Truncate each page's text to this many
+                characters (500-50000, default 12000).
+            fetch_concurrency: Pages fetched at once, 1-8 (default 3); same-host
+                fetches always serialize.
+        """
+        return run_tool(
+            cfg,
+            "web_verify",
+            {
+                "claims": claims,
+                "urls": urls,
+                "discover": discover,
+                "discovery_query": discovery_query,
+                "discovery_limit": discovery_limit,
+                "max_pages": max_pages,
+                "max_chars_per_page": max_chars_per_page,
+                "fetch_concurrency": fetch_concurrency,
             },
         )
 
