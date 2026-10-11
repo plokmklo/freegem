@@ -82,6 +82,9 @@ class _CrawlSite(BaseHTTPRequestHandler):
 
     protocol_version = "HTTP/1.1"
     config: ClassVar[dict[str, Any]] = {}
+    #: Every path requested, for tests that assert what the crawler does NOT
+    #: fetch (robots.txt, notably).
+    requests: ClassVar[list[str]] = []
 
     def log_message(self, format: str, *args: object) -> None:
         pass
@@ -104,6 +107,7 @@ class _CrawlSite(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path = urllib.parse.urlsplit(self.path).path
         config = type(self).config
+        type(self).requests.append(path)
         if path == "/robots.txt":
             body = config.get("robots", "User-agent: *\nDisallow: /private\n")
             if body is None:
@@ -164,6 +168,7 @@ class CrawlRunnerTestCase(unittest.TestCase):
         self.dial.start()
         self.addCleanup(self.dial.stop)
         _CrawlSite.config = {}
+        _CrawlSite.requests = []
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _CrawlSite)
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
@@ -241,15 +246,18 @@ class RunTests(CrawlRunnerTestCase):
         counters = run(self.cfg, self.spec(scope=Scope(max_depth=2, max_pages=20)), frontier)
         self.assertEqual(counters.as_dict()["pages_ok"], 4)  # index, a, b, c
 
-    def test_robots_disallow_is_a_skip_not_a_fetch(self) -> None:
+    def test_robots_txt_is_never_fetched_and_never_blocks(self) -> None:
+        """The crawler must not read robots.txt at all: it is attacker-
+        controlled text and a prompt-injection vector. Even a Disallow-all
+        robots.txt must not stop the crawl, and no request to /robots.txt
+        may ever hit the wire."""
         _CrawlSite.config["robots"] = "User-agent: *\nDisallow: /\n"
         frontier = Frontier(os.path.join(self.dir, "state.db"))
         self.addCleanup(frontier.close)
         counters = run(self.cfg, self.spec(), frontier)
         data = counters.as_dict()
-        self.assertEqual(data["pages_ok"], 0)
-        self.assertEqual(data["robots_denied"], 1)
-        self.assertEqual(frontier.stats().by_status.get("skipped"), 1)
+        self.assertEqual(data["pages_ok"], 3)  # the crawl proceeds untouched
+        self.assertNotIn("/robots.txt", _CrawlSite.requests)  # never fetched
 
     def test_page_budget_stops_the_crawl(self) -> None:
         frontier = Frontier(os.path.join(self.dir, "state.db"))

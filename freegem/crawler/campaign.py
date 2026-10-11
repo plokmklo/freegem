@@ -5,21 +5,36 @@ stack actually behave across a thousand sites -- old and new hand-written
 HTML, news portals, PHP forums, Java application servers, Shift-JIS and GBK
 pages, bot-walled CDNs?" The point is the FAILURE distribution, not the
 green checkmarks: the report's blocked/timeout/network buckets are what
-drives fetch upgrades (header sets, retry policy, decoding).
+drives fetch upgrades (header profiles, retry policy, decoding).
+
+Policy (v2): NO robots.txt -- the campaign never fetches or consults one.
+robots.txt is attacker-controlled text from the same origin as the pages; it
+is a documented prompt-injection vector, and a published page is published
+to be read. Courtesies: per-host pacing (a real delay between same-host
+requests, extended on 429) and no attacking -- no auth bypass, no wall
+cracking. Every seed goes through the resilient ladder (browser-grade
+headers, backoff, origin-root fallback for dead paths, scheme/host swaps,
+last-resort TLS relax for broken certificates).
 
 It is a library first and a CLI second::
 
     python -m freegem.crawler.campaign run --seeds seeds.jsonl \\
         --report report.json --concurrency 8 --limit 1000
 
+    python -m freegem.crawler.campaign run --seeds seeds.jsonl \\
+        --state state.db --retry-failed --distill
+
 Seeds are JSONL: ``{"url": "...", "category": "news", "note": "..."}``.
 State is a SQLite file (``--state``), so a killed campaign resumes where it
 stopped and the report is reproducible from the recorded outcomes.
+``--retry-failed`` re-runs only the seeds whose last outcome was not ``ok``
+(the upgrade path: fix the fetcher, re-try exactly what it missed).
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -29,9 +44,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..config import BridgeConfig
-from ..web_scraper import RobotsCache
-from .fetch import FetchOutcome, crawl_fetch
+from .distill import DISTILL_THRESHOLD_BYTES, distill_text
+from .fetch import FetchOutcome
 from .hardening import ResourceLimits
+from .resilient import HostPacer, fetch_resilient
 
 __all__ = ["CampaignResult", "load_seeds", "run_campaign"]
 
@@ -51,7 +67,19 @@ CREATE TABLE IF NOT EXISTS queue(
   category TEXT NOT NULL DEFAULT '',
   note     TEXT
 );
+CREATE TABLE IF NOT EXISTS distilled(
+  url      TEXT PRIMARY KEY,
+  mode     TEXT NOT NULL,
+  chars    INTEGER NOT NULL DEFAULT 0,
+  text     TEXT NOT NULL DEFAULT ''
+);
 """
+
+_MIGRATIONS = (
+    "ALTER TABLE results ADD COLUMN via TEXT NOT NULL DEFAULT 'origin'",
+    "ALTER TABLE results ADD COLUMN fallback TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE results ADD COLUMN attempts INTEGER NOT NULL DEFAULT 1",
+)
 
 
 @dataclass
@@ -62,6 +90,7 @@ class CampaignResult:
     by_kind: dict[str, int] = field(default_factory=dict)
     by_status: dict[str, int] = field(default_factory=dict)
     by_category: dict[str, dict[str, int]] = field(default_factory=dict)
+    by_fallback: dict[str, int] = field(default_factory=dict)
     blocked_samples: list[dict[str, Any]] = field(default_factory=list)
     error_samples: list[dict[str, Any]] = field(default_factory=list)
     total_bytes: int = 0
@@ -75,7 +104,9 @@ class CampaignResult:
             self.by_status[key] = self.by_status.get(key, 0) + 1
         bucket = self.by_category.setdefault(category, {})
         bucket[outcome.kind] = bucket.get(outcome.kind, 0) + 1
-        self.total_bytes += len(outcome.body or b"")
+        if outcome.fallback:
+            self.by_fallback[outcome.fallback] = self.by_fallback.get(outcome.fallback, 0) + 1
+        self.total_bytes += outcome.body_size or len(outcome.body or b"")
         self.total_ms += outcome.elapsed_ms
         if outcome.blocked and len(self.blocked_samples) < 25:
             self.blocked_samples.append(
@@ -83,6 +114,8 @@ class CampaignResult:
                     "url": url,
                     "status": outcome.status,
                     "kind": outcome.kind,
+                    "fallback": outcome.fallback,
+                    "attempts": outcome.attempts,
                     "server": outcome.headers.get("server", ""),
                 }
             )
@@ -91,16 +124,24 @@ class CampaignResult:
                 {"url": url, "kind": outcome.kind, "error": (outcome.error or "")[:120]}
             )
 
+    def readable(self) -> int:
+        """Seeds whose content was actually obtained (``ok`` kind)."""
+        return self.by_kind.get("ok", 0)
+
     def as_dict(self) -> dict[str, Any]:
+        attempted = self.attempted or 1
         return {
             "attempted": self.attempted,
+            "readable": self.readable(),
+            "readable_pct": round(100.0 * self.readable() / attempted, 2),
             "by_kind": dict(sorted(self.by_kind.items(), key=lambda kv: -kv[1])),
             "by_status": dict(sorted(self.by_status.items())),
             "by_category": self.by_category,
+            "by_fallback": dict(sorted(self.by_fallback.items(), key=lambda kv: -kv[1])),
             "blocked_samples": self.blocked_samples,
             "error_samples": self.error_samples,
             "total_bytes": self.total_bytes,
-            "avg_ms": (self.total_ms // self.attempted) if self.attempted else 0,
+            "avg_ms": (self.total_ms // attempted) if self.attempted else 0,
         }
 
 
@@ -122,6 +163,67 @@ def load_seeds(path: str) -> list[dict[str, str]]:
     return seeds
 
 
+def _migrate(db: sqlite3.Connection) -> None:
+    """Add v2 columns when upgrading a v1 state file (idempotent)."""
+    for statement in _MIGRATIONS:
+        try:
+            with db:
+                db.execute(statement)
+        except sqlite3.OperationalError:
+            pass  # column already exists
+
+
+def _persist(
+    db: sqlite3.Connection,
+    lock: threading.Lock,
+    url: str,
+    category: str,
+    outcome: FetchOutcome,
+) -> None:
+    with lock, db:
+        db.execute(
+            "INSERT OR REPLACE INTO results"
+            "(url, category, kind, status, ms, bytes, error, attempted_at,"
+            " via, fallback, attempts) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                url,
+                category,
+                outcome.kind,
+                outcome.status,
+                outcome.elapsed_ms,
+                outcome.body_size or len(outcome.body or b""),
+                outcome.error,
+                time.time(),
+                outcome.via,
+                outcome.fallback,
+                outcome.attempts,
+            ),
+        )
+
+
+def _distill_if_large(
+    cfg: BridgeConfig,
+    db: sqlite3.Connection,
+    lock: threading.Lock,
+    url: str,
+    outcome: FetchOutcome,
+    counters: dict[str, int],
+) -> None:
+    """Distill pages at/above the size threshold; store beside the results."""
+    size = outcome.body_size or len(outcome.body or b"")
+    if size < DISTILL_THRESHOLD_BYTES:
+        return
+    text = outcome.text()
+    distilled, mode = distill_text(cfg, url, text, content_type=outcome.content_type)
+    counters["distilled"] = counters.get("distilled", 0) + 1
+    counters[f"distill_{mode}"] = counters.get(f"distill_{mode}", 0) + 1
+    with lock, db:
+        db.execute(
+            "INSERT OR REPLACE INTO distilled(url, mode, chars, text) VALUES(?,?,?,?)",
+            (url, mode, len(distilled), distilled),
+        )
+
+
 def run_campaign(
     cfg: BridgeConfig,
     seeds: list[dict[str, str]],
@@ -130,17 +232,25 @@ def run_campaign(
     report_path: str = "",
     concurrency: int = 8,
     limit: int = 1000,
-    timeout_sec: float = 12.0,
-    robots: bool = True,
+    timeout_sec: float = 20.0,
+    host_delay_sec: float = 1.0,
+    retry_failed: bool = False,
+    distill: bool = False,
     on_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> CampaignResult:
-    """Fetch every seed once (resume-aware), persist outcomes, aggregate."""
-    limits = ResourceLimits(timeout_sec=timeout_sec, max_bytes=2 * 1024 * 1024)
-    robots_cache = RobotsCache() if robots else None
+    """Fetch seeds (resume-aware) through the resilient ladder, persist
+    outcomes, aggregate. ``retry_failed`` re-attempts only rows whose last
+    outcome was not ``ok``; ``distill`` summarizes oversized pages (Gemini
+    when a session exists, extractive otherwise) into the ``distilled``
+    table. There is deliberately NO robots.txt step."""
+    limits = ResourceLimits(timeout_sec=timeout_sec, max_bytes=100 * 1024 * 1024)
+    spill_dir = os.path.join(os.path.dirname(os.path.abspath(state_path)) or ".", "spill")
+    pacer = HostPacer(default_delay_sec=host_delay_sec)
     db = sqlite3.connect(state_path, check_same_thread=False)
     db.row_factory = sqlite3.Row
     with db:
         db.executescript(_SCHEMA)
+    _migrate(db)
 
     queue = seeds[:limit]
     with db:
@@ -151,6 +261,7 @@ def run_campaign(
             )
 
     result = CampaignResult()
+    distill_counters: dict[str, int] = {}
     lock = threading.Lock()
     cancel = threading.Event()
 
@@ -159,29 +270,21 @@ def run_campaign(
             return
         url = str(row["url"])
         category = str(row["category"])
-        outcome = crawl_fetch(cfg, url, limits=limits, robots=robots_cache)
+        outcome = fetch_resilient(cfg, url, limits=limits, pacer=pacer, spill_dir=spill_dir)
+        _persist(db, lock, url, category, outcome)
         with lock:
             result.record(url, category, outcome)
-            with db:
-                db.execute(
-                    "INSERT OR REPLACE INTO results"
-                    "(url, category, kind, status, ms, bytes, error, attempted_at)"
-                    " VALUES(?,?,?,?,?,?,?,?)",
-                    (
-                        url,
-                        category,
-                        outcome.kind,
-                        outcome.status,
-                        outcome.elapsed_ms,
-                        len(outcome.body or b""),
-                        outcome.error,
-                        time.time(),
-                    ),
-                )
-            if on_event is not None:
-                on_event({"event": "fetched", **outcome.summary(), "category": category})
+            if distill:
+                _distill_if_large(cfg, db, lock, url, outcome, distill_counters)
+        if on_event is not None:
+            on_event({"event": "fetched", **outcome.summary(), "category": category})
 
-    rows = db.execute("SELECT url, category FROM queue ORDER BY url").fetchall()
+    if retry_failed:
+        rows = db.execute(
+            "SELECT url, category FROM results WHERE kind != 'ok' ORDER BY url"
+        ).fetchall()
+    else:
+        rows = db.execute("SELECT url, category FROM queue ORDER BY url").fetchall()
     try:
         with ThreadPoolExecutor(max_workers=max(1, min(concurrency, 16))) as pool:
             for future in [pool.submit(work, row) for row in rows]:
@@ -192,8 +295,11 @@ def run_campaign(
         db.close()
 
     if report_path:
+        payload = result.as_dict()
+        if distill:
+            payload["distill"] = dict(sorted(distill_counters.items()))
         with open(report_path, "w", encoding="utf-8") as fh:
-            json.dump(result.as_dict(), fh, ensure_ascii=False, indent=2)
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
             fh.write("\n")
     return result
 
@@ -210,8 +316,23 @@ def _cli(argv: list[str] | None = None) -> int:
     run_p.add_argument("--report", default="", help="write the JSON report here")
     run_p.add_argument("--concurrency", type=int, default=8)
     run_p.add_argument("--limit", type=int, default=1000)
-    run_p.add_argument("--timeout", type=float, default=12.0)
-    run_p.add_argument("--no-robots", action="store_true")
+    run_p.add_argument("--timeout", type=float, default=20.0)
+    run_p.add_argument(
+        "--host-delay",
+        type=float,
+        default=1.0,
+        help="minimum seconds between requests to the same host",
+    )
+    run_p.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="re-attempt only seeds whose last outcome was not ok",
+    )
+    run_p.add_argument(
+        "--distill",
+        action="store_true",
+        help="distill oversized pages (Gemini, extractive fallback)",
+    )
     args = parser.parse_args(argv)
 
     from ..config import load_config
@@ -230,7 +351,9 @@ def _cli(argv: list[str] | None = None) -> int:
         concurrency=args.concurrency,
         limit=args.limit,
         timeout_sec=args.timeout,
-        robots=not args.no_robots,
+        host_delay_sec=args.host_delay,
+        retry_failed=args.retry_failed,
+        distill=args.distill,
         on_event=on_event,
     )
     summary = result.as_dict()

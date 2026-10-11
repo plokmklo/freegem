@@ -6,15 +6,16 @@ recorded:
 * a ``plan()`` pass that does NO network -- seeds are normalized, scope
   verdicts are shown per seed, budgets are mathed -- so ``crawl plan`` can
   be run before touching any server;
-* ``run()`` spends the budget on the frontier, honoring robots.txt through
-  the shared cache, per-host politeness delays, backoff-with-jitter
-  retries, and a cancellation event that turns Ctrl-C into "finish the
-  in-flight page, checkpoint, exit";
+* ``run()`` spends the budget on the frontier, honoring per-host politeness
+  delays, backoff-with-jitter retries, and a cancellation event that turns
+  Ctrl-C into "finish the in-flight page, checkpoint, exit"; every page goes
+  through the escalation ladder by default (``CrawlSpec.resilient``) and
+  robots.txt is never fetched or consulted (see CrawlSpec);
 * artifacts: every successfully fetched body is stored content-addressed
   (``artifacts/ab/<sha256>.body``) with one manifest line per page, so a
   crawl's raw evidence survives independently of the frontier DB;
-* counters and structured JSON logs cover pages, bytes, statuses, robots
-  refusals, blocks, retries, extraction stats, and per-host failures.
+* counters and structured JSON logs cover pages, bytes, statuses, blocks,
+  retries, extraction stats, and per-host failures.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 import threading
 import time
@@ -33,12 +35,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..config import BridgeConfig
-from ..web_scraper import RobotsCache
+from .distill import DISTILL_THRESHOLD_BYTES, distill_text
 from .extract import ExtractionStats, Field, FieldError, Schema, extract_items
 from .fetch import FetchOutcome, crawl_fetch
 from .frontier import Frontier, FrontierItem
 from .hardening import HtmlDom, ResourceLimits, parse_xml, redact_secrets
 from .output import make_writer
+from .resilient import HostPacer, fetch_resilient
 from .urls import Budget, Scope, normalize_url, url_origin
 
 __all__ = ["Counters", "CrawlSpec", "PlanReport", "load_schema", "plan", "run"]
@@ -46,20 +49,37 @@ __all__ = ["Counters", "CrawlSpec", "PlanReport", "load_schema", "plan", "run"]
 
 @dataclass
 class CrawlSpec:
-    """Everything one crawl needs, CLI-constructible."""
+    """Everything one crawl needs, CLI-constructible.
+
+    There is deliberately NO robots.txt switch: the crawler never fetches and
+    never consults robots.txt. A robots.txt is attacker-controlled text from
+    the same origin as the pages being read -- a documented prompt-injection
+    vector against scrapers and AI agents -- and a published page is
+    published to be read. Politeness is per-host pacing; attacks (auth
+    bypass, wall cracking, hammering) stay out of scope.
+    """
 
     seeds: tuple[str, ...]
     scope: Scope = field(default_factory=Scope)
     limits: ResourceLimits = field(default_factory=ResourceLimits)
     delay_ms: int = 250
     concurrency: int = 2
-    robots: bool = True
+    #: Route every page through the escalation ladder (browser-grade header
+    #: profiles, 429 waits, timeout growth, origin-root fallback for dead
+    #: paths, scheme/host swaps, last-resort TLS relax for broken certs).
+    resilient: bool = True
+    #: Distill oversized pages (>= 2 MB) to their important content via
+    #: Gemini, extractive fallback; adds ``distilled``/``distill_mode`` to
+    #: the default (no-schema) records.
+    distill: bool = False
     sitemaps: bool = False
     output_path: str = ""
     output_format: str = "jsonl"
     append_output: bool = False
     schema_path: str = ""
     artifacts_dir: str = ""
+    #: Where spilled oversized bodies go (defaults beside the state file).
+    spill_dir: str = ""
     state_path: str = ""
     extra_headers: dict[str, str] = field(default_factory=dict)
 
@@ -80,7 +100,6 @@ class Counters:
     pages_ok: int = 0
     pages_not_modified: int = 0
     pages_failed: int = 0
-    robots_denied: int = 0
     ssrf_refused: int = 0
     blocked: int = 0
     retries: int = 0
@@ -113,7 +132,6 @@ class Counters:
             "pages_ok": self.pages_ok,
             "pages_not_modified": self.pages_not_modified,
             "pages_failed": self.pages_failed,
-            "robots_denied": self.robots_denied,
             "ssrf_refused": self.ssrf_refused,
             "blocked": self.blocked,
             "retries": self.retries,
@@ -248,9 +266,9 @@ def run(
     cancel = cancel or threading.Event()
     counters = Counters()
     budget = Budget(max_pages=spec.scope.max_pages)
-    robots = RobotsCache() if spec.robots else None
     schema = load_schema(spec.schema_path)
     stats = ExtractionStats()
+    pacer = HostPacer(default_delay_sec=max(0.0, spec.delay_ms / 1000.0))
     writer = (
         make_writer(
             spec.output_path,
@@ -272,7 +290,7 @@ def run(
     frontier.set_meta("seeds", json.dumps(list(spec.seeds)))
 
     if spec.sitemaps:
-        _seed_sitemaps(cfg, spec, frontier, robots, counters, cancel)
+        _seed_sitemaps(cfg, spec, frontier, counters, cancel)
 
     for seed in spec.seeds:
         try:
@@ -287,7 +305,6 @@ def run(
             cfg,
             spec,
             frontier,
-            robots,
             schema,
             stats,
             budget,
@@ -296,6 +313,7 @@ def run(
             cancel,
             on_event,
             started,
+            pacer,
         )
     finally:
         frontier.set_meta("finished_at", str(int(time.time())))
@@ -314,7 +332,6 @@ def _crawl_loop(
     cfg: BridgeConfig,
     spec: CrawlSpec,
     frontier: Frontier,
-    robots: RobotsCache | None,
     schema: Schema,
     stats: ExtractionStats,
     budget: Budget,
@@ -323,6 +340,7 @@ def _crawl_loop(
     cancel: threading.Event,
     on_event: Callable[[dict[str, Any]], None] | None,
     started: float,
+    pacer: HostPacer,
 ) -> None:
     """Claim-fetch-process loop; single or small worker pool."""
     workers = max(1, min(spec.concurrency, 8))
@@ -337,7 +355,6 @@ def _crawl_loop(
                 cfg,
                 spec,
                 frontier,
-                robots,
                 schema,
                 stats,
                 budget,
@@ -346,6 +363,7 @@ def _crawl_loop(
                 batch[0],
                 cancel,
                 on_event,
+                pacer,
             )
         return
     lock = threading.Lock()
@@ -365,7 +383,7 @@ def _crawl_loop(
                 if quiet > 20.0:
                     # Everything left is a far-future retry: end the run; a
                     # later resume picks the retries up. The cap is generous
-                    # enough for the default two-retry backoff window.
+                    # enough for the default four-retry backoff window.
                     return
                 time.sleep(0.25)
                 continue
@@ -375,7 +393,6 @@ def _crawl_loop(
                 cfg,
                 spec,
                 frontier,
-                robots,
                 schema,
                 stats,
                 budget,
@@ -384,6 +401,7 @@ def _crawl_loop(
                 batch[0],
                 cancel,
                 on_event,
+                pacer,
             )
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -434,7 +452,6 @@ def _process(
     cfg: BridgeConfig,
     spec: CrawlSpec,
     frontier: Frontier,
-    robots: RobotsCache | None,
     schema: Schema,
     stats: ExtractionStats,
     budget: Budget,
@@ -443,6 +460,7 @@ def _process(
     item: FrontierItem,
     cancel: threading.Event,
     on_event: Callable[[dict[str, Any]], None] | None,
+    pacer: HostPacer,
 ) -> None:
     """Fetch one claimed URL, record every branch, queue its links."""
     url = item.url
@@ -458,17 +476,43 @@ def _process(
         _log(cfg, {"event": "skipped", "url": url, "reason": verdict.reason})
         return
 
-    outcome = crawl_fetch(
-        cfg,
-        url,
-        limits=spec.limits,
-        robots=robots,
-        etag=item.etag,
-        last_modified=item.last_modified,
-        extra_headers=spec.extra_headers,
+    spill_dir = spec.spill_dir or (
+        os.path.join(spec.state_path + ".spill") if spec.state_path else ""
     )
+    conditional = {
+        k: v
+        for k, v in (
+            ("If-None-Match", item.etag),
+            ("If-Modified-Since", item.last_modified),
+        )
+        if v
+    }
+    if conditional:
+        conditional.update(spec.extra_headers)
+    elif spec.extra_headers:
+        conditional = dict(spec.extra_headers)
+
+    if spec.resilient:
+        outcome = fetch_resilient(
+            cfg,
+            url,
+            limits=spec.limits,
+            pacer=pacer,
+            spill_dir=spill_dir,
+            extra_headers=conditional or None,
+        )
+    else:
+        outcome = crawl_fetch(
+            cfg,
+            url,
+            limits=spec.limits,
+            etag=item.etag,
+            last_modified=item.last_modified,
+            extra_headers=spec.extra_headers,
+            spill_dir=spill_dir,
+        )
     counters.note_outcome(outcome)
-    counters.bytes_in += len(outcome.body or b"")
+    counters.bytes_in += outcome.body_size or len(outcome.body or b"")
     _log(
         cfg,
         {
@@ -476,20 +520,18 @@ def _process(
             "url": url,
             "status": outcome.status,
             "kind": outcome.kind,
+            "fallback": outcome.fallback,
+            "attempts": outcome.attempts,
             "ms": outcome.elapsed_ms,
-            "bytes": len(outcome.body or b""),
+            "bytes": outcome.body_size or len(outcome.body or b""),
         },
     )
 
-    if outcome.kind == "robots":
-        counters.robots_denied += 1
-        frontier.mark_skipped(url, "robots_disallow")
-        return
     if outcome.kind == "ssrf":
         counters.ssrf_refused += 1
         frontier.mark_skipped(url, "ssrf_refused")
         return
-    if outcome.kind == "ok" and outcome.not_modified:
+    if outcome.ok and outcome.not_modified:
         counters.pages_not_modified += 1
         frontier.mark_done(url, http_status=304, etag=item.etag, last_modified=item.last_modified)
         return
@@ -512,7 +554,7 @@ def _process(
 
     counters.pages_ok += 1
     budget.fetched += 1
-    content_hash = hashlib.sha256(outcome.body or b"").hexdigest()
+    content_hash = _content_hash_of(outcome)
     frontier.mark_done(
         url,
         http_status=outcome.status,
@@ -535,8 +577,17 @@ def _process(
     if not schema.fields:
         # No schema given: one useful record per page -- title and capped
         # readable text (the same "what did this page say" cut the scraper
-        # makes), so the default crawl output is not empty.
-        records = [_default_record(dom, payload, url)]
+        # makes), so the default crawl output is not empty. Oversized pages
+        # are distilled to their important content when asked for.
+        record = _default_record(dom, payload, url)
+        if (
+            spec.distill
+            and (outcome.body_size or len(outcome.body or b"")) >= DISTILL_THRESHOLD_BYTES
+        ):
+            distilled, mode = distill_text(cfg, url, text, content_type=outcome.content_type)
+            record["distilled"] = distilled
+            record["distill_mode"] = mode
+        records = [record]
         field_errors: list[FieldError] = []
     else:
         records, field_errors = extract_items(
@@ -621,7 +672,6 @@ def _seed_sitemaps(
     cfg: BridgeConfig,
     spec: CrawlSpec,
     frontier: Frontier,
-    robots: RobotsCache | None,
     counters: Counters,
     cancel: threading.Event,
 ) -> None:
@@ -631,7 +681,7 @@ def _seed_sitemaps(
             return
         sitemap_url = f"{origin}/sitemap.xml"
         outcome = crawl_fetch(
-            cfg, sitemap_url, limits=spec.limits, robots=robots, extra_headers=spec.extra_headers
+            cfg, sitemap_url, limits=spec.limits, extra_headers=spec.extra_headers
         )
         counters.by_kind[outcome.kind] = counters.by_kind.get(outcome.kind, 0) + 1
         if not outcome.ok or outcome.not_modified:
@@ -649,9 +699,7 @@ def _seed_sitemaps(
             for child in child_urls:
                 if cancel.is_set():
                     return
-                sub = crawl_fetch(
-                    cfg, child, limits=spec.limits, robots=robots, extra_headers=spec.extra_headers
-                )
+                sub = crawl_fetch(cfg, child, limits=spec.limits, extra_headers=spec.extra_headers)
                 if not sub.ok or sub.not_modified:
                     continue
                 try:
@@ -706,6 +754,19 @@ def _default_record(dom: HtmlDom | None, payload: Any, url: str) -> dict[str, An
     return {"url": url, "title": "", "text": ""}
 
 
+def _content_hash_of(outcome: FetchOutcome) -> str:
+    """SHA-256 of the body, whether it sits in memory or in a spill file."""
+    if outcome.body is not None:
+        return hashlib.sha256(outcome.body).hexdigest()
+    if outcome.body_path:
+        digest = hashlib.sha256()
+        with open(outcome.body_path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    return hashlib.sha256(b"").hexdigest()
+
+
 def _store_artifact(
     spec: CrawlSpec,
     url: str,
@@ -714,14 +775,23 @@ def _store_artifact(
     counters: Counters,
 ) -> None:
     """Content-address the body under the artifacts dir + one manifest line."""
-    if not spec.artifacts_dir or not outcome.body:
+    if not spec.artifacts_dir:
+        return
+    has_memory_body = bool(outcome.body)
+    has_spill = outcome.body_path and os.path.exists(outcome.body_path)
+    if not has_memory_body and not has_spill:
         return
     directory = os.path.join(spec.artifacts_dir, content_hash[:2])
     os.makedirs(directory, exist_ok=True)
     path = os.path.join(directory, f"{content_hash}.body")
     if not os.path.exists(path):
-        with open(path, "wb") as fh:
-            fh.write(outcome.body)
+        if has_spill:
+            shutil.copyfile(outcome.body_path, path)  # type: ignore[arg-type]
+            os.unlink(outcome.body_path)  # type: ignore[arg-type]
+            outcome.body_path = path  # spill consumed by the artifact store
+        else:
+            with open(path, "wb") as fh:
+                fh.write(outcome.body or b"")
         counters.artifacts_stored += 1
     manifest = os.path.join(spec.artifacts_dir, "manifest.jsonl")
     line = json.dumps(
@@ -730,7 +800,8 @@ def _store_artifact(
             "hash": content_hash,
             "status": outcome.status,
             "content_type": outcome.content_type,
-            "bytes": len(outcome.body),
+            "bytes": outcome.body_size or len(outcome.body or b""),
+            "fallback": outcome.fallback,
             "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         },
         ensure_ascii=False,

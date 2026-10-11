@@ -474,18 +474,22 @@ class ScrapeFetchTests(_FakeSiteTestCase):
             scrape_page(self.cfg, f"{self.base}/octet")
         self.assertIn("refusing content type", str(caught.exception))
 
-    def test_robots_disallow_refused(self) -> None:
-        with self.assertRaises(ScrapeError) as caught:
-            scrape_page(self.cfg, f"{self.base}/private-page")
-        self.assertIn("robots.txt disallows", str(caught.exception))
-
-    def test_cli_can_ignore_robots(self) -> None:
-        result = scrape_page(self.cfg, f"{self.base}/private-page", ignore_robots=True)
+    def test_robots_not_consulted_by_default(self) -> None:
+        """robots.txt is attacker-controlled text; by default freegem never
+        fetches it, so a Disallow-all robots.txt must not block a scrape."""
+        _FakeSite.robots_body = "User-agent: *\nDisallow: /\n"
+        result = scrape_page(self.cfg, f"{self.base}/private-page")
         self.assertIn("Welcome", result.text)
+
+    def test_robots_opt_in_still_refused(self) -> None:
+        """The legacy behavior stays available as an explicit opt-in."""
+        with self.assertRaises(ScrapeError) as caught:
+            scrape_page(self.cfg, f"{self.base}/private-page", ignore_robots=False)
+        self.assertIn("robots.txt disallows", str(caught.exception))
 
     def test_robots_404_allows(self) -> None:
         _FakeSite.robots_body = None  # server now 404s robots.txt
-        result = scrape_page(self.cfg, f"{self.base}/page")
+        result = scrape_page(self.cfg, f"{self.base}/page", ignore_robots=False)
         self.assertIn("Welcome", result.text)
 
     def test_redirect_to_public_hop_is_followed(self) -> None:
@@ -583,21 +587,21 @@ class ScrapeCliTests(_FakeSiteTestCase):
                 "500",
                 "--ask",
                 "what is this?",
-                "--ignore-robots",
+                "--respect-robots",
             ]
         )
         self.assertEqual(args.url, "https://example.com")
         self.assertTrue(args.links)
         self.assertEqual(args.max_chars, 500)
         self.assertEqual(args.ask, "what is this?")
-        self.assertTrue(args.ignore_robots)
+        self.assertTrue(args.respect_robots)
 
     def test_parser_defaults(self) -> None:
         args = _build_parser().parse_args(["scrape", "https://example.com"])
         self.assertFalse(args.links)
         self.assertEqual(args.max_chars, 20000)
         self.assertIsNone(args.ask)
-        self.assertFalse(args.ignore_robots)
+        self.assertFalse(args.respect_robots)
 
     def test_main_prints_page(self) -> None:
         with (
@@ -608,7 +612,7 @@ class ScrapeCliTests(_FakeSiteTestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(out.getvalue(), "PAGE OUT\n")
         self.assertEqual(scrape.call_args.kwargs["url"], "https://example.com")
-        self.assertFalse(scrape.call_args.kwargs["ignore_robots"])
+        self.assertTrue(scrape.call_args.kwargs["ignore_robots"])
 
     def test_main_error_exits_one(self) -> None:
         with (
@@ -878,9 +882,9 @@ class MediaWikiAdapterTests(unittest.TestCase):
         self.assertEqual(result.via, "mediawiki-api")
         self.assertEqual(result.title, "Alexander the Great")
         self.assertIn("Alexander III of Macedon", result.text)
-        # robots is checked twice BY DESIGN: once for the page URL the caller
-        # asked for, once for the api.php URL the adapter actually fetches.
-        self.assertEqual(robots.call_count, 2)
+        # robots.txt is never consulted, by design: the adapter does not call
+        # _check_robots for either URL.
+        self.assertEqual(robots.call_count, 0)
         api_url = fetch.call_args[0][1]
         self.assertTrue(api_url.startswith("https://en.wikipedia.org/w/api.php?"))
         self.assertIn("titles=Alexander_the_Great", api_url)
@@ -897,31 +901,25 @@ class MediaWikiAdapterTests(unittest.TestCase):
                 scrape_page(self.cfg, "https://en.wikipedia.org/wiki/No_Such_Article_Xyz")
         self.assertIn("no article named", str(caught.exception))
 
-    def test_robots_blocked_api_falls_back_to_the_article_page(self) -> None:
-        """Wikimedia's robots allows ARTICLE pages and disallows its API.
-
-        The adapter must then yield to the HTML path -- using the URL robots
-        points us at, never the disallowed one.
-        """
-        html_response = _FakeBytesResponse(
-            b"<html><head><title>Alex</title></head><body><p>article body text</p></body></html>",
-            {"Content-Type": "text/html; charset=utf-8", "Content-Encoding": ""},
+    def test_api_used_even_when_robots_would_object(self) -> None:
+        """robots.txt is not consulted anywhere in the scrape path -- even a
+        _check_robots that would refuse must never be called, and the wiki
+        adapter keeps using the site's own API."""
+        response = _FakeBytesResponse(
+            self._api_body("Alexander the Great", "Alexander III of Macedon ... " * 30)
         )
-
-        def robots(cfg: BridgeConfig, url: str) -> None:
-            if "/w/api.php" in url:
-                raise ScrapeError("robots.txt disallows scraping the api")
-
         with (
-            mock.patch("freegem.web_scraper._check_robots", side_effect=robots) as robots,
-            mock.patch("freegem.web_scraper._fetch", return_value=html_response) as fetch,
+            mock.patch(
+                "freegem.web_scraper._check_robots",
+                side_effect=ScrapeError("robots.txt disallows everything"),
+            ) as robots,
+            mock.patch("freegem.web_scraper._fetch", return_value=response) as fetch,
         ):
             result = scrape_page(self.cfg, "https://en.wikipedia.org/wiki/Alexander_the_Great")
-        self.assertEqual(result.via, "html")  # fell back to the allowed page
-        self.assertIn("article body text", result.text)
-        self.assertEqual(robots.call_count, 2)  # page url + api url
-        fetched_url = fetch.call_args[0][1]
-        self.assertEqual(fetched_url, "https://en.wikipedia.org/wiki/Alexander_the_Great")
+        self.assertEqual(result.via, "mediawiki-api")
+        self.assertIn("Alexander III of Macedon", result.text)
+        self.assertEqual(robots.call_count, 0)
+        self.assertTrue(fetch.call_args[0][1].startswith("https://en.wikipedia.org/w/api.php?"))
 
     def test_non_wiki_url_still_uses_html_path(self) -> None:
         response = _FakeBytesResponse(

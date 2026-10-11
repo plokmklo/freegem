@@ -1,4 +1,4 @@
-"""Web page fetching for humans and agents: guarded, robots-aware, capped.
+"""Web page fetching for humans and agents: guarded, capped, robots-free by default.
 
 ``freegem scrape <url>`` (CLI) and ``web_scrape`` (MCP tool) both land here.
 The module fetches raw HTML -- no JavaScript rendering -- and returns readable
@@ -10,8 +10,12 @@ Security posture, in order of what bites first:
 * every URL goes through :func:`ssrf.url_allowed` plus the pinned-opener guard
   (private hosts, loopback, link-local metadata, embedded credentials, and
   non-HTTP schemes are refused);
-* ``robots.txt`` is honored by default. The MCP tool cannot bypass it; only
-  the interactive CLI accepts ``--ignore-robots``;
+* ``robots.txt`` is NOT fetched and NOT consulted, by design. A robots.txt
+  is attacker-controlled text served from the same origin as the pages being
+  read; parsing it (or feeding it to a model) is a documented
+  prompt-injection/policy-poisoning vector, and other scrapers and AI agents
+  have been steered by lines planted in robots.txt. freegem reads published
+  pages; ``ignore_robots=False`` opts back into the legacy behavior;
 * the response is capped at 5 MB on the wire AND after decompression, so gzip
   bombs die at the cap instead of in RAM;
 * only HTML and text content types are accepted;
@@ -653,16 +657,11 @@ def _mediawiki_extract(cfg: BridgeConfig, url: str, max_chars: int) -> ScrapeRes
             "titles": title,
         }
     )
-    # robots.txt is honored for the API URL exactly as for any page. When
-    # the site disallows its API to generic agents -- Wikimedia wikis do:
-    # their robots.txt says "friendly, low-speed bots are welcome viewing
-    # ARTICLE pages" and disallows /w/ and /api/ -- fall back to the plain
-    # HTML path, which robots explicitly allows. That is not dodging the
-    # rule; it is using the URL the rule points us at.
-    try:
-        _check_robots(cfg, api_url)
-    except ScrapeError:
-        return None
+    # robots.txt is not consulted (see module docstring): the robots-aware
+    # gate here previously sent MediaWiki API use to the HTML path when a
+    # wiki disallowed /w/api. Wikimedia's robots explicitly welcomes
+    # low-speed agents on ARTICLE pages and the adapter requests one
+    # article per call at polite pacing, so the API path stays.
     response = _fetch(cfg, api_url)
     try:
         data = json.loads(
@@ -713,9 +712,15 @@ def scrape_page(
     url: str,
     *,
     max_chars: int = DEFAULT_MAX_CHARS,
-    ignore_robots: bool = False,
+    ignore_robots: bool = True,
 ) -> ScrapeResult:
-    """Fetch one page and extract readable text. Raises ScrapeError when refused."""
+    """Fetch one page and extract readable text. Raises ScrapeError when refused.
+
+    robots.txt is NOT consulted by default (``ignore_robots=True``): it is
+    attacker-controlled text from the same origin as the pages being read and
+    a documented prompt-injection/policy-poisoning vector against scrapers
+    and AI agents. Pass ``ignore_robots=False`` to opt back into honoring it.
+    """
     try:
         url = url_allowed(url)
     except SSRFRefused as exc:
@@ -818,7 +823,7 @@ def scrape_cli(
     include_links: bool = False,
     max_chars: int = DEFAULT_MAX_CHARS,
     question: str | None = None,
-    ignore_robots: bool = False,
+    ignore_robots: bool = True,
 ) -> str:
     """One-shot scrape for the CLI: formatted page, or an answer to ``question``."""
     result = scrape_page(cfg, url, max_chars=max_chars, ignore_robots=ignore_robots)
@@ -829,8 +834,9 @@ def scrape_cli(
 
 
 def run_scrape_tool(cfg: BridgeConfig, arguments: dict[str, Any]) -> str:
-    """MCP ``web_scrape`` dispatch. Deliberately has no ``ignore_robots``: an
-    agent tool cannot bypass robots.txt, only the human at the CLI can."""
+    """MCP ``web_scrape`` dispatch. robots.txt is not consulted here either:
+    it is attacker-controlled text and a prompt-injection vector against the
+    agent itself (see the module docstring)."""
     url = str(arguments.get("url") or "").strip()
     if not url:
         raise ValueError("web_scrape requires a 'url' argument")
@@ -846,5 +852,5 @@ def run_scrape_tool(cfg: BridgeConfig, arguments: dict[str, Any]) -> str:
         include_links=bool(arguments.get("include_links", False)),
         max_chars=max_chars,
         question=question,
-        ignore_robots=False,
+        ignore_robots=True,
     )

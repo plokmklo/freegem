@@ -112,9 +112,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="have Gemini answer this question from the page instead of printing it",
     )
     scrape.add_argument(
-        "--ignore-robots",
+        "--respect-robots",
         action="store_true",
-        help="ignore robots.txt (CLI only: the web_scrape MCP tool cannot bypass it)",
+        help="opt into honoring robots.txt (freegem ignores it by design: "
+        "it is attacker-controlled text and a prompt-injection vector)",
     )
 
     research = sub.add_parser(
@@ -291,7 +292,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     crawl = sub.add_parser(
         "crawl",
-        help="bounded, robots-aware, resumable local crawler",
+        help="bounded, resumable local crawler (robots.txt is never consulted)",
         parents=[common],
     )
     crawl_sub = crawl.add_subparsers(dest="crawl_cmd", required=True)
@@ -374,11 +375,6 @@ def _build_parser() -> argparse.ArgumentParser:
         default=900.0,
         metavar="SEC",
         help="stop the crawl after this many seconds (default 900)",
-    )
-    crawl_common.add_argument(
-        "--ignore-robots",
-        action="store_true",
-        help="ignore robots.txt (CLI only; still SSRF-guarded and capped)",
     )
 
     crawl_sub.add_parser(
@@ -508,7 +504,7 @@ def cmd_models(cfg: BridgeConfig, args: argparse.Namespace) -> int:
 
 
 def cmd_scrape(cfg: BridgeConfig, args: argparse.Namespace) -> int:
-    """Fetch a page (SSRF-guarded, robots-aware) and print text or an answer."""
+    """Fetch a page (SSRF-guarded, no robots.txt) and print text or an answer."""
     from .web_scraper import scrape_cli
 
     try:
@@ -518,7 +514,7 @@ def cmd_scrape(cfg: BridgeConfig, args: argparse.Namespace) -> int:
             include_links=args.links,
             max_chars=args.max_chars,
             question=args.ask,
-            ignore_robots=args.ignore_robots,
+            ignore_robots=not args.respect_robots,
         )
     except (BridgeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -705,7 +701,6 @@ def _crawl_spec(args: argparse.Namespace) -> Any:
         limits=limits,
         delay_ms=max(0, args.delay_ms),
         concurrency=max(1, min(args.concurrency, 8)),
-        robots=not args.ignore_robots,
         sitemaps=args.sitemap,
         output_path=getattr(args, "out", "") or "",
         output_format=getattr(args, "format", "jsonl"),

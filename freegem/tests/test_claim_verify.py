@@ -374,15 +374,28 @@ class DiscoveryTests(_TmpDirTestCase):
         )
         self.assertEqual({item["via"] for item in found}, {"mediawiki-opensearch"})
 
-    def test_robots_refusal_blocks_discovery(self) -> None:
+    def test_discovery_never_consults_robots(self) -> None:
+        """robots.txt is attacker-controlled text; discovery must work (and
+        never call _check_robots) even when a robots check WOULD refuse."""
+
         def refuse(cfg: BridgeConfig, url: str) -> None:
             raise ScrapeError(f"robots.txt disallows {url!r}")
 
-        with mock.patch("freegem.web_scraper._check_robots", refuse):
-            with self.assertRaises(ScrapeError) as ctx:
-                discover_urls(BridgeConfig(), "Alexander")
-        self.assertIn("robots.txt", str(ctx.exception))
-        self.assertIn("supply URLs explicitly", str(ctx.exception))
+        payload = json.dumps(
+            {"pages": [{"key": "Alexander_the_Great", "title": "Alexander the Great"}]}
+        ).encode()
+        with (
+            mock.patch("freegem.web_scraper._check_robots") as robots,
+            mock.patch(
+                "freegem.web_scraper._fetch",
+                lambda cfg, url, timeout=30: self._fake_response(payload),
+            ),
+        ):
+            robots.side_effect = refuse
+            found = discover_urls(BridgeConfig(), "Alexander")
+        self.assertEqual(robots.call_count, 0)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["url"], WIKI_URL)
 
     def test_discovery_limit_is_capped(self) -> None:
         payload = json.dumps(

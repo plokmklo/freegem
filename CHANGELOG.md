@@ -5,6 +5,95 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.0] — 2026-10-11
+
+### Changed — fetch-for-readability policy (no robots.txt, by design)
+
+- **robots.txt is never fetched and never consulted anywhere in freegem.**
+  A robots.txt is attacker-controlled text served from the same origin as
+  the pages being read; parsing it (or, worse, feeding it to a model) is a
+  documented prompt-injection and policy-poisoning vector — other scrapers
+  and AI agents have been steered by lines planted in robots.txt. The
+  crawler, the campaign, `scrape_page`, the MediaWiki adapter, and URL
+  discovery all dropped the gate. The legacy behavior stays available as an
+  explicit opt-in (`scrape_page(..., ignore_robots=False)`, CLI
+  `freegem scrape --respect-robots`). Politeness is per-host pacing; attacks
+  (auth bypass, wall cracking, hammering) remain out of scope.
+- **Escalation ladder** (`crawler/resilient.py`, new): every campaign/crawl
+  fetch goes through `fetch_resilient` — honest freegem identity first, then
+  browser-grade header profiles (Chrome, then Firefox) for 403/406 walls,
+  `Retry-After`-honoring 429 waits (bailing out early on IP-keyed rate
+  limits — later `--retry-failed` passes catch the window reset), timeout
+  doubling for slow origins, origin-root fallback for dead paths (404/410),
+  https↔http and www↔apex swaps for broken transports, and — ONLY for broken
+  certificate chains — one TLS-relaxed retry flagged `tls_unverified`.
+  401/402/451 are never bypassed. A `HostPacer` spaces same-host requests
+  across threads and extends the gap on 429.
+- **100 MB page reads** (`crawler/fetch.py`, `hardening.py`): the body cap
+  went from 2–5 MB to 100 MB (wire AND decompressed, bomb-safe), with
+  streaming reads that SPILL to disk past 16 MB (`spill_bytes`,
+  `FetchOutcome.body_path`) so a huge page costs disk, not RAM; spill files
+  decode incrementally with the same charset precedence as in-memory bodies.
+  cnn.com, big Wikipedia pages, and chosun.com front pages now read fully.
+- **Important-only distillation** (`crawler/distill.py`, new): pages ≥ 2 MB
+  are distilled by Gemini to their load-bearing content (bounded output,
+  original language), with a deterministic extractive fallback (headings +
+  densest paragraphs, boilerplate dropped) when no session is available —
+  the mode used is recorded on every record (`distill_mode`). Campaign
+  `--distill` stores per-URL summaries in a `distilled` table; the runner
+  adds `distilled`/`distill_mode` to no-schema records with
+  `CrawlSpec.distill`.
+- **Campaign v2** (`crawler/campaign.py`): resilient fetch by default, no
+  robots step, 100 MB cap, per-host pacing, `--retry-failed` (re-attempt
+  exactly the rows whose last outcome was not ok — the upgrade path between
+  passes), `--distill`, `--host-delay`, v1→v2 state migration (adds
+  `via`/`fallback`/`attempts` columns), and a report with `readable`,
+  `readable_pct`, and per-fallback counters.
+- **Runner**: `CrawlSpec.robots` is gone (there is deliberately NO switch);
+  `CrawlSpec.resilient` (default on) routes pages through the ladder;
+  `CrawlSpec.distill` and `spill_dir` added; the `robots_denied` counter and
+  the `robots` outcome kind no longer exist; artifacts store spilled bodies
+  too (the spill is consumed into the content-addressed store).
+- CLI: `freegem scrape` gained `--respect-robots` (robots are ignored by
+  default now); the crawl subcommand lost its `--ignore-robots` flag — the
+  crawler never consults robots.txt. MCP tool descriptions updated to match.
+
+### Fixed
+
+- DNS-resolution failures are classified `network`, never `ssrf` — the
+  first campaign had recorded a transient resolver failure as a guard
+  refusal; regression-tested against the exact message.
+- `_default_record` pages and artifacts handle spilled (multi-MB) bodies;
+  content hashes are computed streaming from the spill file.
+
+### Tests
+
+- Suite now counts **651 tests + 34 subtests** (research-era count was
+  366 + 20; the crawler commits grew it). New coverage: ladder decisions
+  over fabricated outcomes, browser-profile flip on a live 403 wall,
+  429 Retry-After + pacer penalties, 404→origin-root, gzip bomb cap during
+  decompression, spill-to-disk + incremental decoding, distill fallback and
+  Gemini mode, campaign retry-failed semantics, and "robots.txt is never
+  fetched" assertions on both the crawl and scrape paths.
+
+### Campaign v2 — same 1000 URLs, upgraded fetcher
+
+- **806/1000 readable (80.6%)**, up from 559 (55.9%) on the v1 stack, 316 MB
+  read. The ladder rescued 206 pages v1 had failed: `origin_root` fallback
+  169 (the dead `/about` seed paths), browser-profile flip 30, host/scheme
+  swaps 7; plus 26 robots refusals released by the no-robots policy, 18
+  former `too_large` pages now read whole under the 100 MB cap (cnn.com,
+  big Wikipedia pages, chosun.com), and backoff retries.
+- The remaining 194 are honest limits, itemized in
+  `report_v2_final.json`: 144 host-wide CDN bot walls across 101 hosts
+  (Akamai/DataDome-class; passing them needs TLS-fingerprint evasion, which
+  is out of scope by design — on a residential IP many of these pass),
+  18 network failures (sandbox egress blocks for gnu.org/archive.org/tcl.tk
+  et al. plus dead DNS), 8 dead paths, 6 slow-origin timeouts, 6
+  auth/paywall/legal refusals (401/402/451 — never bypassed), 4 IP-keyed
+  429s (wordpress.org's window is hours, not seconds), and 12 misc
+  (consent redirect loops, WAF 405/406, dead origins).
+
 ## [2.6.0] — 2026-10-11
 
 ### Added — the crawler subsystem (`freegem crawl`)

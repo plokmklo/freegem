@@ -140,7 +140,13 @@ class ResourceLimits:
     """
 
     timeout_sec: float = 20.0
-    max_bytes: int = 5 * 1024 * 1024
+    #: Hard per-page ceiling, decompressed. 100 MB: big Wikipedia pages,
+    #: cnn.com, chosun.com front pages all fit; past this a page is refused
+    #: as ``too_large`` rather than read forever.
+    max_bytes: int = 100 * 1024 * 1024
+    #: Bodies larger than this spill to a temp file instead of sitting in
+    #: RAM (``spill_dir`` on the fetch call chooses where).
+    spill_bytes: int = 16 * 1024 * 1024
     max_redirects: int = 8
     max_dom_nodes: int = 60_000
     max_dom_depth: int = 300
@@ -148,7 +154,7 @@ class ResourceLimits:
     max_items_per_page: int = 10_000
     max_sitemap_urls: int = 2_000
     max_runtime_sec: float = 900.0
-    max_retries: int = 2
+    max_retries: int = 4
 
 
 # ─── body decoding ────────────────────────────────────────────────────────────

@@ -164,9 +164,13 @@ class LimitsTests(unittest.TestCase):
     def test_defaults_are_sane(self) -> None:
         limits = ResourceLimits()
         self.assertEqual(limits.timeout_sec, 20.0)
-        self.assertEqual(limits.max_bytes, 5 * 1024 * 1024)
+        # 100 MB: big Wikipedia pages, cnn.com and chosun.com front pages all
+        # fit; past this a page is refused as too_large instead of read forever.
+        self.assertEqual(limits.max_bytes, 100 * 1024 * 1024)
+        self.assertEqual(limits.spill_bytes, 16 * 1024 * 1024)
+        self.assertLess(limits.spill_bytes, limits.max_bytes)
         self.assertGreater(limits.max_dom_nodes, 1000)
-        self.assertGreaterEqual(limits.max_retries, 0)
+        self.assertGreaterEqual(limits.max_retries, 4)
 
 
 if __name__ == "__main__":  # pragma: no cover

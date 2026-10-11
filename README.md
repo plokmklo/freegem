@@ -143,7 +143,7 @@ Exposes Gemini as tools an agent can call:
 | `gemini_advisor` | Structured second opinion on a decision |
 | `gemini_chat` | Raw multi-turn, full control |
 | `gemini_list_models` | Registry introspection |
-| `web_scrape` | Read a web page (SSRF-guarded, robots-aware) |
+| `web_scrape` | Read a web page (SSRF-guarded, capped) |
 | `web_research` | Answer one question from several pages, cited [S1]..[Sn] |
 | `web_verify` | Verify claims against sources: per-claim status + located evidence |
 
@@ -196,7 +196,7 @@ freegem scrape https://example.com                     # text + title
 freegem scrape https://example.com --links             # + resolved links
 freegem scrape https://example.com --max-chars 5000    # cap the output
 freegem scrape https://example.com --ask "what is this site?"
-freegem scrape https://example.com --ignore-robots     # CLI only; MCP cannot
+freegem scrape https://example.com --respect-robots    # opt into legacy robots honoring
 ```
 
 **Security model** — this fetches *untrusted* URLs, so it reuses and hardens
@@ -213,11 +213,14 @@ are `file://`, `ftp://`, and URLs with embedded credentials.
 
 - The session cookie is **never** sent to scraped sites.
 
-- Responses are capped at 5 MB on the wire *and* after decompression, so gzip
+- Responses are capped on the wire *and* after decompression, so gzip
 bombs die at the cap instead of in RAM. Only HTML and text are accepted.
 
-- `robots.txt` is honored by default. The MCP tool cannot bypass it —
-`--ignore-robots` exists only on the interactive CLI.
+- `robots.txt` is **never fetched and never consulted**, by design. A
+robots.txt is attacker-controlled text from the same origin as the pages
+being read — a documented prompt-injection/policy-poisoning vector against
+scrapers and AI agents — and a published page is published to be read.
+`--respect-robots` opts back into the legacy honoring.
 
 - Output is wrapped in `[UNTRUSTED WEB CONTENT]` markers, and `--ask` mode
 instructs Gemini to treat everything between them as data, never as
@@ -225,9 +228,10 @@ instructions. A page can still contain text aimed at your agent; the
 markers limit, but do not eliminate, that injection surface.
 
 **Limitations**: no JavaScript rendering (React/SPA sites come back mostly
-empty — that needs a headless browser, deliberately not a dependency), sites
-that block non-browser agents stay blocked (the UA is honest), and scraping
-some sites violates their terms even when `robots.txt` allows it.
+empty — that needs a headless browser, deliberately not a dependency), and
+authentication, paywalls, and legal blocks (401/402/451) are never bypassed.
+Origins that refuse honest requests after the escalation ladder are reported
+as such rather than forced.
 
 ---
 
@@ -236,7 +240,7 @@ some sites violates their terms even when `robots.txt` allows it.
 `freegem research` is the layer above `scrape`: provide a question and the
 specific URLs you want compared. It does not discover or search for URLs on
 your behalf. FreeGem fetches the supplied pages with the same guarded,
-robots-aware, capped machinery, then returns one answer with inline `[S1]`,
+capped machinery, then returns one answer with inline `[S1]`,
 `[S2]` citations, key points, and a disagreements-and-gaps section. Agents get
 the same capability through the `web_research` MCP tool.
 
@@ -253,13 +257,14 @@ What it does beyond N scrapes:
 - **Local fetch cache** — successful fetches are stored under
 `~/.cache/freegem/` (30-minute TTL, `$FREEGEM_CACHE_DIR` to relocate), so
 repeated agent calls do not re-download pages. `--no-cache` / `--refresh`
-control it. robots.txt and the SSRF guard still run on every real fetch.
+control it. The SSRF guard runs on every real fetch; robots.txt is never
+consulted (see [Web scraping](#web-scraping)).
 
 - **Structured source adapters** — Wikipedia and other Wikimedia wikis are
 fetched through their own Action API (`explaintext`) instead of scraping
 HTML, so article text arrives clean, without navigation chrome. The adapter
-runs behind the same SSRF guard and honors robots.txt for the API URL it
-actually fetches; per-source metadata records it as `via: mediawiki-api`.
+runs behind the same SSRF guard; per-source metadata records it as
+`via: mediawiki-api`.
 
 - **Concurrent fetching** — pages from different sites are fetched in
 parallel (bounded pool, 3 by default, `--fetch-concurrency` / the
@@ -387,11 +392,9 @@ staleness is visible per claim.
 URLs, candidate pages come from a supported search API instead of you: the
 Wikimedia API portal for Wikimedia wikis, or the site's own OpenSearch API
 for other MediaWiki hosts (`discover_wiki` config, `--wiki` to override,
-`--discovery-query` for a custom search). Every discovery request is
-robots-checked like any other fetch — Wikimedia's robots.txt disallows its
-`/w/` search APIs to generic agents, so the portal host is used rather than
-working around the rule — and discovery is one bounded API call, never a
-crawl. If robots refuses, discovery refuses and says to supply URLs.
+`--discovery-query` for a custom search). Discovery is one bounded API
+call, never a crawl, and — like every fetch in freegem — robots.txt is not
+consulted (it is attacker-controlled text; see [Web scraping](#web-scraping)).
 
 ```bash
 freegem verify "Alexander tutored by Aristotle?" --discover \
@@ -418,11 +421,13 @@ results-of-results, no browser rendering.
 
 ## Crawler
 
-`freegem crawl` is a bounded, robots-aware, resumable local crawler — the
-scraper generalized from one URL to a budgeted set of them, with a plan
-step, a persistent frontier, and typed output. It is deliberately NOT a
-recursive spider by default: the safe shape is "these seeds, this scope,
-this page budget, nothing else".
+`freegem crawl` is a bounded, resumable local crawler — the scraper
+generalized from one URL to a budgeted set of them, with a plan step, a
+persistent frontier, and typed output. It is deliberately NOT a recursive
+spider by default: the safe shape is "these seeds, this scope, this page
+budget, nothing else". robots.txt is never fetched or consulted anywhere in
+the crawler (see [Web scraping](#web-scraping) for why); politeness is
+per-host pacing.
 
 ```bash
 # dry run: normalize seeds, show scope verdicts and budgets — no network
@@ -481,7 +486,8 @@ url, title, readable text. Formats: `--format jsonl` (default), `json`,
 `csv`.
 
 **Hardening** — every response body is capped on the wire AND after
-decompression (default 5 MiB, `--max-bytes`); the DOM is capped in nodes
+decompression (default 100 MiB, `--max-bytes`), with bodies over 16 MiB
+spilled to disk instead of held in RAM; the DOM is capped in nodes
 and depth; XML (sitemaps, feeds) is parsed with DTD/ENTITY refused outright;
 every log line and output row passes a secret-redaction pass (API-key and
 token shapes become `[REDACTED:kind]`) before touching disk; per-host
@@ -492,9 +498,15 @@ results file is closed cleanly.
 
 **Guard stack unchanged** — the crawler fetches through the same SSRF
 guard as the scraper (DNS resolution pinned to checked public IPs, private
-and link-local targets refused at dial time), honors robots.txt through
-the shared cache (`--ignore-robots` stays CLI-only), sends the honest
-crawler User-Agent, and never sends your session cookie.
+and link-local targets refused at dial time), sends the honest crawler
+User-Agent, and never sends your session cookie. Every page goes through
+the **escalation ladder** (`CrawlSpec.resilient`): browser-grade header
+profiles on 403/406 walls, 429 waits, timeout growth, origin-root fallback
+for dead paths, https↔http and www↔apex swaps, and one TLS-relaxed retry
+flagged `tls_unverified` for broken certificate chains. 401/402/451 are
+never bypassed. Oversized pages (≥ 2 MB) can be distilled to their
+important content by Gemini (`CrawlSpec.distill`) with an extractive
+fallback.
 
 ---
 
@@ -592,10 +604,10 @@ cp config.example.json config.json
 | `proxy` | `null` | HTTP proxy if `gemini.google.com` is blocked; proxy-side DNS means local IP pinning cannot be guaranteed |
 | `log_requests` | `true` | Request log to stderr |
 | `research_concurrency` | `3` | Parallel page fetches per research call (same-host fetches serialize; capped at 8) |
-| `robots_cache_ttl_sec` | `600` | robots.txt cache lifetime per origin; revalidated with ETag / Last-Modified after expiry |
+| `robots_cache_ttl_sec` | `600` | legacy: TTL for the opt-in robots cache (`scrape_page(..., ignore_robots=False)`); freegem does not consult robots.txt by default |
 | `request_queue_wait_sec` | `0.0` | Seconds a burst may wait for a free slot before getting 503 + `Retry-After`; `0` sheds immediately |
 | `research_evidence` | `true` | Quote and verify verbatim evidence per cited source in research answers |
-| `discover_wiki` | `en.wikipedia.org` | Wiki claim-verification's optional URL discovery searches (Wikimedia API portal, or the site's own OpenSearch for non-Wikimedia MediaWiki hosts; robots.txt honored) |
+| `discover_wiki` | `en.wikipedia.org` | Wiki claim-verification's optional URL discovery searches (Wikimedia API portal, or the site's own OpenSearch for non-Wikimedia MediaWiki hosts) |
 
 Environment variables override the file: `GEMINI_BL`, `GEMINI_AUTH_USER`,
 `GEMINI_XSRF_TOKEN`, `GEMINI_PROXY`, `GEMINI_COOKIE_FILE`, `FREEGEM_CONFIG`.
@@ -734,8 +746,8 @@ pytest                  # tests
 ```
 
 The test suite runs entirely offline: every Gemini call is mocked, so CI needs
-no credentials and no network. The current suite contains 638 tests (+20
-subtests, 658 cases as pytest counts them). See
+no credentials and no network. The current suite contains 651 tests (+34
+subtests, 685 cases as pytest counts them). See
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the layering rules and
 [`CONTRIBUTING.md`](CONTRIBUTING.md) for how to add a model or an endpoint.
 
@@ -747,7 +759,7 @@ freegem/
   models.py       model registry + @think parsing
   gemini.py       Gemini protocol client
   ssrf.py         shared SSRF guard: resolve, check, pin (DNS-rebinding safe)
-  web_scraper.py  page fetching: robots (cached), adapters, HTML -> text
+  web_scraper.py  page fetching: SSRF guard, adapters, HTML -> text (no robots.txt, by design)
   web_research.py multi-source research: cache, budgets, [S#] citations
   claim_verify.py claim verification: statuses, evidence, discovery
   metrics.py      run + server metrics: timing, percentiles, counters

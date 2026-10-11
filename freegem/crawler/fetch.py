@@ -1,43 +1,56 @@
 """One guarded HTTP GET for the crawler, with an honest outcome taxonomy.
 
 Wraps the same SSRF-pinned opener the scraper uses (private hosts, loopback,
-link-local metadata, and non-HTTP schemes are refused at dial time), honors
-robots.txt through the shared cache, caps the body on the wire AND after
-decompression, and reports WHAT happened instead of raising a soup of
-exceptions:
+link-local metadata, and non-HTTP schemes are refused at dial time), caps the
+body on the wire AND after decompression, and reports WHAT happened instead of
+raising a soup of exceptions:
 
-``ok`` fetched -- ``http_error`` got a 4xx/5xx -- ``robots`` robots.txt
-disallows -- ``ssrf`` the guard refused -- ``network`` DNS/socket failure --
-``timeout`` -- ``too_large`` body over the cap -- ``type_refused`` content
-type the crawler does not parse -- ``auth`` 401/403 (the "blocked" bucket
-the campaign counts).
+``ok`` fetched -- ``http_error`` got a 4xx/5xx -- ``ssrf`` the guard refused --
+``network`` DNS/socket failure -- ``timeout`` -- ``too_large`` body over the
+cap -- ``type_refused`` content type the crawler does not parse.
 
-Conditional requests: pass ``item.etag``/``item.last_modified`` and a 304
-comes back as ``ok`` with ``not_modified=True`` and no body, so resume runs
-re-check pages without re-downloading them.
+NO robots.txt, BY DESIGN: the crawler never fetches and never consults a
+site's robots.txt. A robots.txt is attacker-controlled text served from the
+same origin as the pages being read; parsing it (or, worse, feeding it to a
+model) is a documented prompt-injection and policy-poisoning vector -- other
+scrapers and AI agents have been steered by lines planted in robots.txt.
+freegem's stance is that a published page is published to be read: the only
+courtesies are per-host pacing and never attacking (no auth bypass, no wall
+cracking, no hammering an origin).
+
+Bodies are read STREAMING with a hard cap (default 100 MB). Anything past the
+in-memory threshold spills to a temp file (``outcome.body_path``) so a huge
+page costs disk, not RAM; ``outcome.text()`` decodes spill files
+incrementally with the same charset precedence as in-memory bodies.
+
+Conditional requests: pass ``etag``/``last_modified`` and a 304 comes back as
+``ok`` with ``not_modified=True`` and no body, so resume runs re-check pages
+without re-downloading them.
 """
 
 from __future__ import annotations
 
+import codecs
+import contextlib
 import json
+import os
+import re
+import ssl
+import tempfile
 import time
 import urllib.error
 import urllib.request
+import zlib
 from dataclasses import dataclass, field
 from typing import Any
 
 from ..config import BridgeConfig
 from ..gemini import _ssl_ctx
 from ..ssrf import SSRFRefused, build_guarded_opener, url_allowed
-from ..web_scraper import (
-    _UA,
-    RobotsCache,
-    ScrapeError,
-    _read_capped,
-)
+from ..web_scraper import ScrapeError
 from .hardening import ResourceLimits, decode_body
 
-__all__ = ["FetchOutcome", "crawl_fetch", "text_of_outcome"]
+__all__ = ["FetchOutcome", "crawl_fetch", "decode_file", "read_body_stream", "text_of_outcome"]
 
 #: Content types the crawler knows how to cut records out of.
 _ALLOWED_MIME_PREFIXES = (
@@ -53,8 +66,27 @@ _ALLOWED_MIME_PREFIXES = (
     "application/xhtml",
 )
 
-#: Reason buckets, grouped for counters and the campaign report.
-_RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
+#: Default header set: honest freegem identity, gzip only (the streaming
+#: reader knows gzip/zlib; asking for brotli would get bodies we cannot cut).
+_BASE_HEADERS: dict[str, str] = {
+    "User-Agent": "freegem-web-scraper/2.6 (+https://github.com/plokmklo/freegem)",
+    "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,"
+    "application/xml;q=0.8,text/plain;q=0.7,*/*;q=0.5",
+    "Accept-Language": "en,*;q=0.5",
+    "Accept-Encoding": "gzip",
+}
+
+_CHUNK = 65536
+
+_BOMS: tuple[tuple[bytes, str], ...] = (
+    (b"\xef\xbb\xbf", "utf-8-sig"),
+    (b"\xff\xfe\x00\x00", "utf-32"),
+    (b"\x00\x00\xfe\xff", "utf-32"),
+    (b"\xff\xfe", "utf-16"),
+    (b"\xfe\xff", "utf-16"),
+)
+
+_META_CHARSET = re.compile(rb"""<meta[^>]+charset\s*=\s*["']?\s*([A-Za-z0-9_\-]+)""", re.IGNORECASE)
 
 
 @dataclass
@@ -62,9 +94,13 @@ class FetchOutcome:
     """What one fetch attempt produced, whatever 'produced' means here."""
 
     url: str
-    kind: str  # ok | http_error | robots | ssrf | network | timeout | too_large | type_refused
+    kind: str  # ok | http_error | ssrf | network | timeout | too_large | type_refused
     status: int | None = None
     body: bytes | None = None
+    #: When the body spilled to disk: path of the temp file (``body`` is None).
+    body_path: str | None = None
+    #: Total decompressed size in bytes, whether held in memory or spilled.
+    body_size: int = 0
     content_type: str = ""
     etag: str | None = None
     last_modified: str | None = None
@@ -73,6 +109,14 @@ class FetchOutcome:
     not_modified: bool = False
     elapsed_ms: int = 0
     error: str | None = None
+    #: How the content was obtained: "origin" here; the resilient layer keeps
+    #: this field and adds ``fallback`` notes instead.
+    via: str = "origin"
+    #: Which escalation produced this outcome: "" (plain), "origin_root",
+    #: "scheme_swap", "host_swap", "tls_unverified", ...
+    fallback: str = ""
+    tls_unverified: bool = False
+    attempts: int = 1
     headers: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -86,12 +130,14 @@ class FetchOutcome:
 
     def text(self) -> str:
         """Decoded body for HTML/JSON/JSON-less pages ('' when absent)."""
-        if self.body is None:
-            return ""
-        return decode_body(self.body, self.content_type)
+        if self.body is not None:
+            return decode_body(self.body, self.content_type)
+        if self.body_path:
+            return decode_file(self.body_path, self.content_type)
+        return ""
 
     def json(self) -> Any:
-        if self.body is None:
+        if self.body is None and not self.body_path:
             return None
         try:
             return json.loads(self.text())
@@ -105,8 +151,9 @@ class FetchOutcome:
             "status": self.status,
             "blocked": self.blocked,
             "elapsed_ms": self.elapsed_ms,
-            "bytes": len(self.body) if self.body else 0,
+            "bytes": self.body_size or len(self.body or b""),
             "not_modified": self.not_modified,
+            "fallback": self.fallback,
             "error": self.error,
         }
 
@@ -121,14 +168,22 @@ def crawl_fetch(
     url: str,
     *,
     limits: ResourceLimits | None = None,
-    robots: RobotsCache | None = None,
     etag: str | None = None,
     last_modified: str | None = None,
     extra_headers: dict[str, str] | None = None,
+    spill_dir: str = "",
+    tls_context: ssl.SSLContext | None = None,
 ) -> FetchOutcome:
     """Fetch one URL under the full guard stack. Never raises for fetch-level
     problems -- the outcome IS the result. Raises only on programming errors
-    (bad URL spelling is normalized away upstream)."""
+    (bad URL spelling is normalized away upstream).
+
+    ``tls_context`` swaps the SSL context (the resilient layer passes an
+    unverified one as a LAST-resort step for broken certificate chains; the
+    resulting outcome is flagged ``tls_unverified`` so callers can disclose
+    it). ``extra_headers`` merges over the base set, replacing same-named
+    keys -- that is how browser-grade header profiles are applied upstream.
+    """
     cap = limits or ResourceLimits()
     started = time.monotonic()
     outcome = FetchOutcome(url=url, kind="network")
@@ -145,22 +200,7 @@ def crawl_fetch(
         outcome.elapsed_ms = _ms(started)
         return outcome
 
-    if robots is not None:
-        try:
-            robots.can_fetch(cfg, url, _UA)
-        except ScrapeError as exc:
-            outcome.kind = "robots"
-            outcome.error = str(exc)
-            outcome.elapsed_ms = _ms(started)
-            return outcome
-
-    headers: dict[str, str] = {
-        "User-Agent": _UA,
-        "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,"
-        "application/xml;q=0.8,text/plain;q=0.7,*/*;q=0.5",
-        "Accept-Language": "en,*;q=0.5",
-        "Accept-Encoding": "gzip",
-    }
+    headers = dict(_BASE_HEADERS)
     if etag:
         headers["If-None-Match"] = etag
     if last_modified:
@@ -170,9 +210,9 @@ def crawl_fetch(
 
     request = urllib.request.Request(url, headers=headers)
     try:
-        response = build_guarded_opener(cfg.proxy, _ssl_ctx()).open(
-            request, timeout=cap.timeout_sec
-        )
+        response = build_guarded_opener(
+            cfg.proxy, tls_context if tls_context is not None else _ssl_ctx()
+        ).open(request, timeout=cap.timeout_sec)
     except urllib.error.HTTPError as exc:
         outcome.kind = "http_error"
         outcome.status = exc.code
@@ -218,16 +258,166 @@ def crawl_fetch(
             response.close()
         else:
             try:
-                outcome.body = _read_capped(response, limit=cap.max_bytes)
+                outcome.body, outcome.body_path, outcome.body_size = read_body_stream(
+                    response,
+                    max_bytes=cap.max_bytes,
+                    spill_bytes=cap.spill_bytes,
+                    spill_dir=spill_dir,
+                )
                 outcome.kind = "ok"
             except ScrapeError as exc:
+                _cleanup_spill(outcome.body_path)
+                outcome.body_path = None
                 outcome.kind = "too_large" if "cap" in str(exc) else "network"
                 outcome.error = str(exc)
     except Exception as exc:  # mid-read socket failures land here
+        _cleanup_spill(outcome.body_path)
+        outcome.body_path = None
         outcome.kind = "network"
         outcome.error = str(exc)
     outcome.elapsed_ms = _ms(started)
     return outcome
+
+
+# ─── streaming body reader ────────────────────────────────────────────────────
+
+
+def read_body_stream(
+    response: Any,
+    *,
+    max_bytes: int,
+    spill_bytes: int,
+    spill_dir: str = "",
+) -> tuple[bytes | None, str | None, int]:
+    """Read the body up to ``max_bytes`` (wire AND decompressed), spilling to
+    a temp file once past ``spill_bytes`` so huge pages never sit in RAM.
+
+    Returns ``(memory_bytes, spill_path, total_size)`` -- exactly one of the
+    first two is populated. Raises :class:`ScrapeError` past ``max_bytes``
+    (decompression bombs included: the cap is enforced DURING decompression).
+    """
+    encoding = (
+        (getattr(response.headers, "get", lambda *_: "")("Content-Encoding") or "").strip().lower()
+    )
+    dobj: Any = None
+    if encoding in ("gzip", "x-gzip", "deflate"):
+        dobj = zlib.decompressobj(wbits=47)
+
+    chunks: list[bytes] = []
+    spill_fh: Any = None
+    spill_path: str | None = None
+    total = 0
+    try:
+        while True:
+            wire = response.read(_CHUNK)
+            if not wire:
+                break
+            piece = wire
+            if dobj is not None:
+                piece = _inflate(dobj, wire)
+            if not piece:
+                continue
+            total += len(piece)
+            if total > max_bytes:
+                raise ScrapeError(f"response exceeds the {max_bytes}-byte cap")
+            if spill_fh is None:
+                if total <= spill_bytes:
+                    chunks.append(piece)
+                    continue
+                if not spill_dir:
+                    # No spill home given: keep the hard cap honest by
+                    # refusing past the memory budget instead of ballooning.
+                    raise ScrapeError(f"response exceeds the {spill_bytes}-byte memory cap")
+                os.makedirs(spill_dir, exist_ok=True)
+                fd, spill_path = tempfile.mkstemp(
+                    prefix="freegem-body-", suffix=".bin", dir=spill_dir
+                )
+                spill_fh = os.fdopen(fd, "wb")
+                for held in chunks:
+                    spill_fh.write(held)
+                chunks.clear()
+            spill_fh.write(piece)
+    except BaseException:
+        if spill_fh is not None:
+            spill_fh.close()
+            spill_fh = None
+        if spill_path is not None:
+            _cleanup_spill(spill_path)
+        raise
+    if spill_fh is not None:
+        spill_fh.close()
+    if spill_path is not None:
+        return None, spill_path, total
+    return b"".join(chunks), None, total
+
+
+def _inflate(dobj: Any, wire: bytes) -> bytes:
+    """One decompress step; on a bad zlib header retry as raw deflate once."""
+    try:
+        return dobj.decompress(wire)
+    except zlib.error as exc:
+        if dobj.unused_data or getattr(dobj, "unconsumed_tail", b""):
+            raise ScrapeError(f"corrupt compressed body: {exc}") from exc
+        try:
+            dobj2 = zlib.decompressobj(wbits=-15)
+            return dobj2.decompress(wire)
+        except zlib.error:
+            raise ScrapeError(f"corrupt compressed body: {exc}") from exc
+
+
+def _cleanup_spill(path: str | None) -> None:
+    if path:
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+
+
+# ─── spill-file decoding ──────────────────────────────────────────────────────
+
+
+def decode_file(path: str, content_type: str, *, chunk_size: int = 1 << 20) -> str:
+    """Decode a spilled body file incrementally, honoring the same charset
+    precedence as :func:`decode_body` (header charset, BOM, meta charset,
+    UTF-8 replacement). One pass, bounded memory."""
+    with open(path, "rb") as fh:
+        head = fh.read(2048)
+        fh.seek(0)
+        encoding = _detect_encoding(head, content_type)
+        try:
+            decoder = codecs.getincrementaldecoder(encoding)(errors="replace")
+        except LookupError:
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        parts: list[str] = []
+        while True:
+            chunk = fh.read(chunk_size)
+            if not chunk:
+                break
+            parts.append(decoder.decode(chunk))
+        parts.append(decoder.decode(b"", final=True))
+        return "".join(parts)
+
+
+def _detect_encoding(raw: bytes, content_type: str) -> str:
+    """Codec NAME for a body, using decode_body's precedence."""
+    match = re.search(r"charset=([\w\-]+)", content_type or "", re.IGNORECASE)
+    if match:
+        name = match.group(1)
+        try:
+            codecs.lookup(name)
+            return name
+        except LookupError:
+            pass
+    for bom, encoding in _BOMS:
+        if raw.startswith(bom):
+            return encoding
+    meta = _META_CHARSET.search(raw[:2048])
+    if meta:
+        name = meta.group(1).decode("ascii", "ignore")
+        try:
+            codecs.lookup(name)
+            return name
+        except LookupError:
+            pass
+    return "utf-8"
 
 
 def _is_dns_failure(message: str) -> bool:

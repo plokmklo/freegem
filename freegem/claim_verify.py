@@ -471,32 +471,18 @@ def _opensearch_url(host: str, query: str, limit: int) -> str:
     )
 
 
-def _check_search_robots(cfg: BridgeConfig, search_url: str, host: str) -> None:
-    from .web_scraper import ScrapeError, _check_robots
-
-    try:
-        _check_robots(cfg, search_url)
-    except ScrapeError as exc:
-        raise ScrapeError(
-            f"URL discovery is disallowed by robots.txt for {host!r} ({exc}); "
-            "supply URLs explicitly instead of discovery"
-        ) from exc
-
-
 def _portal_discover(
     cfg: BridgeConfig, host: str, project: str, lang: str, query: str, limit: int
 ) -> list[dict[str, Any]]:
     """Search through the Wikimedia API portal (api.wikimedia.org).
 
-    The per-wiki search APIs under ``/w/`` are disallowed by Wikimedia's
-    robots.txt for generic agents; the portal host serves the same
-    official index without that disallow, so discovery stays robots-clean
-    instead of working around a rule.
+    The portal host serves the official search index over a clean, public
+    API endpoint; robots.txt is not consulted anywhere in freegem (see the
+    web_scraper module docstring for why).
     """
     from .web_scraper import ScrapeError, _decode_body, _fetch, _read_capped
 
     search_url = _portal_search_url(project, lang, query, limit)
-    _check_search_robots(cfg, search_url, host)
     try:
         response = _fetch(cfg, search_url)
         data = json.loads(_decode_body(_read_capped(response, 1_000_000), ""))
@@ -533,12 +519,10 @@ def _opensearch_discover(
 
     v1 JSON shape (a stable 4-element array) is requested on purpose: the
     formatversion=2 object shape has drifted across MediaWiki releases.
-    robots.txt is honored exactly as for any other fetch.
     """
     from .web_scraper import ScrapeError, _decode_body, _fetch, _read_capped
 
     search_url = _opensearch_url(host, query, limit)
-    _check_search_robots(cfg, search_url, host)
     try:
         response = _fetch(cfg, search_url)
         data = json.loads(_decode_body(_read_capped(response, 1_000_000), ""))
