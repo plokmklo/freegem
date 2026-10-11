@@ -20,6 +20,7 @@ from typing import Any, ClassVar
 from unittest import mock
 
 from freegem.config import BridgeConfig
+from freegem.crawler import resilient
 from freegem.crawler.campaign import _SCHEMA, _migrate, run_campaign
 from freegem.crawler.distill import distill_text, extractive_summary
 from freegem.crawler.fetch import FetchOutcome, _is_dns_failure, decode_file, read_body_stream
@@ -34,6 +35,7 @@ from freegem.crawler.resilient import (
     _next_action,
     _origin_root,
     _scheme_swap,
+    _wayback_url,
     fetch_resilient,
 )
 from freegem.web_scraper import ScrapeError
@@ -61,7 +63,10 @@ class _LadderSite(BaseHTTPRequestHandler):
 
     protocol_version = "HTTP/1.1"
     script: ClassVar[dict[str, list[tuple[int, bytes, str]]]] = {}
-    requests: ClassVar[list[tuple[str, str]]] = []
+    requests: ClassVar[list[tuple[str, str, str]]] = []
+    #: Paths that 302 to themselves until the request carries the cookie the
+    #: 302 itself granted (the anonymous-entitlement pattern).
+    loop_paths: ClassVar[set[str]] = set()
 
     def log_message(self, format: str, *args: object) -> None:
         pass
@@ -69,7 +74,17 @@ class _LadderSite(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path = urllib.parse.urlsplit(self.path).path
         ua = self.headers.get("User-Agent") or ""
-        type(self).requests.append((path, ua))
+        cookie = self.headers.get("Cookie") or ""
+        type(self).requests.append((path, ua, cookie))
+        if path in type(self).loop_paths and "freegem_entitlement" not in cookie:
+            self.send_response(302)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", "3")
+            self.send_header("Set-Cookie", "freegem_entitlement=1; Path=/")
+            self.send_header("Location", path)
+            self.end_headers()
+            self.wfile.write(b"302")
+            return
         script = type(self).script
         queue = script.get(path) or [
             (200, b"<html><title>ok</title><body>fine</body></html>", "text/html")
@@ -104,11 +119,19 @@ class LadderTestCase(unittest.TestCase):
         self.addCleanup(self.dial.stop)
         _LadderSite.script = {}
         _LadderSite.requests = []
+        _LadderSite.loop_paths = set()
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _LadderSite)
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.base = f"http://{_FAKE_HOST}:{self.server.server_port}"
+        # Keep the wayback LAST-resort hermetic: its attempts hit this scripted
+        # site under /wb2id_/ instead of the real web.archive.org.
+        self.wayback_patch = mock.patch.object(
+            resilient, "_WAYBACK_PREFIX", f"http://{_FAKE_HOST}:{self.server.server_port}/wb2id_/"
+        )
+        self.wayback_patch.start()
+        self.addCleanup(self.wayback_patch.stop)
         self.cfg = BridgeConfig(log_requests=False)
         # Real delays would slow the suite; the ladder still exercises every
         # branch with a zero floor, and Retry-After comes back as a sleep
@@ -158,11 +181,47 @@ class BrowserProfileTests(LadderTestCase):
         assert outcome.final_url is not None
         self.assertTrue(outcome.final_url.endswith("/"))
 
-    def test_451_stays_refused_after_profiles(self) -> None:
-        _LadderSite.script["/legal"] = [(451, b"blocked by law", "text/plain")] * 5
+    def test_451_recovered_from_wayback_snapshot(self) -> None:
+        """A legal-block page still readable via its public archived copy."""
+        _LadderSite.script["/legal"] = [(451, b"blocked by law", "text/plain")] * 9
+        outcome = self.fetch(f"{self.base}/legal")
+        self.assertTrue(outcome.ok, outcome.error)
+        self.assertEqual(outcome.fallback, "wayback")
+        self.assertEqual(outcome.via, "wayback")
+
+    def test_451_stays_refused_when_archive_refuses_too(self) -> None:
+        _LadderSite.script["/legal"] = [(451, b"blocked by law", "text/plain")] * 9
+        _LadderSite.script[f"/wb2id_/{self.base}/legal"] = [
+            (451, b"also blocked", "text/plain")
+        ] * 9
         outcome = self.fetch(f"{self.base}/legal")
         self.assertEqual(outcome.status, 451)
         self.assertFalse(outcome.ok)
+
+    def test_5xx_path_recovers_via_origin_root(self) -> None:
+        _LadderSite.script["/broken"] = [(502, b"origin error", "text/plain")] * 2
+        with mock.patch.object(resilient, "_sleep_backoff", return_value=0.01):
+            outcome = self.fetch(f"{self.base}/broken")
+        self.assertTrue(outcome.ok, outcome.error)
+        self.assertEqual(outcome.fallback, "origin_root")
+
+    def test_cookie_loop_resolves_with_shared_jar(self) -> None:
+        _LadderSite.loop_paths.add("/gate")
+        outcome = self.fetch(f"{self.base}/gate")
+        self.assertTrue(outcome.ok, outcome.error)
+        # urllib extracts the 302's Set-Cookie only after the redirect chain
+        # unwinds, so the FIRST follow is cookieless and the shared jar pays
+        # off on the ladder's next attempt: the final request carries it.
+        self.assertIn("freegem_entitlement", _LadderSite.requests[-1][2])
+        self.assertNotIn("freegem_entitlement", _LadderSite.requests[0][2])
+
+    def test_dns_failure_resolves_via_doh(self) -> None:
+        # doh.test NXDOMAINs locally (real resolver); the ladder's DoH step
+        # resolves it and the guard still dials only the checked IP.
+        with mock.patch.object(resilient, "_doh_ips", return_value=[_CHECKED_IP]):
+            outcome = self.fetch(f"http://doh.test:{self.server.server_port}/dohpage")
+        self.assertTrue(outcome.ok, outcome.error)
+        self.assertEqual(outcome.fallback, "doh")
 
 
 class LadderUnitTests(unittest.TestCase):
@@ -254,12 +313,39 @@ class LadderUnitTests(unittest.TestCase):
         self.assertEqual(action[0], "wait_429")
         self.assertGreaterEqual(pacer.reserve("x.test"), 2.0)
 
+    def test_429_falls_through_to_wayback_after_three_waits(self) -> None:
+        state = self._state()
+        state.attempts = 6
+        outcome = FetchOutcome(url="https://x.test/", kind="http_error", status=429)
+        seen: list[str] = []
+        for _ in range(4):
+            step = _next_action("https://x.test/", outcome, state, "x.test", HostPacer())
+            assert step is not None
+            seen.append(step[0])
+        self.assertEqual(seen[:3], ["wait_429", "wait_429", "wait_429"])
+        self.assertEqual(seen[3], "wayback")
+
+    def test_wayback_url_uses_raw_capture_view(self) -> None:
+        self.assertEqual(
+            _wayback_url("https://a.test/x?q=1"),
+            "https://web.archive.org/web/2id_/https://a.test/x?q=1",
+        )
+
+    def test_three_browser_profiles_exist(self) -> None:
+        self.assertEqual(len(PROFILES), 3)
+        for profile in PROFILES:
+            self.assertIn("User-Agent", profile)
+            self.assertEqual(profile["Accept-Encoding"], "gzip")
+
     def test_fallback_names(self) -> None:
         self.assertEqual(_fallback_of(["wait_429"]), "")
         self.assertEqual(_fallback_of(["timeout_up"]), "")
         self.assertEqual(_fallback_of(["profile_1"]), "profile_1")
         self.assertEqual(_fallback_of(["origin_root"]), "origin_root")
         self.assertEqual(_fallback_of(["scheme_swap", "host_swap"]), "scheme_swap")
+        self.assertEqual(_fallback_of(["doh"]), "doh")
+        self.assertEqual(_fallback_of(["wayback"]), "wayback")
+        self.assertEqual(_fallback_of(["doh", "wayback"]), "doh")
 
     def test_url_helpers(self) -> None:
         self.assertTrue(_has_path("https://a.test/x/about"))

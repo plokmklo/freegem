@@ -12,17 +12,35 @@ Every fetch of an untrusted, user-supplied URL should go through
 :func:`build_guarded_opener`. Redirects stay covered: urllib redispatches each
 hop through the same handlers, so every hop is resolved, checked, and pinned
 again.
+
+Two injection points keep the guard single-source-of-truth while letting the
+resilient ladder extend reach WITHOUT weakening it:
+
+``resolver`` replaces :func:`pick_public_ips` as the resolve-and-check step.
+The ladder uses it for its DoH fallback: when the local resolver cannot
+answer for a name, the ladder resolves via DNS-over-HTTPS and hands the
+addresses to the SAME public-only check (``_checked_addresses``) before any
+dial. A custom resolver must raise :class:`SSRFRefused` for anything it
+cannot vouch for.
+
+``cookie_jar`` attaches an :class:`http.cookiejar.CookieJar` so a host's own
+anonymous-entitlement flows work (a 302 that sets a cookie and loops back is
+a normal browser pattern, and the ladder's shared jar resolves it on the
+next attempt). The jar never carries credentials we did not receive from
+the origin itself.
 """
 
 from __future__ import annotations
 
 import http.client
+import http.cookiejar
 import ipaddress
 import socket
 import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from typing import Any
 
 __all__ = [
@@ -35,6 +53,9 @@ __all__ = [
     "pick_public_ips",
     "url_allowed",
 ]
+
+#: Resolve-and-check step: hostname -> the only IPs a dial may use.
+Resolver = Callable[[str], list[str]]
 
 
 class SSRFRefused(Exception):
@@ -236,28 +257,36 @@ def _pinned_https_class(
 class PinnedHTTPHandler(urllib.request.HTTPHandler):
     """http_open resolves, checks, and pins in one step: no rebind window."""
 
+    def __init__(self, resolver: Resolver | None = None) -> None:
+        super().__init__()
+        self._resolver = resolver or pick_public_ips
+
     def http_open(self, req: urllib.request.Request) -> Any:
-        conn_class = _pinned_http_class(pick_public_ips(req.host))
+        conn_class = _pinned_http_class(self._resolver(req.host))
         return self.do_open(conn_class, req)
 
 
 class PinnedHTTPSHandler(urllib.request.HTTPSHandler):
     """https_open resolves, checks, and pins in one step: no rebind window."""
 
-    def __init__(self, context: ssl.SSLContext) -> None:
+    def __init__(self, context: ssl.SSLContext, resolver: Resolver | None = None) -> None:
         super().__init__(context=context)
         self._pinned_context = context
+        self._resolver = resolver or pick_public_ips
 
     def https_open(self, req: urllib.request.Request) -> Any:
         # The context is baked into the class by the factory below; passing it
         # through do_open as well lands two `context=` kwargs on the
         # constructor and raises TypeError. One place, and only one.
-        conn_class = _pinned_https_class(pick_public_ips(req.host), self._pinned_context)
+        conn_class = _pinned_https_class(self._resolver(req.host), self._pinned_context)
         return self.do_open(conn_class, req)
 
 
 def build_guarded_opener(
-    proxy: str | None = None, context: ssl.SSLContext | None = None
+    proxy: str | None = None,
+    context: ssl.SSLContext | None = None,
+    resolver: Resolver | None = None,
+    cookie_jar: http.cookiejar.CookieJar | None = None,
 ) -> urllib.request.OpenerDirector:
     """An opener for untrusted, user-supplied URLs.
 
@@ -273,15 +302,28 @@ def build_guarded_opener(
     process-wide; building a fresh context per fetch re-parses the CA bundle
     every time). Defaults to a private ``create_default_context()`` so this
     module stays safe to use standalone.
+
+    ``resolver`` swaps the resolve-and-check step (see module docstring); it
+    is ignored in proxy mode, where DNS belongs to the proxy. ``cookie_jar``
+    attaches a cookie processor so origin-granted cookies (anonymous
+    entitlement tokens, consent marks) ride along on retries and redirects.
     """
     tls = context if context is not None else ssl.create_default_context()
+    # NOTE: `is not None`, not truthiness -- an EMPTY CookieJar is falsy
+    # (it implements __len__/__iter__), and `if cookie_jar` would silently
+    # drop the processor exactly when the jar starts fresh.
+    cookie_handler: list[urllib.request.BaseHandler] = (
+        [urllib.request.HTTPCookieProcessor(cookie_jar)] if cookie_jar is not None else []
+    )
     if proxy:
         return urllib.request.build_opener(
             urllib.request.ProxyHandler({"http": proxy, "https": proxy}),
             SafeRedirect(),
+            *cookie_handler,
         )
     return urllib.request.build_opener(
-        PinnedHTTPHandler(),
-        PinnedHTTPSHandler(tls),
+        PinnedHTTPHandler(resolver),
+        PinnedHTTPSHandler(tls, resolver),
         SafeRedirect(),
+        *cookie_handler,
     )

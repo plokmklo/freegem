@@ -356,12 +356,31 @@ class RunTests(CrawlRunnerTestCase):
             delay_ms=0,
             concurrency=1,  # single-worker path waits out the backoff window
             sitemaps=False,
+            resilient=False,  # raw fetch: the frontier's own retry schedule
         )
         counters = run(self.cfg, spec, frontier)
         data = counters.as_dict()
         self.assertGreaterEqual(data["retries"] + data["pages_failed"], 1)
         stats = frontier.stats()
         self.assertEqual(stats.by_status.get("error"), 1)
+
+    def test_failed_page_recovers_via_origin_root(self) -> None:
+        """v3 ladder: a path that 500s while the root serves is READABLE."""
+        frontier = Frontier(os.path.join(self.dir, "state.db"))
+        self.addCleanup(frontier.close)
+        spec = CrawlSpec(
+            seeds=(f"{self.base}/boom",),
+            scope=Scope(max_depth=0, max_pages=5),
+            limits=ResourceLimits(timeout_sec=5, max_retries=1),
+            delay_ms=0,
+            concurrency=1,
+            sitemaps=False,
+        )
+        counters = run(self.cfg, spec, frontier)
+        data = counters.as_dict()
+        self.assertEqual(data["pages_ok"], 1)
+        stats = frontier.stats()
+        self.assertIsNone(stats.by_status.get("error"))
 
     def test_multiworker_run_also_drains(self) -> None:
         """concurrency=2: index + links still all fetched, nothing stranded."""

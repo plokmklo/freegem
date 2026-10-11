@@ -7,14 +7,18 @@ pages, bot-walled CDNs?" The point is the FAILURE distribution, not the
 green checkmarks: the report's blocked/timeout/network buckets are what
 drives fetch upgrades (header profiles, retry policy, decoding).
 
-Policy (v2): NO robots.txt -- the campaign never fetches or consults one.
+Policy (v3): NO robots.txt -- the campaign never fetches or consults one.
 robots.txt is attacker-controlled text from the same origin as the pages; it
 is a documented prompt-injection vector, and a published page is published
 to be read. Courtesies: per-host pacing (a real delay between same-host
 requests, extended on 429) and no attacking -- no auth bypass, no wall
 cracking. Every seed goes through the resilient ladder (browser-grade
-headers, backoff, origin-root fallback for dead paths, scheme/host swaps,
-last-resort TLS relax for broken certificates).
+headers, origin-granted cookies via one shared cookie jar, backoff,
+origin-root fallback for dead paths and path-specific 5xx, scheme/host
+swaps, DNS-over-HTTPS when the local resolver cannot answer, last-resort
+TLS relax for broken certificates, and a final wayback-machine read of the
+page's public snapshot when the live origin still refuses -- those outcomes
+are flagged via="wayback").
 
 It is a library first and a CLI second::
 
@@ -33,6 +37,7 @@ stopped and the report is reproducible from the recorded outcomes.
 
 from __future__ import annotations
 
+import http.cookiejar
 import json
 import os
 import sqlite3
@@ -264,13 +269,19 @@ def run_campaign(
     distill_counters: dict[str, int] = {}
     lock = threading.Lock()
     cancel = threading.Event()
+    # One shared jar: cookies an origin itself grants (anonymous entitlement
+    # tokens, consent marks) ride along on retries and later seeds, exactly
+    # as a browser's jar would. http.cookiejar is internally locked.
+    jar: http.cookiejar.CookieJar = http.cookiejar.CookieJar()
 
     def work(row: sqlite3.Row) -> None:
         if cancel.is_set():
             return
         url = str(row["url"])
         category = str(row["category"])
-        outcome = fetch_resilient(cfg, url, limits=limits, pacer=pacer, spill_dir=spill_dir)
+        outcome = fetch_resilient(
+            cfg, url, limits=limits, pacer=pacer, spill_dir=spill_dir, cookie_jar=jar
+        )
         _persist(db, lock, url, category, outcome)
         with lock:
             result.record(url, category, outcome)

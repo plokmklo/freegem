@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import codecs
 import contextlib
+import http.cookiejar
 import json
 import os
 import re
@@ -46,7 +47,7 @@ from typing import Any
 
 from ..config import BridgeConfig
 from ..gemini import _ssl_ctx
-from ..ssrf import SSRFRefused, build_guarded_opener, url_allowed
+from ..ssrf import Resolver, SSRFRefused, build_guarded_opener, url_allowed
 from ..web_scraper import ScrapeError
 from .hardening import ResourceLimits, decode_body
 
@@ -173,6 +174,8 @@ def crawl_fetch(
     extra_headers: dict[str, str] | None = None,
     spill_dir: str = "",
     tls_context: ssl.SSLContext | None = None,
+    resolver: Resolver | None = None,
+    cookie_jar: http.cookiejar.CookieJar | None = None,
 ) -> FetchOutcome:
     """Fetch one URL under the full guard stack. Never raises for fetch-level
     problems -- the outcome IS the result. Raises only on programming errors
@@ -183,6 +186,8 @@ def crawl_fetch(
     resulting outcome is flagged ``tls_unverified`` so callers can disclose
     it). ``extra_headers`` merges over the base set, replacing same-named
     keys -- that is how browser-grade header profiles are applied upstream.
+    ``resolver`` swaps the resolve-and-check step (the ladder's DoH fallback);
+    ``cookie_jar`` lets origin-granted cookies ride along across attempts.
     """
     cap = limits or ResourceLimits()
     started = time.monotonic()
@@ -211,7 +216,10 @@ def crawl_fetch(
     request = urllib.request.Request(url, headers=headers)
     try:
         response = build_guarded_opener(
-            cfg.proxy, tls_context if tls_context is not None else _ssl_ctx()
+            cfg.proxy,
+            tls_context if tls_context is not None else _ssl_ctx(),
+            resolver,
+            cookie_jar,
         ).open(request, timeout=cap.timeout_sec)
     except urllib.error.HTTPError as exc:
         outcome.kind = "http_error"
