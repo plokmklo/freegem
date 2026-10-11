@@ -5,6 +5,82 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.1] — 2026-10-12
+
+Security and correctness pass over the research/verify/scrape/server faces,
+from the audit findings. 651 → 690 tests.
+
+### Security
+
+- **Untrusted-marker escape closed** (`web_scraper.py`, `web_research.py`):
+  page text, titles, and link labels are defused before wrapping — a page
+  carrying the literal `[END UNTRUSTED WEB CONTENT]` string could close the
+  trust wrapper early and inject the rest of its content as prompt-level
+  instruction. Markers inside untrusted payloads now read
+  `[untrusted-content marker removed]`.
+- **Image fetch capped** (`multimodal.py`): `fetch_image_bytes` streams in
+  1 MiB blocks under a 25 MB hard cap and refuses an over-large declared
+  Content-Length up front; the old unbounded `response.read()` let any
+  `image_url` in a request body exhaust RAM (unauthenticated).
+- **CGNAT and site-local refused** (`ssrf.py`, `multimodal.py`): the guard
+  now blocks `100.64.0.0/10` (RFC 6598) and `fec0::/10` explicitly — stdlib
+  `ipaddress` classifies neither as private on CPython 3.12. One shared
+  `ip_is_nonpublic()` is now the single source of truth for the pinned
+  handlers and the image pre-check.
+- **Redirect hops check credentials** (`ssrf.py`): `SafeRedirect` now
+  refuses redirect targets with embedded `user:pass@` — the first URL was
+  checked, the redirect was the loophole.
+- **Chunked bodies capped cumulatively** (`server.py`): a stream of
+  under-cap chunks accumulated unbounded RAM before the post-join check;
+  the total is now refused the moment it would exceed the limit.
+- **Server counters under a lock** (`metrics.py`): `requests_total`,
+  `by_status`, and the upstream-retry counter are read-modify-write from
+  worker threads — `+=` is not atomic under the GIL, so lock-free counting
+  silently lost updates.
+
+### Fixed
+
+- **Evidence verification at map/reduce scale** (`web_research.py`): the
+  reduce pass only ever saw paraphrased notes, so verbatim-quote
+  verification silently degraded to 0 verified exactly when material
+  crossed the 40k single-pass budget. The map pass now nominates verbatim
+  quote candidates from the raw chunks, they are verified deterministically
+  against the chunk they came from, and the reduce pass quotes the
+  pre-verified pool (any pool quote re-verifies page-level; anything else
+  still fails honestly).
+- **Skipped-page accounting** (`web_research.py`, `claim_verify.py`):
+  budget-skipped pages (ok=False, skipped="max_pages") fell into neither
+  `pages_ok` nor `pages_failed`, so the totals did not reconcile. Both JSON
+  faces now carry `pages_skipped`, and
+  `pages_ok + pages_failed + pages_skipped == urls_requested`; the text
+  renderers show `N skipped` too.
+- **Windows cp1252 crash** (`cli.py`): `main()` forces stdout/stderr to
+  UTF-8 with replacement, so the markdown renderers' check/cross marks (or
+  any non-Latin Gemini answer) can no longer kill a documented output
+  format after all the network work completed.
+- **Corrupt config no longer bricks the CLI** (`config.py`): an unparsable
+  or unreadable config.json is reported on stderr and defaults apply —
+  previously every command, doctor included, died at startup.
+- **Config values type-coerced** (`config.py`): `"port": "9000"` now binds
+  (was a string that broke the bind) and `"temporary_chats": "false"` now
+  disables (was a truthy non-empty string silently enabling the feature).
+  Unsalvageable values fall back to documented defaults.
+- **`DEFAULT_CONFIG` is actually immutable** (`config.py`): wrapped in
+  `MappingProxyType` instead of a dict annotated `Mapping`.
+- **Dead guard removed** (`tools.py`): `MAX_INLINE_IMAGE_B64` implied a
+  limit that did not exist; deleted (the real cap is the 32 MB request-body
+  limit and the new image-fetch cap).
+- **README honesty**: documents the proxy-mode carve-out (DNS and dialing
+  belong to the proxy; client-side checks still run on the first URL and
+  every redirect hop) and marker defusing.
+
+### Tests
+
+- New `tests/test_audit_fixes.py` (39 tests): marker defusing, image-fetch
+  cap, skipped accounting, map/reduce quote pool verifying end-to-end,
+  chunked total cap, CGNAT/site-local refusal, redirect-credential refusal,
+  config corruption/coercion, metrics lock under contention, UTF-8 stdio.
+
 ## [2.7.0] — 2026-10-11
 
 ### Changed — v3 escalation pass (campaign 806 → 812/1000 readable; more from an unrestricted network)

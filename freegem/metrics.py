@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import math
 import sys
+import threading
 import time
 import uuid
 from collections import deque
@@ -141,29 +142,38 @@ class LatencyWindow:
 @dataclass
 class ServerMetrics:
     """Process-wide counters for the HTTP server. Single-threaded owner is
-    the server; handlers on worker threads bump counters under a lock-free
-    best-effort model -- ``dict``/``deque`` mutations used here are atomic
-    enough under CPython's GIL for operational counts."""
+    the server; handlers on worker threads bump counters through a lock --
+    ``+=`` and dict get-then-set are NOT atomic under the GIL (each is a
+    load/add/store triplet), so lock-free counting silently lost updates
+    under concurrent requests. ``deque.append`` for latency samples is
+    thread-safe on its own."""
 
     started_at: float = field(default_factory=time.time)
     requests_total: int = 0
     by_status: dict[int, int] = field(default_factory=dict)
     queue_refusals: int = 0
     latency: LatencyWindow = field(default_factory=LatencyWindow)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
     def note_status(self, status: int) -> None:
-        self.requests_total += 1
-        self.by_status[status] = self.by_status.get(status, 0) + 1
+        with self._lock:
+            self.requests_total += 1
+            self.by_status[status] = self.by_status.get(status, 0) + 1
 
     def note_refusal(self) -> None:
-        self.queue_refusals += 1
+        with self._lock:
+            self.queue_refusals += 1
 
     def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            by_status = {str(code): n for code, n in sorted(self.by_status.items())}
+            requests_total = self.requests_total
+            refusals = self.queue_refusals
         return {
             "uptime_sec": round(time.time() - self.started_at, 1),
-            "requests_total": self.requests_total,
-            "by_status": {str(code): n for code, n in sorted(self.by_status.items())},
-            "queue_refusals": self.queue_refusals,
+            "requests_total": requests_total,
+            "by_status": by_status,
+            "queue_refusals": refusals,
             "latency": self.latency.snapshot(),
             "gemini_retries_total": gemini_retries_total(),
             "memory_rss_kb": memory_rss_kb(),
@@ -173,15 +183,18 @@ class ServerMetrics:
 # ─── process-wide helpers ─────────────────────────────────────────────────────
 
 _GEMINI_RETRIES = {"total": 0}
+_GEMINI_RETRIES_LOCK = threading.Lock()
 
 
 def note_gemini_retry() -> None:
     """Count one upstream retry (any face). Cheap enough for hot paths."""
-    _GEMINI_RETRIES["total"] += 1
+    with _GEMINI_RETRIES_LOCK:
+        _GEMINI_RETRIES["total"] += 1
 
 
 def gemini_retries_total() -> int:
-    return _GEMINI_RETRIES["total"]
+    with _GEMINI_RETRIES_LOCK:
+        return _GEMINI_RETRIES["total"]
 
 
 def memory_rss_kb() -> int | None:

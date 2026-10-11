@@ -207,6 +207,17 @@ connection dials only the verified-public IPs the check inspected, closing
 the resolve→check→reconnect window (DNS rebinding) the image fetcher
 previously had. TLS keeps verifying the original hostname (SNI + certs).
 
+- Every redirect hop also re-checks scheme, host, and embedded credentials —
+a redirect must not reintroduce what the guard refused on the first URL.
+
+- **Proxy-mode carve-out**: with `proxy` configured, DNS belongs to the
+proxy, so the connection cannot be pinned client-side (the proxy resolves
+the hostname and dials what IT resolved). The client-side public-IP check
+still runs on the first URL and on every redirect hop, and CGNAT
+(`100.64.0.0/10`) plus deprecated IPv6 site-local (`fec0::/10`) are refused
+everywhere. A configured proxy is trusted infrastructure by definition —
+it can already see and route all traffic.
+
 - Private ranges, loopback, link-local (including `169.254.169.254`),
 reserved, and multicast targets are refused before any socket exists, as
 are `file://`, `ftp://`, and URLs with embedded credentials.
@@ -224,8 +235,11 @@ scrapers and AI agents — and a published page is published to be read.
 
 - Output is wrapped in `[UNTRUSTED WEB CONTENT]` markers, and `--ask` mode
 instructs Gemini to treat everything between them as data, never as
-instructions. A page can still contain text aimed at your agent; the
-markers limit, but do not eliminate, that injection surface.
+instructions. Page text, titles, and link labels are defused first: a page
+cannot carry the literal marker strings inside its own content to close
+the wrapper early and speak outside it. A page can still contain text
+aimed at your agent; the markers limit, but do not eliminate, that
+injection surface.
 
 **Limitations**: no JavaScript rendering (React/SPA sites come back mostly
 empty — that needs a headless browser, deliberately not a dependency), and
@@ -402,9 +416,12 @@ freegem verify "Alexander tutored by Aristotle?" --discover \
 ```
 
 **Run metrics** — verify (and research) attach a metrics block to JSON
-output: a request id, per-stage timings (discover / fetch / generate /
-parse), counters (fetches ok/failed, cache hits, evidence offered vs
-verified, schema repairs), and process RSS. The HTTP face exposes process
+output: a request id, per-stage timings (fetch / generate / verify),
+counters (pages ok/failed/skipped, cache hits, evidence offered vs
+verified), and process RSS. Source accounting reconciles explicitly:
+`pages_ok + pages_failed + pages_skipped == urls_requested`, with
+`pages_skipped` counting URLs reported as budget-skipped rather than
+fetched-and-failed. The HTTP face exposes process
 aggregates at `GET /metrics` — p50/p95/p99 latency over a bounded window,
 response-status counts, queue refusals, upstream retry totals, memory. POST
 responses carry an `X-Request-Id` header for correlating logs.

@@ -804,7 +804,28 @@ def cmd_crawl(cfg: BridgeConfig, args: argparse.Namespace) -> int:
     return 0
 
 
+def _force_utf8_stdio() -> None:
+    """Make stdout/stderr UTF-8 regardless of the platform locale.
+
+    On Windows, a redirected pipe or file defaults to the ANSI code page
+    (cp1252): the markdown renderers' check/cross marks -- or any non-Latin
+    Gemini answer -- raised UnicodeEncodeError AFTER all the network work
+    had completed, killing a documented output format at the last step.
+    Reconfiguring to UTF-8 with replacement keeps the bytes flowing; modern
+    terminals expect UTF-8, and everything older still gets readable output
+    instead of a traceback.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue  # replaced/embedded streams without the TextIOWrapper API
+        # detached or exotic stream: better best-effort than a crash
+        with contextlib.suppress(ValueError, OSError):
+            reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv: list[str] | None = None) -> int:
+    _force_utf8_stdio()
     raw = list(sys.argv[1:] if argv is None else argv)
     # A bare `freegem` used to reach cmd_serve with no serve flags on the
     # namespace (AttributeError on args.port). When no subcommand is present,
