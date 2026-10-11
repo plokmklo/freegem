@@ -15,12 +15,16 @@ without it, and only fails when :func:`build_server` is called.
 
 from __future__ import annotations
 
+import json
+import os
 from typing import Any
 
 from . import __version__
 from .config import BridgeConfig, redact_proxy
 from .gemini import BridgeError, generate
 from .models import MODELS, resolve_model
+from .jobs import GLOBAL_JOB_MANAGER
+from .session_profiles import ProfileManager
 
 __all__ = ["TOOL_SPECS", "build_server", "run_tool"]
 
@@ -242,6 +246,43 @@ def run_tool(cfg: BridgeConfig, name: str, arguments: dict[str, Any]) -> str:
         from .claim_verify import run_verify_tool
 
         return run_verify_tool(cfg, arguments)
+
+    if name == "freegem_submit_job":
+        _check_mcp_auth(cfg, arguments.get("api_key"))
+        job_type = arguments.get("job_type", "")
+        params = arguments.get("params", {})
+        job = GLOBAL_JOB_MANAGER.create_job(job_type, params)
+        return json.dumps(job.to_dict(), indent=2)
+
+    if name == "freegem_get_job":
+        _check_mcp_auth(cfg, arguments.get("api_key"))
+        job_id = arguments.get("job_id", "")
+        job = GLOBAL_JOB_MANAGER.get_job(job_id)
+        if not job:
+            return json.dumps({"error": "Job not found"})
+        return json.dumps(job.to_dict(), indent=2)
+
+    if name == "freegem_get_artifact":
+        _check_mcp_auth(cfg, arguments.get("api_key"))
+        art_id = arguments.get("artifact_id", "")
+        art = GLOBAL_JOB_MANAGER.get_artifact(art_id)
+        if not art:
+            return json.dumps({"error": "Artifact not found"})
+        return json.dumps({"id": art.id, "job_id": art.job_id, "filename": art.filename, "file_path": art.file_path}, indent=2)
+
+    if name == "freegem_manage_profile":
+        _check_mcp_auth(cfg, arguments.get("api_key"))
+        action = arguments.get("action", "list")
+        mgr = ProfileManager()
+        if action == "list":
+            return json.dumps(mgr.list_profiles(), indent=2)
+        elif action == "get":
+            prof = mgr.get_profile(arguments.get("name", ""))
+            return json.dumps(prof.to_dict() if prof else {"error": "Not found"}, indent=2)
+        elif action == "delete":
+            ok = mgr.delete_profile(arguments.get("name", ""))
+            return json.dumps({"deleted": ok})
+        return json.dumps({"error": f"Unknown action {action!r}"})
 
     if name == "gemini_list_models":
         lines = ["Available models:", ""]
@@ -503,6 +544,26 @@ def build_server(cfg: BridgeConfig, name: str = "freegem") -> Any:
             },
         )
 
+    @server.tool()
+    def freegem_submit_job(job_type: str, params: dict | None = None, api_key: str | None = None) -> str:
+        """Submit a background processing job (scrape, research, playwright, document)."""
+        return run_tool(cfg, "freegem_submit_job", {"job_type": job_type, "params": params or {}, "api_key": api_key})
+
+    @server.tool()
+    def freegem_get_job(job_id: str, api_key: str | None = None) -> str:
+        """Get status and results for a background job."""
+        return run_tool(cfg, "freegem_get_job", {"job_id": job_id, "api_key": api_key})
+
+    @server.tool()
+    def freegem_get_artifact(artifact_id: str, api_key: str | None = None) -> str:
+        """Retrieve artifact metadata and file path."""
+        return run_tool(cfg, "freegem_get_artifact", {"artifact_id": artifact_id, "api_key": api_key})
+
+    @server.tool()
+    def freegem_manage_profile(action: str = "list", name: str | None = None, api_key: str | None = None) -> str:
+        """Manage session authentication profiles (list, get, delete)."""
+        return run_tool(cfg, "freegem_manage_profile", {"action": action, "name": name, "api_key": api_key})
+
     return server
 
 
@@ -520,3 +581,8 @@ def model_help(cfg: BridgeConfig) -> str:
         f"  build tag: {cfg.gemini_bl}",
     ]
     return "\n".join(lines)
+
+def _check_mcp_auth(cfg: BridgeConfig, api_key: str | None = None) -> None:
+    expected_key = getattr(cfg, "api_key", None) or os.environ.get("FREEGEM_API_KEY")
+    if expected_key and api_key != expected_key:
+        raise PermissionError("Unauthorized: invalid or missing MCP API key")

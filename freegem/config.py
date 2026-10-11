@@ -62,6 +62,12 @@ DEFAULT_CONFIG: Mapping[str, Any] = MappingProxyType({
     # the Wikimedia API portal (or the site's own OpenSearch API for
     # non-Wikimedia MediaWiki hosts). robots.txt is honored either way.
     "discover_wiki": "en.wikipedia.org",
+    # Optional bearer key for the server's own job/result/artifact REST API
+    # and the MCP adapter. None keeps the loopback-only, unauthenticated
+    # behavior; a non-None value makes those endpoints demand
+    # ``Authorization: Bearer <key>``. The Gemini session (cookies/xsrf) is
+    # separate: this key gates OUR api, it never authenticates to Google.
+    "api_key": None,
 })
 
 
@@ -94,9 +100,10 @@ _STR_FIELDS = frozenset(
         "proxy",
         "auth_user",
         "xsrf_token",
+        "api_key",
     }
 )
-_NULLABLE_STR_FIELDS = frozenset({"cookie_file", "proxy", "auth_user", "xsrf_token"})
+_NULLABLE_STR_FIELDS = frozenset({"cookie_file", "proxy", "auth_user", "xsrf_token", "api_key"})
 
 #: Sentinel returned by _coerce_value when the value cannot be salvaged and
 #: the documented default must apply instead.
@@ -164,8 +171,10 @@ def _coerce_value(name: str, value: Any) -> Any:
 class BridgeConfig:
     """Immutable bridge configuration.
 
-    Deliberately has no ``api_keys`` field: authentication is not part of this
-    project. Binding to loopback is the access control.
+    ``api_key`` (optional) gates the server's own job/result/artifact API
+    and MCP adapter behind a bearer token; when it is None those endpoints
+    stay loopback-only and unauthenticated. It never authenticates to
+    Google -- the Gemini session (cookie file + xsrf token) is separate.
     """
 
     port: int = DEFAULT_CONFIG["port"]
@@ -186,6 +195,7 @@ class BridgeConfig:
     request_queue_wait_sec: float = DEFAULT_CONFIG["request_queue_wait_sec"]
     research_evidence: bool = DEFAULT_CONFIG["research_evidence"]
     discover_wiki: str = DEFAULT_CONFIG["discover_wiki"]
+    api_key: str | None = DEFAULT_CONFIG["api_key"]
 
     # ---- construction -------------------------------------------------------
 
@@ -215,6 +225,8 @@ class BridgeConfig:
             pass
 
         # Environment can supply the session pieces without touching the file.
+        if os.environ.get("FREEGEM_API_KEY"):
+            cfg = cfg.replace(api_key=os.environ["FREEGEM_API_KEY"])
         if os.environ.get("GEMINI_XSRF_TOKEN"):
             cfg = cfg.replace(xsrf_token=os.environ["GEMINI_XSRF_TOKEN"])
         if os.environ.get("GEMINI_AUTH_USER"):
@@ -257,6 +269,7 @@ class BridgeConfig:
             "discover_wiki": self.discover_wiki,
             # Booleans and paths only; never the token itself.
             "xsrf_token_set": bool(self.xsrf_token),
+            "api_key_set": bool(self.api_key),
             "cookie": "configured" if self.cookie_file else "none (anonymous)",
             "cookie_exists": self.has_session_cookie(),
         }
