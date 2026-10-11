@@ -178,6 +178,7 @@ freegem ask "summarise the plot of Dune"        # direct answer
 freegem ask --search "latest Python release"    # web-grounded + sources
 freegem scrape https://example.com --links      # read a web page
 freegem verify "claim one" "claim two" --urls URL1 URL2   # per-claim verdicts
+freegem crawl plan --seeds https://example.com --max-pages 20   # dry run
 freegem models                                  # registry + session state
 freegem doctor                                  # diagnostics, no generation
 ```
@@ -412,6 +413,88 @@ curl -s http://127.0.0.1:8081/metrics
 Not a crawler either: discovery returns a handful of article URLs which then
 go through the same guarded fetch pipeline; no link extraction, no following
 results-of-results, no browser rendering.
+
+---
+
+## Crawler
+
+`freegem crawl` is a bounded, robots-aware, resumable local crawler — the
+scraper generalized from one URL to a budgeted set of them, with a plan
+step, a persistent frontier, and typed output. It is deliberately NOT a
+recursive spider by default: the safe shape is "these seeds, this scope,
+this page budget, nothing else".
+
+```bash
+# dry run: normalize seeds, show scope verdicts and budgets — no network
+freegem crawl plan --seeds https://example.com/docs/ \
+  --allow-path /docs --max-depth 2 --max-pages 50
+
+# run it: results stream to JSONL, raw bodies land in artifacts/
+freegem crawl run --seeds https://example.com/docs/ \
+  --allow-path /docs --max-depth 2 --max-pages 50 \
+  --state crawl.db --out results.jsonl --artifacts artifacts/ \
+  --schema fields.json --sitemap --delay-ms 250 --concurrency 2
+
+# inspect / continue
+freegem crawl status --state crawl.db
+freegem crawl run --seeds https://example.com/docs/ --state crawl.db   # resume
+```
+
+**Scope** — `--allow-domain` / `--deny-domain` (suffix-matched at a dot
+boundary), `--allow-path` / `--deny-path` (prefix), `--max-depth`,
+`--max-pages`, and same-host-only by default (`--any-host` to leave the
+seed hosts). Deny always wins. Seeds are URLs, `.txt` files (one URL per
+line), or `.jsonl` files (`{"url": ..., "category": ...}`).
+
+**Frontier** — SQLite (`--state`), so a killed crawl resumes exactly where
+it stopped: every state change commits, `crawl status` reports counts by
+status plus the noisiest hosts, and an interrupted run leaves no in-flight
+hole (`inflight` rows are returned to `pending` on the next start). URLs
+dedupe by normalized spelling — tracking parameters (`utm_*`, `fbclid`,
+`gclid`, ...) are stripped, fragments dropped, IDN hosts punycoded, default
+ports and `%XX` casing normalized.
+
+**Extraction** — pass `--schema fields.json` to cut typed records instead
+of whole pages:
+
+```json
+{
+  "item_selector": "article",
+  "fields": [
+    {"name": "title", "selector": "h2 a", "required": true,
+     "normalize": ["strip", "collapse"]},
+    {"name": "url", "selector": "h2 a", "attr": "href", "type": "url"},
+    {"name": "score", "selector": "span.score", "type": "int"},
+    {"name": "all_links", "selector": "a", "attr": "href", "type": "url",
+     "multi": true}
+  ]
+}
+```
+
+Selectors are a compiled CSS subset (tag/class/id/attribute operators,
+descendant and child combinators, comma groups), an ElementTree-subset
+XPath (`kind: "xpath"`), or JSON paths (`kind: "json"`); types are
+`str|int|float|bool|url` with `required`, `default`, `pattern` validation,
+and per-field provenance in every output row (`url`, `fetched_at`,
+`content_hash`, `via`). Without a schema you get one record per page:
+url, title, readable text. Formats: `--format jsonl` (default), `json`,
+`csv`.
+
+**Hardening** — every response body is capped on the wire AND after
+decompression (default 5 MiB, `--max-bytes`); the DOM is capped in nodes
+and depth; XML (sitemaps, feeds) is parsed with DTD/ENTITY refused outright;
+every log line and output row passes a secret-redaction pass (API-key and
+token shapes become `[REDACTED:kind]`) before touching disk; per-host
+politeness delay (`--delay-ms`), exponential backoff with jitter on
+retries, and `Retry-After` honored verbatim on 429/503. `Ctrl-C` is
+graceful: the in-flight page finishes, the frontier checkpoints, the
+results file is closed cleanly.
+
+**Guard stack unchanged** — the crawler fetches through the same SSRF
+guard as the scraper (DNS resolution pinned to checked public IPs, private
+and link-local targets refused at dial time), honors robots.txt through
+the shared cache (`--ignore-robots` stays CLI-only), sends the honest
+crawler User-Agent, and never sends your session cookie.
 
 ---
 
@@ -651,7 +734,8 @@ pytest                  # tests
 ```
 
 The test suite runs entirely offline: every Gemini call is mocked, so CI needs
-no credentials and no network. The current suite contains 494 tests. See
+no credentials and no network. The current suite contains 638 tests (+20
+subtests, 658 cases as pytest counts them). See
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the layering rules and
 [`CONTRIBUTING.md`](CONTRIBUTING.md) for how to add a model or an endpoint.
 

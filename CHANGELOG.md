@@ -5,6 +5,81 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.0] — 2026-10-11
+
+### Added — the crawler subsystem (`freegem crawl`)
+
+- **URL normalization & scope** (`crawler/urls.py`): scheme/host lowercasing,
+  IDN punycode, default-port stripping, fragment dropping, percent-encoding
+  normalization, and a fixed tracking-parameter removal list (`utm_*`,
+  `fbclid`, `gclid`, ...) that preserves query order and never touches signed
+  parameters. `Scope` admits/refuses URLs with stable reasons (`ok`,
+  `out_of_scope_host`, `deny_path`, `too_deep`, ...): allow/deny domains
+  (dot-boundary suffix match), allow/deny path prefixes, depth and page
+  budgets, same-host-only by default.
+- **Persistent frontier** (`crawler/frontier.py`): SQLite work list with
+  priorities, per-host politeness timestamps, exponential backoff with
+  jitter, and `Retry-After` honored verbatim; every state change commits, so
+  the state file is ALWAYS a valid checkpoint — resume is reopening the
+  file. In-flight rows are recovered on restart; a `crawl_meta` table keeps
+  run provenance.
+- **Guarded fetch** (`crawler/fetch.py`): one GET through the SSRF-pinned
+  opener with an honest outcome taxonomy (`ok`, `http_error`, `blocked`,
+  `robots`, `ssrf`, `network`, `timeout`, `too_large`, `type_refused`),
+  conditional requests (ETag / If-Modified-Since → 304 revalidation), gzip
+  decompression caps, and DNS-resolution failures classified as `network`
+  (not `ssrf`) so campaign reports don't inflate the guard's catch.
+- **Extraction** (`crawler/extract.py`): size-capped HTML DOM; a compiled
+  CSS subset (tag/#id/.class/[attr ops], descendant + child combinators,
+  comma groups, compound sequences like `div.x#y[a^=b]`); ElementTree-subset
+  XPath; dotted/bracketed JSON paths; typed fields (`str|int|float|bool|url`)
+  with `required`/`default`/`pattern` validation, normalizers, `multi`
+  list fields, and per-field provenance (url, fetched_at, content_hash,
+  selector kind) in every record.
+- **Output** (`crawler/output.py`): JSONL (streaming), JSON (document), CSV
+  (schema-ordered columns + provenance); all writes pass the redaction pass
+  and land via temp-file rename, so a killed run never leaves a half-written
+  results file.
+- **Hardening** (`crawler/hardening.py`): secret redaction for common token
+  shapes (AWS, GitHub, OpenAI-style, Google, Slack, JWT, private-key blocks,
+  bearer/query secrets) as `[REDACTED:kind]`; safe XML defaults — DOCTYPE,
+  ENTITY, ELEMENT, ATTLIST, and xml-stylesheet prologs are refused before
+  parsing; body decoding chain (header charset → BOM → HTML `<meta charset>`
+  sniff → UTF-8 replace) verified against GBK/Shift-JIS/legacy hosts;
+  resource limits (per-page bytes, DOM nodes/depth, links/items per page,
+  sitemap URL cap, runtime) enforced during construction, not after.
+- **Runner & CLI** (`crawler/runner.py`, `freegem crawl`): `plan` (fully
+  offline: seed normalization + scope verdicts + budget math), `run`,
+  `status`, and resume; sitemap discovery per seed origin (one index level,
+  safe-XML parsed); structured JSON logs and progress events; content-
+  addressed artifacts (`sha256` bodies + manifest); graceful Ctrl-C that
+  finishes the in-flight page and checkpoints.
+- **Fetch campaign** (`crawler/campaign.py` + `scripts/gen_campaign_seeds.py`):
+  resumable bulk fetcher with a per-category outcome report. The 1000-URL
+  campaign across old/new sites, 15+ languages/encodings, PHP/Java/JS/Python
+  ecosystems, gov/edu, and bot-walled heavyweights drove three fetch
+  upgrades: DNS-failure reclassification, `Retry-After` honoring, and the
+  encoding chain above. Report: 559/1000 ok, 181×403 (bot walls, kept
+  blocked by the honest-UA posture), 26 robots-denied by our own compliance,
+  167×404, 18 over the byte cap, 5 timeouts.
+- **Server**: `Sec-Fetch-Site: cross-site` POST refusal — a third, independent
+  CSRF gate (Fetch Metadata cannot be forged or withheld by page scripts),
+  alongside the existing Origin and Content-Type layers.
+
+### Fixed
+
+- Stale test counts in the changelog: the research-era suite was 366 tests
+  plus 20 subtests, not "386 tests" (measured at the commit that introduced
+  the claim).
+
+### Tests
+
+- 144 new tests (638 tests + 20 subtests): scope/normalization, frontier
+  durability and contention, CSS/XPath/JSON selectors, typed extraction,
+  output writers, hardening (redaction/safe-XML/DOM caps/decoding), Sec-
+  Fetch-Site gates, and end-to-end crawl runs against a loopback fake site
+  that re-verifies the SSRF pinning invariant on every fetch.
+
 ## [Unreleased]
 
 Nothing yet.
@@ -195,7 +270,7 @@ Nothing yet.
     per-source fetch status, cache hits, truncation, and timing).
 - MCP: `web_research(urls, question, max_pages=5, max_chars_per_page=12000)`,
   text output with the source table; no robots bypass, same as `web_scrape`.
-- 36 new tests (386 total): cache roundtrip/TTL/corruption/eviction, budget
+- 36 new tests (366 tests + 20 subtests): cache roundtrip/TTL/corruption/eviction, budget
   skipping, max-pages capping, citation preservation and out-of-range
   rejection, map/reduce staging, dead-chunk survival, boilerplate dedup,
   deterministic fallback, JSON schema, MCP dispatch and validation, CLI
