@@ -17,8 +17,12 @@ Plus one-shot utilities for checking a setup without starting a server:
 from __future__ import annotations
 
 import argparse
+import contextlib
+import json
 import os
+import signal
 import sys
+from typing import Any
 
 from . import __version__
 from .config import BridgeConfig, config_search_paths, find_config, load_config, redact_proxy
@@ -66,7 +70,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"freegem {__version__}")
 
     sub = parser.add_subparsers(
-        dest="command", metavar="{serve,mcp,ask,models,scrape,research,verify,doctor}"
+        dest="command",
+        metavar="{serve,mcp,ask,models,scrape,research,verify,crawl,doctor}",
     )
 
     serve = sub.add_parser("serve", help="run the HTTP API server", parents=[common])
@@ -283,6 +288,118 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="fetch pages N at a time (default: research_concurrency config, 3)",
     )
+
+    crawl = sub.add_parser(
+        "crawl",
+        help="bounded, robots-aware, resumable local crawler",
+        parents=[common],
+    )
+    crawl_sub = crawl.add_subparsers(dest="crawl_cmd", required=True)
+
+    crawl_common = argparse.ArgumentParser(add_help=False)
+    crawl_common.add_argument(
+        "--seeds",
+        nargs="+",
+        metavar="SRC",
+        default=None,
+        help="seed URLs, or files (.txt: one URL per line, .jsonl: {url,category})",
+    )
+    crawl_common.add_argument("--state", metavar="PATH", default=None, help="frontier SQLite file")
+    crawl_common.add_argument(
+        "--allow-domain",
+        action="append",
+        metavar="D",
+        default=None,
+        help="also crawl this domain (repeatable; suffix-matched)",
+    )
+    crawl_common.add_argument(
+        "--deny-domain",
+        action="append",
+        metavar="D",
+        default=None,
+        help="never crawl this domain (repeatable, wins over allow)",
+    )
+    crawl_common.add_argument(
+        "--allow-path",
+        action="append",
+        metavar="P",
+        default=None,
+        help="only crawl paths with this prefix (repeatable)",
+    )
+    crawl_common.add_argument(
+        "--deny-path",
+        action="append",
+        metavar="P",
+        default=None,
+        help="never crawl paths with this prefix (repeatable)",
+    )
+    crawl_common.add_argument("--max-depth", type=int, default=2, metavar="N", help="(default 2)")
+    crawl_common.add_argument(
+        "--max-pages", type=int, default=100, metavar="N", help="page budget (default 100)"
+    )
+    crawl_common.add_argument(
+        "--any-host",
+        action="store_true",
+        help="follow links off the seed hosts (default: same-host only)",
+    )
+    crawl_common.add_argument(
+        "--sitemap", action="store_true", help="discover URLs from each seed host's /sitemap.xml"
+    )
+    crawl_common.add_argument(
+        "--delay-ms", type=int, default=250, metavar="MS", help="per-host politeness (default 250)"
+    )
+    crawl_common.add_argument(
+        "--concurrency", type=int, default=2, metavar="N", help="parallel fetches 1-8 (default 2)"
+    )
+    crawl_common.add_argument(
+        "--timeout",
+        type=float,
+        default=20.0,
+        metavar="SEC",
+        help="per-request timeout (default 20)",
+    )
+    crawl_common.add_argument(
+        "--max-bytes",
+        type=int,
+        default=5 * 1024 * 1024,
+        metavar="N",
+        help="per-page byte cap, wire and decompressed (default 5 MiB)",
+    )
+    crawl_common.add_argument(
+        "--max-retries", type=int, default=2, metavar="N", help="retries per page (default 2)"
+    )
+    crawl_common.add_argument(
+        "--max-runtime-sec",
+        type=float,
+        default=900.0,
+        metavar="SEC",
+        help="stop the crawl after this many seconds (default 900)",
+    )
+    crawl_common.add_argument(
+        "--ignore-robots",
+        action="store_true",
+        help="ignore robots.txt (CLI only; still SSRF-guarded and capped)",
+    )
+
+    crawl_sub.add_parser(
+        "plan", help="dry run: normalize seeds, show scope and budget", parents=[crawl_common]
+    )
+
+    run_p = crawl_sub.add_parser(
+        "run", help="run a crawl (fresh or resumed state)", parents=[crawl_common]
+    )
+    run_p.add_argument("--out", metavar="PATH", default="", help="results file (jsonl default)")
+    run_p.add_argument(
+        "--format", choices=("jsonl", "json", "csv"), default="jsonl", help="results format"
+    )
+    run_p.add_argument("--schema", metavar="PATH", default="", help="extraction schema JSON")
+    run_p.add_argument("--artifacts", metavar="DIR", default="", help="store raw page bodies here")
+    run_p.add_argument(
+        "--json-logs", action="store_true", help="also print progress events as JSON to stdout"
+    )
+
+    status_p = crawl_sub.add_parser("status", help="show frontier stats for a state file")
+    status_p.add_argument("--state", metavar="PATH", required=True, help="frontier SQLite file")
 
     sub.add_parser("models", help="list available models", parents=[common])
 
@@ -532,13 +649,173 @@ def _has_httpx() -> bool:
     return HAS_HTTPX
 
 
+# ── crawl ─────────────────────────────────────────────────────────────────
+
+
+def _crawl_seeds(sources: list[str]) -> list[str]:
+    """Flatten --seeds: literal URLs plus .txt/.jsonl files."""
+    seeds: list[str] = []
+    for source in sources:
+        if source.startswith(("http://", "https://")):
+            seeds.append(source)
+            continue
+        if not os.path.isfile(source):
+            print(f"crawl: seed source not found: {source}", file=sys.stderr)
+            continue
+        with open(source, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if source.endswith(".jsonl"):
+                    try:
+                        data = json.loads(line)
+                    except ValueError:
+                        continue
+                    url = str(data.get("url", "")).strip()
+                    if url:
+                        seeds.append(url)
+                else:
+                    seeds.append(line)
+    return seeds
+
+
+def _crawl_spec(args: argparse.Namespace) -> Any:
+    from .crawler import CrawlSpec, ResourceLimits, Scope
+
+    seeds = _crawl_seeds(list(args.seeds or []))
+    scope = Scope(
+        allow_domains=tuple(args.allow_domain or ()),
+        deny_domains=tuple(args.deny_domain or ()),
+        allow_paths=tuple(args.allow_path or ()),
+        deny_paths=tuple(args.deny_path or ()),
+        max_depth=max(0, args.max_depth),
+        max_pages=max(1, args.max_pages),
+        same_host_only=not args.any_host,
+    )
+    limits = ResourceLimits(
+        timeout_sec=args.timeout,
+        max_bytes=args.max_bytes,
+        max_retries=max(0, args.max_retries),
+        max_runtime_sec=args.max_runtime_sec,
+    )
+    return CrawlSpec(
+        seeds=tuple(seeds),
+        scope=scope,
+        limits=limits,
+        delay_ms=max(0, args.delay_ms),
+        concurrency=max(1, min(args.concurrency, 8)),
+        robots=not args.ignore_robots,
+        sitemaps=args.sitemap,
+        output_path=getattr(args, "out", "") or "",
+        output_format=getattr(args, "format", "jsonl"),
+        append_output=False,
+        schema_path=getattr(args, "schema", "") or "",
+        artifacts_dir=getattr(args, "artifacts", "") or "",
+        state_path=args.state or "",
+    )
+
+
+def cmd_crawl(cfg: BridgeConfig, args: argparse.Namespace) -> int:
+    import threading
+    import time as _time
+
+    from .crawler import Frontier, load_schema
+    from .crawler import plan as plan_crawl
+    from .crawler import run as run_crawl
+
+    mode = args.crawl_cmd
+    if mode == "status":
+        if not args.state or not os.path.exists(args.state):
+            print("crawl status needs --state pointing at an existing state file", file=sys.stderr)
+            return 2
+        frontier = Frontier(args.state)
+        try:
+            stats = frontier.stats()
+            meta_started = frontier.get_meta("started_at")
+            meta_finished = frontier.get_meta("finished_at")
+            print(
+                json.dumps(
+                    {**stats.as_dict(), "started_at": meta_started, "finished_at": meta_finished},
+                    indent=2,
+                )
+            )
+        finally:
+            frontier.close()
+        return 0
+
+    if not args.seeds and mode in ("plan", "run"):
+        print("crawl needs --seeds (URLs or seed files)", file=sys.stderr)
+        return 2
+
+    spec = _crawl_spec(args)
+    if mode == "plan":
+        report = plan_crawl(spec)
+        print(json.dumps(report.as_dict(), indent=2))
+        return 0
+
+    if not spec.state_path:
+        print("crawl run needs --state PATH (the frontier is how resume works)", file=sys.stderr)
+        return 2
+
+    # Validate the schema BEFORE any state file or worker exists: a typo in
+    # the schema must be a clean error, not a half-started crawl.
+    try:
+        load_schema(spec.schema_path)
+    except (ValueError, OSError, json.JSONDecodeError) as exc:
+        print(f"crawl: bad schema: {exc}", file=sys.stderr)
+        return 2
+
+    if mode == "run":
+        resume = bool(args.state and os.path.exists(args.state))
+        if resume:
+            # A resume continues the SAME crawl: seeds come from the frontier
+            # (push is INSERT OR IGNORE anyway) and results append.
+            spec.append_output = bool(spec.output_path)
+    frontier = Frontier(spec.state_path)
+    cancel = threading.Event()
+
+    def _stop(_signum: object, _frame: object) -> None:
+        cancel.set()
+
+    for name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+        sig = getattr(signal, name, None)
+        if sig is not None:
+            with contextlib.suppress(ValueError, OSError):  # non-main thread
+                signal.signal(sig, _stop)
+
+    on_event = None
+    if getattr(args, "json_logs", False):
+
+        def on_event(payload: dict) -> None:
+            print(json.dumps(payload, ensure_ascii=False), flush=True)
+
+    started = _time.time()
+    print(
+        f"crawl: {len(spec.seeds)} seed(s), budget {spec.scope.max_pages} pages, "
+        f"depth {spec.scope.max_depth}, state {spec.state_path}",
+        file=sys.stderr,
+    )
+    try:
+        counters = run_crawl(cfg, spec, frontier, cancel=cancel, on_event=on_event)
+    except KeyboardInterrupt:  # pragma: no cover - signal path above
+        cancel.set()
+        counters = run_crawl(cfg, spec, frontier, cancel=cancel, on_event=on_event)
+    finally:
+        frontier.close()
+    summary = counters.as_dict()
+    summary["wall_sec"] = round(_time.time() - started, 1)
+    print(json.dumps(summary, indent=2))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
     # A bare `freegem` used to reach cmd_serve with no serve flags on the
     # namespace (AttributeError on args.port). When no subcommand is present,
     # parse as if `serve` had been written. --help/--version keep the top-level
     # parser so the full command list stays visible.
-    _commands = {"serve", "mcp", "ask", "models", "scrape", "research", "verify", "doctor"}
+    _commands = {"serve", "mcp", "ask", "models", "scrape", "research", "verify", "crawl", "doctor"}
     if not any(a in _commands for a in raw) and not any(
         a in ("-h", "--help", "--version") for a in raw
     ):
@@ -580,6 +857,7 @@ def main(argv: list[str] | None = None) -> int:
         "scrape": cmd_scrape,
         "research": cmd_research,
         "verify": cmd_verify,
+        "crawl": cmd_crawl,
         "doctor": cmd_doctor,
     }
     return handlers[command](cfg, args)
