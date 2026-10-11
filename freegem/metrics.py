@@ -191,18 +191,25 @@ def memory_rss_kb() -> int | None:
     belongs in an explicit debugging session, not every request). ru_maxrss
     is KiB on Linux, BYTES on macOS; normalize by page size heuristics is
     overkill, so: report max(KiB value, bytes/1024 sanity-normalized) via
-    the documented per-platform unit.
+    the documented per-platform unit. Attribute access goes through
+    ``getattr`` because the ``resource`` stubs are platform-conditional:
+    on Windows the module (and its attributes) do not exist for the type
+    checker either, and a hard attribute reference would fail mypy there.
     """
     try:
         import resource
     except ImportError:  # Windows
         return None
+    getrusage = getattr(resource, "getrusage", None)
+    rusage_self = getattr(resource, "RUSAGE_SELF", None)
+    if getrusage is None or rusage_self is None:
+        return None
     try:
-        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        rss = int(getrusage(rusage_self).ru_maxrss)
     except Exception:
         return None
     if rss <= 0:
         return None
     if sys.platform == "darwin":
         rss = rss // 1024  # macOS reports bytes
-    return int(rss)
+    return rss
