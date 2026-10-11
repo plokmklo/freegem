@@ -21,9 +21,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from freegem.config import load_config  # noqa: E402
-from freegem.crawler.hardening import ResourceLimits  # noqa: E402
-from freegem.crawler.resilient import HostPacer, fetch_resilient  # noqa: E402
+from freegem.config import load_config
+from freegem.crawler.hardening import ResourceLimits
+from freegem.crawler.resilient import HostPacer, fetch_resilient
 
 DB = "/home/z/my-project/download/campaign/campaign_state.db"
 
@@ -51,9 +51,14 @@ def main() -> int:
     def work(item: tuple[str, str]) -> None:
         url, category = item
         try:
-            outcome = fetch_resilient(cfg, url, limits=limits, pacer=pacer, spill_dir=spill_dir, cookie_jar=jar)
+            outcome = fetch_resilient(
+                cfg, url, limits=limits, pacer=pacer, spill_dir=spill_dir, cookie_jar=jar
+            )
         except Exception as exc:  # never let one URL kill the worker
-            print(json.dumps({"event": "driver_error", "url": url, "error": str(exc)[:120]}), flush=True)
+            print(
+                json.dumps({"event": "driver_error", "url": url, "error": str(exc)[:120]}),
+                flush=True,
+            )
             return
         with lock, con:
             con.execute(
