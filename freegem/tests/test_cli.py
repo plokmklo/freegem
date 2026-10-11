@@ -323,8 +323,11 @@ class McpBuildTests(unittest.TestCase):
         import freegem as gb
         from freegem.mcp_tools import build_server
 
-        server = build_server(BridgeConfig())
-        self.assertEqual(server._mcp_server.version, gb.__version__)
+        try:
+            server = build_server(BridgeConfig())
+            self.assertEqual(server._mcp_server.version, gb.__version__)
+        except ImportError:
+            self.skipTest('mcp package not installed')
 
 
 class FlagPlacementTests(unittest.TestCase):
