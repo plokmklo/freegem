@@ -19,6 +19,7 @@ class ControlPlaneTests(unittest.TestCase):
     def test_full_lifecycle_memory_queue(self) -> None:
         queue = MemoryQueue()
         cp = ControlPlane(queue, self.store, lease_ttl_sec=60.0, worker_ttl_sec=60.0)
+        self.addCleanup(cp.close)  # Windows: release the sqlite handle
         task_id = queue.enqueue({"url": "https://example.com/"})
         worker = cp.join("crawler", {"host": "box-1"})
         handle, payload = cp.claim(worker, timeout_sec=1.0)
@@ -39,6 +40,7 @@ class ControlPlaneTests(unittest.TestCase):
     def test_crashed_worker_task_is_reaped_and_redelivered(self) -> None:
         queue = MemoryQueue()
         cp = ControlPlane(queue, self.store, lease_ttl_sec=5.0, worker_ttl_sec=30.0)
+        self.addCleanup(cp.close)  # Windows: release the sqlite handle
         queue.enqueue({"url": "https://example.com/x"})
         ghost = cp.join("crawler")
         handle, _payload = cp.claim(ghost, timeout_sec=1.0)
@@ -59,6 +61,7 @@ class ControlPlaneTests(unittest.TestCase):
     def test_long_task_renewal_prevents_reaping(self) -> None:
         queue = MemoryQueue()
         cp = ControlPlane(queue, self.store, lease_ttl_sec=5.0, worker_ttl_sec=60.0)
+        self.addCleanup(cp.close)  # Windows: release the sqlite handle
         queue.enqueue({"n": 1})
         worker = cp.join("crawler")
         handle, _ = cp.claim(worker, timeout_sec=1.0)
@@ -75,6 +78,7 @@ class ControlPlaneTests(unittest.TestCase):
     def test_stale_lease_renewal_raises(self) -> None:
         queue = MemoryQueue()
         cp = ControlPlane(queue, self.store)
+        self.addCleanup(cp.close)  # Windows: release the sqlite handle
         queue.enqueue({"n": 1})
         worker = cp.join("crawler")
         handle, _ = cp.claim(worker, timeout_sec=1.0)
@@ -85,12 +89,15 @@ class ControlPlaneTests(unittest.TestCase):
 
     def test_unknown_worker_heartbeat_raises(self) -> None:
         cp = ControlPlane(MemoryQueue(), self.store)
+        self.addCleanup(cp.close)  # Windows: release the sqlite handle
         with self.assertRaises(ControlPlaneError):
             cp.heartbeat("no-such-worker")
 
     def test_sqlite_queue_end_to_end(self) -> None:
         queue = SqliteQueue(f"{self.tmp.name}/work.sqlite")
+        self.addCleanup(queue.close)  # Windows: release the sqlite handle
         cp = ControlPlane(queue, self.store)
+        self.addCleanup(cp.close)  # Windows: release the sqlite handle
         queue.enqueue({"url": "https://example.com/1"})
         queue.enqueue({"url": "https://example.com/2"})
         w1 = cp.join("crawler")
@@ -106,6 +113,7 @@ class ControlPlaneTests(unittest.TestCase):
 
     def test_list_workers_and_metadata(self) -> None:
         cp = ControlPlane(MemoryQueue(), self.store)
+        self.addCleanup(cp.close)  # Windows: release the sqlite handle
         cp.join("crawler", {"host": "a"})
         cp.join("supervisor", {"host": "b"})
         workers = cp.list_workers()
