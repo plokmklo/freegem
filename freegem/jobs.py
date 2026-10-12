@@ -867,16 +867,31 @@ _RUNNER_LOCK = threading.Lock()
 DEFAULT_JOB_DB = Path.home() / ".config" / "freegem" / "jobs.sqlite3"
 
 
+#: One live SqliteJobStore per resolved path, process-wide. Two connections
+#: to the same store file racing their init writes (mark_interrupted) hit
+#: Windows file-lock conflicts (sqlite3.InterfaceError: bad parameter or
+#: other API misuse); caching keeps exactly one connection per path.
+_STORE_CACHE: dict[str, MemoryJobStore | SqliteJobStore] = {}
+_STORE_CACHE_LOCK = threading.Lock()
+
+
 def _store_from_config(cfg: Any) -> MemoryJobStore | SqliteJobStore:
     job_db = getattr(cfg, "job_db", None)
     if job_db and str(job_db).strip() and str(job_db) != "memory":
-        return SqliteJobStore(str(job_db))
-    if job_db == "memory":
+        path = str(job_db)
+    elif job_db == "memory":
         return MemoryJobStore()
-    try:
-        return SqliteJobStore(DEFAULT_JOB_DB)
-    except Exception:
-        return MemoryJobStore()  # an unwritable HOME must not kill the server
+    else:
+        path = str(DEFAULT_JOB_DB)
+    with _STORE_CACHE_LOCK:
+        cached = _STORE_CACHE.get(path)
+        if cached is None:
+            try:
+                cached = SqliteJobStore(path)
+            except Exception:
+                return MemoryJobStore()  # an unwritable HOME must not kill the server
+            _STORE_CACHE[path] = cached
+        return cached
 
 
 def configure_job_runner(cfg: Any, *, manager: JobManager | None = None) -> JobRunner:
