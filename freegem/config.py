@@ -68,6 +68,7 @@ DEFAULT_CONFIG: Mapping[str, Any] = MappingProxyType({
     # ``Authorization: Bearer <key>``. The Gemini session (cookies/xsrf) is
     # separate: this key gates OUR api, it never authenticates to Google.
     "api_key": None,
+    "brave_api_key": "",
 })
 
 
@@ -100,6 +101,7 @@ _STR_FIELDS = frozenset(
         "proxy",
         "auth_user",
         "xsrf_token",
+        "brave_api_key",
         "api_key",
     }
 )
@@ -196,6 +198,7 @@ class BridgeConfig:
     research_evidence: bool = DEFAULT_CONFIG["research_evidence"]
     discover_wiki: str = DEFAULT_CONFIG["discover_wiki"]
     api_key: str | None = DEFAULT_CONFIG["api_key"]
+    brave_api_key: str = DEFAULT_CONFIG["brave_api_key"]
 
     # ---- construction -------------------------------------------------------
 
