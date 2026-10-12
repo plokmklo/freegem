@@ -5,6 +5,70 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.0] — 2026-10-12
+
+Practical dynamic pages and a service boundary (P1), production-scale
+adapters and optional intelligence (P2). 691 → 800+ tests.
+
+### P1 — dynamic pages, service boundary
+
+- **Optional Playwright rendering** (`playwright_fetcher.py`): HTTP-first
+  with browser fallback for JS shells, isolated browser context per fetch,
+  selector/network waits, screenshots, PDFs, traces, guaranteed cleanup.
+- **Session/storage-state profiles** (`session_profiles.py`): named
+  profiles with expiry, Playwright and `cookiejar` export, user-owned
+  storage directory.
+- **Markdown/main-content extraction and richer metadata**
+  (`crawler/extract.py`): `html_to_markdown`, OpenGraph/Twitter-card/
+  JSON-LD metadata.
+- **PDF/DOCX adapters** (`adapters.py`): text + Markdown + metadata, with
+  stdlib fallbacks when pypdf/python-docx are missing.
+- **Authenticated REST job API** (`server.py`, `jobs.py`): `POST /v1/jobs`,
+  `GET /v1/jobs/{id}[/results]`, `GET /v1/artifacts/{id}`, optional bearer
+  auth via `api_key` config / `FREEGEM_API_KEY`, background workers with
+  audit events and retry traces.
+- **Narrow authenticated MCP adapter** (`mcp_tools.py`): submit/poll jobs,
+  fetch artifacts, manage profiles — each gated by `_check_mcp_auth`.
+- **Metrics hardening** (`metrics.py`): structured audit log, request ids
+  wired through job endpoints, health/metrics surfaces documented.
+- **Bounded parallel fetching**: per-host politeness + concurrency caps on
+  multi-source research (existing admission queue).
+
+### P2 — production scale, optional intelligence
+
+- **Selenium/Grid adapter** (`selenium_fetcher.py`): fresh session per
+  fetch (local chromium or `grid_url`), waits, screenshots, CDP
+  `Page.printToPDF`, shared storage-state seeding; reachable as the
+  `selenium` job type.
+- **Queue adapters** (`queues.py`): `memory://`, durable `sqlite://`
+  (crash-safe, `recover()`), optional `redis://` and `amqp://` (pika),
+  one reserve/ack/nack contract, scheme-dispatch factory.
+- **Document and blob stores** (`stores.py`): SQLite default and
+  PostgreSQL (optional psycopg v2/v3, JSONB containment queries) for
+  documents; content-addressed files (same layout as crawl artifacts) and
+  S3 (optional boto3) for blobs.
+- **Schema-constrained, provider-neutral extraction** (`llm_extract.py`):
+  typed fields -> JSON Schema + prompt block; validation with repair
+  (coercion, unknown-key drop, enum enforcement) and one complaint-driven
+  retry; Bridge / OpenAI-compatible (stdlib urllib) / Null providers;
+  reachable as the `extract` job type.
+- **Text pipeline** (`text_pipeline.py`): paragraph-aware chunking with
+  overlap, idf-weighted relevance selection, deterministic extractive
+  summary, cost/quality telemetry.
+- **Content-change recrawling** (`crawler/scheduling.py`): per-URL change
+  history in the frontier DB, exponential-backoff-when-stable intervals,
+  conditional-validation (If-None-Match/If-Modified-Since) recrawl plans.
+- **Similarity dedup** (`dedup.py`): 64-bit simhash over word shingles
+  with jaccard verification; **search sinks** (`search_sinks.py`): FTS5
+  (LIKE fallback), JSONL+tf-idf, and null sinks with replace-on-recrawl.
+- **Source adapters** (`crawler/sources.py`): MediaWiki API, arXiv Atom,
+  RSS/Atom feeds, docs sitemaps — seed-list discovery only, all fetch
+  guards remain in the runner.
+- **JS/XHR discovery + best-first scoring** (`crawler/discovery.py`):
+  fetch/axios/XHR endpoint extraction from page markup/scripts, and
+  deterministic, floored URL scoring with a prioritizer that maps scores
+  to frontier priorities.
+
 ## [2.7.1] — 2026-10-12
 
 Security and correctness pass over the research/verify/scrape/server faces,

@@ -1,13 +1,13 @@
 """Tests for optional Playwright HTTP-first / browser-fallback fetcher."""
 
 import unittest
-from unittest.mock import MagicMock, patch
+from typing import Any
+from unittest.mock import patch
 
 from freegem.config import BridgeConfig
 from freegem.crawler.fetch import FetchOutcome
 from freegem.playwright_fetcher import (
     PlaywrightOptions,
-    PlaywrightResult,
     fetch_http_first,
     fetch_with_playwright,
     is_playwright_available,
@@ -16,11 +16,11 @@ from freegem.playwright_fetcher import (
 
 
 class TestPlaywrightFetcher(unittest.TestCase):
-    def test_is_playwright_available(self):
+    def test_is_playwright_available(self) -> None:
         result = is_playwright_available()
         self.assertIsInstance(result, bool)
 
-    def test_should_fallback_to_browser(self):
+    def test_should_fallback_to_browser(self) -> None:
         self.assertTrue(should_fallback_to_browser(None))
 
         outcome_failed = FetchOutcome(url="https://example.com", kind="http_error", status=500)
@@ -33,25 +33,26 @@ class TestPlaywrightFetcher(unittest.TestCase):
         self.assertFalse(should_fallback_to_browser(outcome_ok))
 
     @patch("freegem.playwright_fetcher.is_playwright_available", return_value=False)
-    def test_fetch_with_playwright_not_installed(self, mock_avail):
+    def test_fetch_with_playwright_not_installed(self, mock_avail: Any) -> None:
         opts = PlaywrightOptions(url="https://example.com")
         with self.assertRaises(RuntimeError):
             fetch_with_playwright(opts)
 
     @patch("freegem.playwright_fetcher.is_playwright_available", return_value=True)
     @patch("freegem.playwright_fetcher.url_allowed")
-    def test_fetch_with_playwright_ssrf_refusal(self, mock_allowed, mock_avail):
+    def test_fetch_with_playwright_ssrf_refusal(self, mock_allowed: Any, mock_avail: Any) -> None:
         from freegem.ssrf import SSRFRefused
         mock_allowed.side_effect = SSRFRefused("127.0.0.1 refused")
 
         opts = PlaywrightOptions(url="http://127.0.0.1")
         res = fetch_with_playwright(opts)
         self.assertFalse(res.ok)
+        assert res.error is not None
         self.assertIn("SSRF refused", res.error)
 
     @patch("freegem.playwright_fetcher.crawl_fetch")
     @patch("freegem.playwright_fetcher.is_playwright_available", return_value=False)
-    def test_fetch_http_first_normal(self, mock_pw, mock_fetch):
+    def test_fetch_http_first_normal(self, mock_pw: Any, mock_fetch: Any) -> None:
         cfg = BridgeConfig()
         outcome = FetchOutcome(url="https://example.com", kind="ok", body=b"Hello World" * 50)
         mock_fetch.return_value = outcome

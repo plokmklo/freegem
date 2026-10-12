@@ -238,7 +238,12 @@ class RedirectCredentialTests(unittest.TestCase):
     def test_redirect_to_credentialed_url_refused(self) -> None:
         with self.assertRaises(urllib.error.URLError) as ctx:
             SafeRedirect().redirect_request(
-                None, None, 302, "Found", {}, "https://user:pass@evil.example.com/x"
+                urllib.request.Request("https://site.example.com/start"),
+                None,
+                302,
+                "Found",
+                {},
+                "https://user:pass@evil.example.com/x",
             )
         self.assertIn("credentials", str(ctx.exception))
 
@@ -247,7 +252,12 @@ class RedirectCredentialTests(unittest.TestCase):
         with mock.patch("freegem.ssrf.socket.getaddrinfo", return_value=infos):
             with self.assertRaises(urllib.error.URLError):
                 SafeRedirect().redirect_request(
-                    None, None, 302, "Found", {}, "https://intranet.example.com/x"
+                    urllib.request.Request("https://site.example.com/start"),
+                    None,
+                    302,
+                    "Found",
+                    {},
+                    "https://intranet.example.com/x",
                 )
 
 
@@ -282,7 +292,7 @@ class ChunkedBodyCapTests(unittest.TestCase):
     def _handler(self, stream: _Stream) -> GeminiHandler:
         handler = object.__new__(GeminiHandler)
         handler.rfile = stream  # type: ignore[assignment]
-        handler.headers = _FakeHeaders({"Transfer-Encoding": "chunked"})
+        handler.headers = _FakeHeaders({"Transfer-Encoding": "chunked"})  # type: ignore[assignment]
         return handler
 
     def test_many_undercap_chunks_rejected_at_total(self) -> None:
@@ -573,17 +583,17 @@ class Utf8StdioTests(unittest.TestCase):
         original = sys.stdout
         buffer = io.BytesIO()
         wrapper = io.TextIOWrapper(buffer, encoding="cp1252", errors="strict")
-        sys.stdout = wrapper  # type: ignore[assignment]
+        sys.stdout = wrapper
         try:
             _force_utf8_stdio()
-            self.assertEqual(sys.stdout.encoding, "utf-8")  # type: ignore[union-attr]
+            self.assertEqual(sys.stdout.encoding, "utf-8")
             # and the ticks that killed cp1252 now survive with replacement
             print("\u2713 \u2717 \u2014 quotes \u201chealthcheck\u201d")
             sys.stdout.flush()
             body = buffer.getvalue()
             self.assertTrue(body)
         finally:
-            sys.stdout = original  # type: ignore[assignment]
+            sys.stdout = original
             wrapper.close()
 
     def test_stream_without_reconfigure_is_tolerated(self) -> None:
@@ -594,12 +604,12 @@ class Utf8StdioTests(unittest.TestCase):
 
         original = sys.stdout
         fake = _NoReconfigure()
-        sys.stdout = fake  # type: ignore[assignment]
+        sys.stdout = fake
         try:
             _force_utf8_stdio()  # must not raise
             self.assertEqual(fake.encoding, "ascii")
         finally:
-            sys.stdout = original  # type: ignore[assignment]
+            sys.stdout = original
 
 
 # ─── #12: dead guard constant removed ────────────────────────────────────────

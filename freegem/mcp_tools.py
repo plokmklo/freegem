@@ -22,8 +22,8 @@ from typing import Any
 from . import __version__
 from .config import BridgeConfig, redact_proxy
 from .gemini import BridgeError, generate
-from .models import MODELS, resolve_model
 from .jobs import GLOBAL_JOB_MANAGER
+from .models import MODELS, resolve_model
 from .session_profiles import ProfileManager
 
 __all__ = ["TOOL_SPECS", "build_server", "run_tool"]
@@ -257,10 +257,10 @@ def run_tool(cfg: BridgeConfig, name: str, arguments: dict[str, Any]) -> str:
     if name == "freegem_get_job":
         _check_mcp_auth(cfg, arguments.get("api_key"))
         job_id = arguments.get("job_id", "")
-        job = GLOBAL_JOB_MANAGER.get_job(job_id)
-        if not job:
+        fetched = GLOBAL_JOB_MANAGER.get_job(job_id)
+        if not fetched:
             return json.dumps({"error": "Job not found"})
-        return json.dumps(job.to_dict(), indent=2)
+        return json.dumps(fetched.to_dict(), indent=2)
 
     if name == "freegem_get_artifact":
         _check_mcp_auth(cfg, arguments.get("api_key"))

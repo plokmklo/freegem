@@ -37,6 +37,12 @@ implementation knowledge remain fundamental to this project. See
 
 - [Claim verification](#claim-verification)
 
+- [Crawler](#crawler)
+
+- [Dynamic pages and job API](#dynamic-pages-and-job-api)
+
+- [Adapters and pipelines](#adapters-and-pipelines)
+
 - [Models](#models)
 
 - [Authentication](#authentication)
@@ -524,6 +530,133 @@ flagged `tls_unverified` for broken certificate chains. 401/402/451 are
 never bypassed. Oversized pages (≥ 2 MB) can be distilled to their
 important content by Gemini (`CrawlSpec.distill`) with an extractive
 fallback.
+
+---
+
+## Dynamic pages and job API
+
+Some pages are not HTML until a browser runs: empty `<app-root>` shells,
+"enable JavaScript" walls, and dashboards. The HTTP ladder stays first —
+it is 100× cheaper — and a headless browser is the fallback, not the
+default.
+
+**Playwright rendering** (`pip install playwright && playwright install
+chromium`, optional): `freegem.playwright_fetcher` renders with an isolated
+browser context per fetch (no shared cookies, storage, or service
+workers), selector/network waits, optional screenshots, PDFs (chromium),
+and traces, with `finally`-guaranteed cleanup. `fetch_http_first()` runs
+the guarded HTTP fetch and falls back to the browser when the body is a
+JS shell.
+
+**Session profiles** (`freegem.session_profiles`): named storage-state
+profiles (cookies + origins, Playwright-compatible) under
+`~/.config/freegem/profiles/`, with `expires_at` enforced on load,
+playwright export, and `http.cookiejar` export for the HTTP face.
+Credentials live where you put them — the directory is user-owned, and
+`export`/`delete` are explicit.
+
+**Job API** (REST, optional bearer auth): submit work, poll, download
+artifacts:
+
+```bash
+# start the server with an API key for the job surface
+FREEGEM_API_KEY=sk-local-1 freegem serve
+
+# submit a dynamic render job
+curl -s -X POST http://127.0.0.1:8081/v1/jobs \
+  -H "Authorization: Bearer sk-local-1" -H "Content-Type: application/json" \
+  -d '{"type": "playwright", "params": {"url": "https://spa.example.org",
+       "wait_selector": "#main", "capture_screenshot": true}}'
+
+# poll and download
+curl -s -H "Authorization: Bearer sk-local-1" http://127.0.0.1:8081/v1/jobs/<id>/results
+curl -s -H "Authorization: Bearer sk-local-1" -o shot.png http://127.0.0.1:8081/v1/artifacts/<artifact_id>
+```
+
+Job types: `scrape`, `research`, `playwright`, `document` (PDF/DOCX
+adapters), `extract` (schema-constrained LLM extraction, below),
+`selenium` (Grid adapter, below). Every job carries request ids, retry
+traces, and lands in the audit log; `GET /v1/jobs` lists recent work,
+`GET /health` reports liveness, `GET /metrics` the counters. The same
+operations are exposed to MCP clients through four narrow, auth-gated
+tools (`freegem_submit_job`, `freegem_get_job`, `freegem_get_artifact`,
+`freegem_manage_profile`); the api key may also come from the `api_key`
+config field (see [Authentication](#authentication)).
+
+## Adapters and pipelines
+
+Everything below is stdlib-first: the optional heavy dependencies
+(`playwright`, `selenium`, `redis`, `pika`, `psycopg`, `boto3`) import
+lazily and raise a named error with the pip line, never an ImportError
+traceback. Nothing here phones home by itself.
+
+**Text pipeline** (`freegem.text_pipeline`) — paragraph-aware chunking
+with overlap, idf-weighted relevance selection to spend prompt budget on
+the right 5% of a page, a deterministic extractive summarizer (real
+sentences, no generation), and `CostQualityTelemetry` (chars in/out,
+chunks made/selected, token estimates, reduction ratio) so "what did this
+page cost" is a dict, not a guess.
+
+**Schema-constrained extraction** (`freegem.llm_extract`) — declare typed
+fields (`string|integer|number|boolean|array|enum`), get JSON Schema for
+APIs and an instruction block for models; answers are validated and
+REPAIRED (stringified numbers coerced, unknown keys dropped, enum
+violations reported) with one complaint-driven retry before a required
+field is allowed to fail. Providers are neutral: the bridge's own
+`generate()` (default), any OpenAI-compatible endpoint via stdlib urllib,
+or a `NullProvider` for pipeline tests. Reachable as the `extract` job
+type.
+
+**Queues** (`freegem.queues`) — one `WorkQueue` face over `memory://`,
+`sqlite:///path` (durable, crash-safe, `recover()` requeues unacked work
+after a restart), `redis://` (optional `redis`), and `amqp://` (optional
+`pika`). `open_queue(url)` dispatches on scheme; reserve/ack/nack is the
+whole contract.
+
+**Document and blob stores** (`freegem.stores`) — documents:
+`sqlite:///path` (default) or PostgreSQL (optional `psycopg` v2/v3,
+JSONB metadata, server-side containment queries). Blobs: content-addressed
+files (`ab/<sha256[:2]>/<sha256>`, the same layout the crawl runner uses)
+or S3 (optional `boto3`, prefix-partitioned). `open_document_store` /
+`open_blob_store` dispatch on scheme.
+
+**Near-duplicate detection** (`freegem.dedup`) — 64-bit simhash over word
+5-shingles with a jaccard verification pass, so mirrors and boilerplate
+reprints collapse while genuinely different pages survive a fingerprint
+collision. `add()` returns False and names the original for duplicates.
+
+**Search sinks** (`freegem.search_sinks`) — `SqliteFtsSink` (FTS5 with a
+LIKE fallback on FTS-less builds), `JsonlSink` (append-only log +
+tf-idf ranking), and `NullSink`. Re-upserting a doc id replaces — a
+recrawl updates, it does not duplicate.
+
+**Adaptive recrawling** (`freegem.crawler.scheduling`) — per-URL change
+history in the frontier's SQLite file; unchanged pages double their
+interval toward the max, frequently-changing pages shrink toward the min;
+recrawl probes send `If-None-Match` / `If-Modified-Since` so unchanged
+pages cost a 304. Plans are inspectable (`recrawl_candidates`) before
+they touch `next_attempt_at`.
+
+**Source adapters** (`freegem.crawler.sources`) — MediaWiki
+(`action=query`), arXiv (Atom API), RSS/Atom feeds (stdlib XML), and
+documentation sites (sitemap.xml) turn a site's structured front door
+into a seed list; `detect_source()` picks the adapter from the URL.
+Adapters return `SourceItem` records — they never fetch page bodies, so
+every guard stays in the runner.
+
+**Discovery and prioritization** (`freegem.crawler.discovery`) —
+`discover_js_endpoints()` lifts `fetch()`/axios/XHR API endpoints and
+links out of the page's own markup and scripts (no execution); `score_url`
++ `BestFirstPrioritizer` rank the frontier: docs/api/guide paths and
+same-origin near-root pages first, login walls, media files, and mobile
+duplicates last. Deterministic scores, floored at zero, explainable by
+construction.
+
+**Selenium/Grid adapter** (`freegem.selenium_fetcher`) — the Playwright
+alternative for deployments that already run a Grid: fresh session per
+fetch on a Grid node (`grid_url`) or local chromium, waits, screenshots,
+CDP `Page.printToPDF`, storage-state seeding shared with session
+profiles. Reachable as the `selenium` job type.
 
 ---
 

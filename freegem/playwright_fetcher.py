@@ -7,12 +7,11 @@ resource cleanup.
 
 from __future__ import annotations
 
-import contextlib
 import os
 import tempfile
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 from .config import BridgeConfig
 from .crawler.fetch import FetchOutcome, crawl_fetch
@@ -175,9 +174,11 @@ def should_fallback_to_browser(outcome: FetchOutcome | None, text_content: str |
         text_content = outcome.text()
     # Check for client-side empty shell or typical SPA JS placeholder
     stripped = text_content.strip()
-    if len(stripped) < 200 and ("<script" in text_content.lower() or "enable javascript" in text_content.lower() or "app-root" in text_content.lower()):
-        return True
-    return False
+    return len(stripped) < 200 and (
+        "<script" in text_content.lower()
+        or "enable javascript" in text_content.lower()
+        or "app-root" in text_content.lower()
+    )
 
 
 def fetch_http_first(
@@ -197,7 +198,7 @@ def fetch_http_first(
         return None, res
 
     # 1. Standard guarded HTTP fetch
-    http_outcome = crawl_fetch(url, cfg)
+    http_outcome = crawl_fetch(cfg, url)
 
     # 2. Check if browser fallback is needed
     if is_playwright_available() and should_fallback_to_browser(http_outcome):

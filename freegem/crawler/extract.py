@@ -638,14 +638,13 @@ def extract_metadata(dom: HtmlDom, *, base_url: str = "") -> dict[str, Any]:
 def html_to_markdown(dom_or_html: HtmlDom | str, *, base_url: str = "") -> str:
     """Convert HTML DOM or raw HTML into clean structured Markdown."""
     if isinstance(dom_or_html, str):
-        dom = HtmlDom(); dom.feed(dom_or_html)
+        dom = HtmlDom()
+        dom.feed(dom_or_html)
     else:
         dom = dom_or_html
 
     if not dom or not dom.root:
         return ""
-
-    lines: list[str] = []
 
     def _render(node: Node) -> str:
         tag = node.tag.lower()

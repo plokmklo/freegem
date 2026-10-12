@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import socket
 import struct
 import threading
@@ -23,8 +24,8 @@ from typing import Any
 from . import __version__
 from .config import BridgeConfig
 from .gemini import BridgeError, generate, generate_stream, log
-from .metrics import ServerMetrics, new_request_id, record_audit_event, get_audit_logs
-from .jobs import GLOBAL_JOB_MANAGER, Job, Artifact
+from .jobs import GLOBAL_JOB_MANAGER, Job
+from .metrics import ServerMetrics, new_request_id, record_audit_event
 from .models import MODELS, resolve_model
 from .multimodal import detect_image_mime, fetch_image_bytes, upload_image
 from .tools import (
@@ -194,7 +195,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
         if not self._authenticate_request():
             return
 
-        raw = self.read_body()
+        raw = self._read_body()
         if raw is None:
             return
         try:
@@ -214,7 +215,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
         self.send_json(job.to_dict(), 202)
 
     def _run_job_background(self, job: Job, cfg: BridgeConfig) -> None:
-        def _worker():
+        def _worker() -> None:
             GLOBAL_JOB_MANAGER.update_job_status(job.id, "processing")
             client_ip = getattr(self, "client_address", ("127.0.0.1",))[0]
             req_id = getattr(self, "_request_id", "")
@@ -223,18 +224,25 @@ class GeminiHandler(BaseHTTPRequestHandler):
             try:
                 if job.type == "scrape":
                     from .web_scraper import scrape_page
-                    url = job.params.get("url", "")
-                    res = scrape_page(url, cfg)
+                    url = str(job.params.get("url", ""))
+                    scraped = scrape_page(cfg, url)
                     GLOBAL_JOB_MANAGER.update_job_status(
-                        job.id, "completed", result={"url": res.url, "title": res.title, "text": res.text, "links": res.links}
+                        job.id, "completed", result={"url": scraped.url, "title": scraped.title, "text": scraped.text, "links": scraped.links}
                     )
                 elif job.type == "research":
-                    from .web_research import research
-                    topic = job.params.get("topic", "")
-                    res = research(cfg, topic)
-                    GLOBAL_JOB_MANAGER.update_job_status(job.id, "completed", result=res)
+                    import json as _json
+
+                    from .web_research import render_json, research
+                    topic = str(job.params.get("topic", ""))
+                    urls = [str(u) for u in job.params.get("urls", [])]
+                    if not topic and not urls:
+                        GLOBAL_JOB_MANAGER.update_job_status(job.id, "failed", error="topic or urls is required")
+                        return
+                    researched = research(cfg, topic or urls[0], urls)
+                    payload = _json.loads(render_json(researched))
+                    GLOBAL_JOB_MANAGER.update_job_status(job.id, "completed", result=payload)
                 elif job.type == "playwright":
-                    from .playwright_fetcher import fetch_with_playwright, PlaywrightOptions
+                    from .playwright_fetcher import PlaywrightOptions, fetch_with_playwright
                     opts = PlaywrightOptions(**job.params)
                     pw_res = fetch_with_playwright(opts)
                     art_ids = []
@@ -261,6 +269,70 @@ class GeminiHandler(BaseHTTPRequestHandler):
                     doc_res = parse_document(doc_data, filename)
                     GLOBAL_JOB_MANAGER.update_job_status(
                         job.id, "completed", result={"text": doc_res.text, "markdown": doc_res.markdown, "metadata": doc_res.metadata}
+                    )
+                elif job.type == "extract":
+                    # Schema-constrained LLM extraction (2.8.0): optional
+                    # text_pipeline pre-selection keeps the prompt small.
+                    from .llm_extract import (
+                        BridgeProvider,
+                        ExtractionSchema,
+                        FieldSpec,
+                        extract_structured,
+                    )
+
+                    specs = []
+                    for f in job.params.get("fields", []):
+                        specs.append(
+                            FieldSpec(
+                                name=str(f.get("name", "")),
+                                type=str(f.get("type", "string")),
+                                description=str(f.get("description", "")),
+                                required=bool(f.get("required", True)),
+                                enum=tuple(str(x) for x in f.get("enum", ())),
+                                items_type=str(f.get("items_type", "string")),
+                            )
+                        )
+                    if not specs:
+                        GLOBAL_JOB_MANAGER.update_job_status(job.id, "failed", error="fields[] is required")
+                        return
+                    schema = ExtractionSchema(name=str(job.params.get("schema_name", "extraction")), fields=tuple(specs))
+                    text = str(job.params.get("text", ""))
+                    chunk_query = str(job.params.get("select_query", "") or "")
+                    if chunk_query and len(text) > 50_000:
+                        from .text_pipeline import chunk_text, select_relevant
+
+                        chunks = chunk_text(text, max_chars=8_000)
+                        picked = select_relevant(chunks, chunk_query, k=4)
+                        text = "\n\n".join(c.text for c in picked) if picked else text[:50_000]
+                    clean, problems = extract_structured(
+                        schema, text, BridgeProvider(cfg), max_repairs=int(job.params.get("max_repairs", 1))
+                    )
+                    GLOBAL_JOB_MANAGER.update_job_status(
+                        job.id, "completed", result={"data": clean, "problems": problems}
+                    )
+                elif job.type == "selenium":
+                    from .selenium_fetcher import SeleniumOptions, fetch_with_selenium
+
+                    allowed = {
+                        "url", "grid_url", "wait_selector", "implicit_wait_sec", "page_load_timeout_sec",
+                        "viewport_width", "viewport_height", "user_agent", "storage_state",
+                        "capture_screenshot", "screenshot_path", "capture_pdf", "pdf_path",
+                    }
+                    sel_opts = SeleniumOptions(**{k: v for k, v in job.params.items() if k in allowed})
+                    sel_res = fetch_with_selenium(sel_opts)
+                    art_ids = []
+                    if sel_res.screenshot_path and os.path.exists(sel_res.screenshot_path):
+                        art = GLOBAL_JOB_MANAGER.save_artifact(job.id, "screenshot.png", "image/png", sel_res.screenshot_path)
+                        art_ids.append(art.id)
+                    if sel_res.pdf_path and os.path.exists(sel_res.pdf_path):
+                        art = GLOBAL_JOB_MANAGER.save_artifact(job.id, "document.pdf", "application/pdf", sel_res.pdf_path)
+                        art_ids.append(art.id)
+                    GLOBAL_JOB_MANAGER.update_job_status(
+                        job.id,
+                        "completed" if sel_res.ok else "failed",
+                        result={"url": sel_res.url, "final_url": sel_res.final_url, "title": sel_res.title,
+                                "text": sel_res.text, "artifact_ids": art_ids},
+                        error=sel_res.error,
                     )
                 else:
                     GLOBAL_JOB_MANAGER.update_job_status(job.id, "failed", error=f"Unknown job type {job.type!r}")

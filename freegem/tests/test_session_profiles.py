@@ -1,22 +1,26 @@
-"""Tests for session/storage-state profiles."""
+"""Tests for session/storage-state profiles (session_profiles.py)."""
+
+from __future__ import annotations
 
 import tempfile
 import time
 import unittest
+from http.cookiejar import Cookie
 from pathlib import Path
+from typing import Any
 
 from freegem.session_profiles import ProfileManager, SessionProfile
 
 
 class TestSessionProfiles(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.mgr = ProfileManager(storage_dir=self.temp_dir.name)
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def test_save_and_get_profile(self):
+    def test_save_and_get_profile(self) -> None:
         prof = SessionProfile(
             name="test-user",
             cookies=[{"name": "sid", "value": "12345", "domain": "example.com", "path": "/"}],
@@ -27,13 +31,13 @@ class TestSessionProfiles(unittest.TestCase):
         self.assertTrue(Path(saved_path).exists())
 
         loaded = self.mgr.get_profile("test-user")
-        self.assertIsNotNone(loaded)
+        assert loaded is not None
         self.assertEqual(loaded.name, "test-user")
         self.assertEqual(len(loaded.cookies), 1)
         self.assertEqual(loaded.cookies[0]["value"], "12345")
         self.assertFalse(loaded.is_expired())
 
-    def test_expired_profile(self):
+    def test_expired_profile(self) -> None:
         prof = SessionProfile(
             name="expired-user",
             cookies=[],
@@ -46,10 +50,10 @@ class TestSessionProfiles(unittest.TestCase):
 
         # Should be accessible if include_expired=True
         loaded = self.mgr.get_profile("expired-user", include_expired=True)
-        self.assertIsNotNone(loaded)
+        assert loaded is not None
         self.assertTrue(loaded.is_expired())
 
-    def test_list_and_delete_profile(self):
+    def test_list_and_delete_profile(self) -> None:
         prof1 = SessionProfile(name="p1")
         prof2 = SessionProfile(name="p2")
         self.mgr.save_profile(prof1)
@@ -65,7 +69,7 @@ class TestSessionProfiles(unittest.TestCase):
         self.assertEqual(len(profiles_after), 1)
         self.assertEqual(profiles_after[0]["name"], "p2")
 
-    def test_export_adapters(self):
+    def test_export_adapters(self) -> None:
         prof = SessionProfile(
             name="export-test",
             cookies=[{"name": "session", "value": "xyz", "domain": ".example.com", "path": "/"}],
@@ -73,17 +77,18 @@ class TestSessionProfiles(unittest.TestCase):
         )
         self.mgr.save_profile(prof)
 
-        pw_state = self.mgr.export_playwright_storage_state("export-test")
-        self.assertIsNotNone(pw_state)
+        pw_state: dict[str, Any] | None = self.mgr.export_playwright_storage_state("export-test")
+        assert pw_state is not None
         self.assertEqual(len(pw_state["cookies"]), 1)
         self.assertEqual(len(pw_state["origins"]), 1)
 
         jar = self.mgr.export_cookie_jar("export-test")
-        self.assertIsNotNone(jar)
+        assert jar is not None
         cookies_list = list(jar)
         self.assertEqual(len(cookies_list), 1)
-        self.assertEqual(cookies_list[0].name, "session")
-        self.assertEqual(cookies_list[0].value, "xyz")
+        cookie: Cookie = cookies_list[0]
+        self.assertEqual(cookie.name, "session")
+        self.assertEqual(cookie.value, "xyz")
 
 
 if __name__ == "__main__":

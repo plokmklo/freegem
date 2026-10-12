@@ -1,24 +1,25 @@
 """Tests for PDF/DOCX adapters, rich metadata extraction, and Markdown conversion."""
 
 import unittest
+
 from freegem.adapters import parse_docx, parse_pdf
 from freegem.crawler.extract import extract_metadata, html_to_markdown
 from freegem.crawler.hardening import HtmlDom
 
 
 class TestAdaptersAndExtractors(unittest.TestCase):
-    def test_pdf_adapter_fallback(self):
+    def test_pdf_adapter_fallback(self) -> None:
         sample_pdf_bytes = b"%PDF-1.4 ... (Hello World) Tj ..."
         res = parse_pdf(sample_pdf_bytes)
         self.assertEqual(res.doc_type, "pdf")
         self.assertIn("Hello World", res.text)
 
-    def test_docx_adapter(self):
+    def test_docx_adapter(self) -> None:
         res = parse_docx(b"not a real zip")
         self.assertEqual(res.doc_type, "docx")
         self.assertIn("Failed", res.text)
 
-    def test_extract_metadata(self):
+    def test_extract_metadata(self) -> None:
         html_doc = """
         <html lang="en">
           <head>
@@ -52,7 +53,7 @@ class TestAdaptersAndExtractors(unittest.TestCase):
         self.assertEqual(len(meta["json_ld"]), 1)
         self.assertEqual(meta["json_ld"][0]["headline"], "Test")
 
-    def test_html_to_markdown(self):
+    def test_html_to_markdown(self) -> None:
         html_doc = """
         <html>
           <body>

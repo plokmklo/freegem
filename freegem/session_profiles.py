@@ -84,7 +84,7 @@ class ProfileManager:
             return None
 
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, encoding="utf-8") as f:
                 data = json.load(f)
             profile = SessionProfile.from_dict(data)
             if not include_expired and profile.is_expired():
@@ -99,7 +99,7 @@ class ProfileManager:
         now = time.time()
         for path in self.storage_dir.glob("*.json"):
             try:
-                with open(path, "r", encoding="utf-8") as f:
+                with open(path, encoding="utf-8") as f:
                     data = json.load(f)
                 profile = SessionProfile.from_dict(data)
                 results.append({
