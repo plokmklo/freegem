@@ -29,6 +29,7 @@ Security posture, in order of what bites first:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import threading
@@ -48,6 +49,7 @@ from .ssrf import SSRFRefused, build_guarded_opener, url_allowed
 
 __all__ = [
     "DEFAULT_MAX_CHARS",
+    "BatchItem",
     "RobotsCache",
     "ScrapeError",
     "ScrapeResult",
@@ -56,22 +58,31 @@ __all__ = [
     "format_page",
     "run_scrape_tool",
     "scrape_cli",
+    "scrape_many",
     "scrape_page",
 ]
 
 #: Wire and decompressed-size cap. A hostile server can lie about
 #: Content-Length or stream forever; reading in chunks and stopping at the cap
-#: is the only trustworthy limit.
-_MAX_BYTES = 5 * 1024 * 1024
+#: is the only trustworthy limit. Raised 5 MB -> 100 MB (2.9): huge homepages
+#: (cnn.com) and big reference pages died at 5 MB with a cap error instead of
+#: being read. The cap is still enforced while READING and while
+#: DECOMPRESSING, so a gzip bomb dies at the cap, not in swap.
+_MAX_BYTES = 100 * 1024 * 1024
 
 #: Read chunk size for the capped reader.
 _CHUNK = 64 * 1024
 
-#: Default character budget for extracted text.
-DEFAULT_MAX_CHARS = 20_000
+#: Default character budget for extracted text. Raised 20,000 -> 50,000
+#: (2.9): the old default truncated long pages before the interesting part
+#: (Hacker News threads, API references) and starved ``--ask`` questions of
+#: signal. 50k characters is still well inside one prompt budget.
+DEFAULT_MAX_CHARS = 50_000
 
 #: Upper bound for max_chars, whatever the caller asked for. A single tool
 #: call stuffing megabytes of page text into one prompt is its own accident.
+#: ``--ask`` questions are auto-raised to exactly this limit when the caller
+#: did not set one: asking a question IS the request for more content.
 _MAX_CHARS_HARD_LIMIT = 200_000
 
 #: Minimum extracted characters for a <main>/role=main region to be
@@ -79,9 +90,15 @@ _MAX_CHARS_HARD_LIMIT = 200_000
 #: one-line teaser) must not win over the full page.
 _MAIN_CONTENT_MIN_CHARS = 200
 
-#: Honest User-Agent: scraping with a spoofed browser UA is somebody else's
-#: decision to make; sites that block non-browser agents stay blocked.
-_UA = "freegem-web-scraper/2.1 (+https://github.com/plokmklo/freegem)"
+#: Honest default User-Agent. The first request to any site identifies
+#: freegem. When that request is refused (403/405/401/...), the smart-fetch
+#: ladder in :mod:`freegem.smart_fetch` retries through legitimate read
+#: paths -- a browser-identifying client, the r.jina.ai public reader, the
+#: Internet Archive -- and remembers which path worked per host. That is
+#: still not anti-bot evasion: no CAPTCHA is ever solved, no challenge is
+#: answered, no identity is rotated. A page that insists on a CAPTCHA stays
+#: unread, and the failure taxonomy says exactly that.
+_UA = "freegem-web-scraper/2.9 (+https://github.com/plokmklo/freegem)"
 
 _ALLOWED_TYPES = ("text/html", "application/xhtml+xml", "text/plain")
 
@@ -154,9 +171,20 @@ def extraction_quality(text: str) -> str:
 # ─── fetching ─────────────────────────────────────────────────────────────────
 
 
-def _fetch(cfg: BridgeConfig, url: str, timeout: float = 30) -> Any:
-    """GET one URL through the guarded opener. Raises ScrapeError on refusal."""
-    request = urllib.request.Request(url, headers={"User-Agent": _UA, "Accept-Encoding": "gzip"})
+def _fetch(
+    cfg: BridgeConfig, url: str, timeout: float = 30, headers: dict[str, str] | None = None
+) -> Any:
+    """GET one URL through the guarded opener. Raises ScrapeError on refusal.
+
+    ``headers`` replaces the default header set entirely -- it is how the
+    smart-fetch ladder's browser-identifying retry differs from the honest
+    first attempt. Callers passing None get the freegem-identifying client.
+    """
+    request_headers = {"User-Agent": _UA, "Accept-Encoding": "gzip"}
+    if headers:
+        request_headers = dict(headers)
+        request_headers.setdefault("Accept-Encoding", "gzip")
+    request = urllib.request.Request(url, headers=request_headers)
     try:
         return build_guarded_opener(cfg.proxy, _ssl_ctx()).open(request, timeout=timeout)
     except SSRFRefused as exc:
@@ -513,7 +541,10 @@ def _clean_text(parts: list[str]) -> str:
 
 #: Substrings that mark where a page's real content region starts. Checked in
 #: order: MediaWiki skins first (the language lists and tool tabs that drown
-#: wiki articles live OUTSIDE these), then the generic HTML landmarks.
+#: wiki articles live OUTSIDE these), then the generic HTML landmarks, then
+#: site-specific content ids (``hnmain`` is Hacker News' whole-page container;
+#: without it HN fell through to the aggressive whole-page chrome stripper and
+#: lost most of the thread).
 _MAIN_ANCHORS = (
     'id="mw-content-text"',
     "id='mw-content-text'",
@@ -523,6 +554,8 @@ _MAIN_ANCHORS = (
     "class='mw-parser-output'",
     "<main",
     'role="main"',
+    'id="hnmain"',
+    "id='hnmain'",
 )
 
 
@@ -654,6 +687,61 @@ def _mediawiki_article(url: str) -> tuple[str, str] | None:
     return canonical, title
 
 
+def _mediawiki_parse_extract(
+    cfg: BridgeConfig, url: str, canonical: str, title: str, max_chars: int
+) -> ScrapeResult | None:
+    """FULL article text through the site's ``action=parse`` API.
+
+    The ``prop=extracts`` API (below) returns a plain-text extract that the
+    extension itself caps -- on long articles tens of thousands of
+    characters never make it out, which is exactly the gap a reader service
+    exploits to look "better" on Wikipedia. ``action=parse`` returns the
+    complete rendered HTML of the article, tables and all; the same
+    extractor used for ordinary pages turns that into text. Returns None on
+    ANY failure so the caller falls back to the extracts path -- this
+    upgrade must never make a wiki page LESS readable than before.
+    """
+    api_url = f"https://{canonical}/w/api.php?" + urllib.parse.urlencode(
+        {
+            "action": "parse",
+            "format": "json",
+            "formatversion": "2",
+            "prop": "text",
+            "redirects": "1",
+            "page": title,
+        }
+    )
+    try:
+        response = _fetch(cfg, api_url)
+        data = json.loads(
+            _decode_body(_read_capped(response), response.headers.get("Content-Type") or "")
+        )
+    except (ScrapeError, ValueError) as exc:
+        log(cfg, f"mediawiki parse API unavailable for {title!r}: {exc}")
+        return None
+    parse = data.get("parse") if isinstance(data, dict) else None
+    html = parse.get("text") if isinstance(parse, dict) else None
+    if not isinstance(html, str) or not html.strip():
+        return None
+    extractor = _parse_html(cfg, url, html)
+    text = _clean_text(extractor.text_parts)
+    if len(text) < _MAIN_CONTENT_MIN_CHARS:
+        return None  # parse produced a stub; let the extracts path try
+    truncated = len(text) > max_chars
+    if truncated:
+        text = text[:max_chars].rstrip()
+    parse_title = parse.get("title") if isinstance(parse, dict) else None
+    return ScrapeResult(
+        url=url,
+        title=str(parse_title or title),
+        text=text,
+        truncated=truncated,
+        links=_dedupe_links(extractor.links),
+        via="mediawiki-api-parse",
+        last_modified=None,
+    )
+
+
 def _mediawiki_extract(cfg: BridgeConfig, url: str, max_chars: int) -> ScrapeResult | None:
     """Fetch a MediaWiki article through the site's own Action API.
 
@@ -662,11 +750,17 @@ def _mediawiki_extract(cfg: BridgeConfig, url: str, max_chars: int) -> ScrapeRes
     agents -- it welcomes article pages instead), in which case the caller
     falls back to the guarded HTML path. Raises ScrapeError when the URL IS
     an article, robots allows the API, and the API call still fails.
+
+    The full-parse path is tried first (whole article, tables included);
+    the plain-text extract API is the fallback.
     """
     hit = _mediawiki_article(url)
     if hit is None:
         return None
     canonical, title = hit
+    full = _mediawiki_parse_extract(cfg, url, canonical, title, max_chars)
+    if full is not None:
+        return full
     api_url = f"https://{canonical}/w/api.php?" + urllib.parse.urlencode(
         {
             "action": "query",
@@ -674,6 +768,8 @@ def _mediawiki_extract(cfg: BridgeConfig, url: str, max_chars: int) -> ScrapeRes
             "formatversion": "2",
             "prop": "extracts",
             "explaintext": "1",
+            "exlimit": "1",
+            "exsectionformat": "plain",
             "redirects": "1",
             "titles": title,
         }
@@ -734,6 +830,11 @@ def scrape_page(
     *,
     max_chars: int = DEFAULT_MAX_CHARS,
     ignore_robots: bool = True,
+    headers_override: dict[str, str] | None = None,
+    cache: Any | None = None,
+    refresh: bool = False,
+    smart: bool = False,
+    progress: Any | None = None,
 ) -> ScrapeResult:
     """Fetch one page and extract readable text. Raises ScrapeError when refused.
 
@@ -741,6 +842,17 @@ def scrape_page(
     attacker-controlled text from the same origin as the pages being read and
     a documented prompt-injection/policy-poisoning vector against scrapers
     and AI agents. Pass ``ignore_robots=False`` to opt back into honoring it.
+
+    ``cache`` (a :class:`~freegem.web_research.ResearchCache`) makes the
+    result reusable across research AND one-shot scrapes: a hit short-circuits
+    the network entirely, ``refresh=True`` refetches and rewrites the entry.
+    ``headers_override`` replaces the request headers (the smart-fetch
+    ladder's browser-identifying retry uses this).
+
+    ``smart=True`` engages the :mod:`freegem.smart_fetch` fallback ladder
+    when the direct fetch is refused (403/405/401/...): legitimate alternate
+    read paths, tried in order, with the working path remembered per host.
+    ``progress`` receives human-readable status lines as the ladder walks.
     """
     try:
         url = url_allowed(url)
@@ -749,13 +861,79 @@ def scrape_page(
     if not ignore_robots:
         _check_robots(cfg, url)
 
+    if cache is not None and not refresh:
+        cached = cache.get(url)
+        if cached is not None:
+            text = cached["text"]
+            truncated = len(text) > max_chars
+            if truncated:
+                text = text[:max_chars].rstrip()
+            return ScrapeResult(
+                url=url,
+                title=cached["title"],
+                text=text,
+                truncated=truncated,
+                via="cache",
+                last_modified=cached.get("last_modified"),
+            )
+
+    try:
+        result = _scrape_page_uncached(
+            cfg,
+            url,
+            max_chars=max_chars,
+            headers_override=headers_override,
+        )
+    except ScrapeError as exc:
+        if not smart:
+            raise
+        # Lazy import: smart_fetch wraps this module, so the cycle must be
+        # broken at call time.
+        from .smart_fetch import fallback_scrape
+
+        return fallback_scrape(
+            cfg,
+            url,
+            max_chars=max_chars,
+            ignore_robots=ignore_robots,
+            first_error=str(exc),
+            progress=progress,
+        )
+    if smart and not result.text.strip() and result.via in ("html", "cache"):
+        # A 200 with zero readable text is a JS shell or a chrome-only
+        # page, not a success. Say what happened and try the ladder;
+        # a page that only LOOKS fetched is worse than an honest error.
+        from .smart_fetch import fallback_scrape
+
+        return fallback_scrape(
+            cfg,
+            url,
+            max_chars=max_chars,
+            ignore_robots=ignore_robots,
+            first_error="direct fetch returned HTTP 200 but zero readable text",
+            progress=progress,
+        )
+
+    if cache is not None:
+        cache.put(url, result.title, result.text, result.last_modified)
+    return result
+
+
+def _scrape_page_uncached(
+    cfg: BridgeConfig,
+    url: str,
+    *,
+    max_chars: int,
+    headers_override: dict[str, str] | None,
+) -> ScrapeResult:
+    """The direct fetch path: adapter first, then guarded HTML."""
     # Structured-source adapters first: when the site offers an official API
     # for this URL, that beats extracting HTML (and honors the same guard).
     adapted = _mediawiki_extract(cfg, url, max_chars)
     if adapted is not None:
         return adapted
 
-    response = _fetch(cfg, url)
+    response = _fetch(cfg, url, headers=headers_override)
     content_type = (response.headers.get("Content-Type") or "").strip()
     mime = content_type.split(";")[0].strip().lower()
     if mime and mime not in _ALLOWED_TYPES:
@@ -853,19 +1031,159 @@ def scrape_cli(
     max_chars: int = DEFAULT_MAX_CHARS,
     question: str | None = None,
     ignore_robots: bool = True,
+    smart: bool = True,
+    cache: Any | None = None,
+    refresh: bool = False,
+    progress: Any | None = None,
 ) -> str:
-    """One-shot scrape for the CLI: formatted page, or an answer to ``question``."""
-    result = scrape_page(cfg, url, max_chars=max_chars, ignore_robots=ignore_robots)
+    """One-shot scrape for the CLI: formatted page, or an answer to ``question``.
+
+    ``question`` implies the hard-limit character budget when the caller did
+    not choose one explicitly -- asking a question against a truncated page
+    guarantees a useless answer, so question mode reads the whole page. An
+    explicitly different ``max_chars`` is always respected.
+    """
+    if question and max_chars == DEFAULT_MAX_CHARS:
+        max_chars = _MAX_CHARS_HARD_LIMIT
+    result = scrape_page(
+        cfg,
+        url,
+        max_chars=max_chars,
+        ignore_robots=ignore_robots,
+        smart=smart,
+        cache=cache,
+        refresh=refresh,
+        progress=progress,
+    )
     page = format_page(result, include_links=include_links)
     if question:
         return _ask_gemini(cfg, question, page)
     return page
 
 
+#: Upper bound for one batch: a CLI one-shot is not a crawler, and the
+#: bounded pool below is sized for interactive waits, not a fleet.
+_SCRAPE_MANY_MAX = 100
+
+#: politeness pause between per-host fallback attempts inside the ladder.
+_SCRAPE_MANY_DELAY_SEC = 0.2
+
+
+def _host_locks_for(urls: list[str]) -> dict[str, threading.Lock]:
+    locks: dict[str, threading.Lock] = {}
+    for url in urls:
+        try:
+            host = urllib.parse.urlsplit(url).hostname or ""
+        except ValueError:
+            host = ""
+        if host and host not in locks:
+            locks[host] = threading.Lock()
+    return locks
+
+
+@dataclass
+class BatchItem:
+    """One URL's outcome in a batch scrape -- success or an honest error."""
+
+    url: str
+    ok: bool = False
+    title: str = ""
+    text: str = ""
+    chars: int = 0
+    via: str = ""
+    truncated: bool = False
+    error: str = ""
+
+    def as_dict(self, *, include_text: bool = True) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "url": self.url,
+            "ok": self.ok,
+            "title": self.title,
+            "chars": self.chars,
+            "via": self.via,
+            "truncated": self.truncated,
+        }
+        if self.ok and include_text:
+            data["text"] = self.text
+        if not self.ok:
+            data["error"] = self.error
+        return data
+
+
+def scrape_many(
+    cfg: BridgeConfig,
+    urls: list[str],
+    *,
+    max_chars: int = DEFAULT_MAX_CHARS,
+    ignore_robots: bool = True,
+    smart: bool = True,
+    cache: Any | None = None,
+    refresh: bool = False,
+    concurrency: int = 4,
+    progress: Any | None = None,
+) -> list[BatchItem]:
+    """Fetch several URLs through a bounded pool, one result per URL, in order.
+
+    The same pool discipline as research fetches: ``concurrency`` workers
+    across distinct hosts, per-host locks serializing same-origin fetches,
+    one failed URL recorded (with its error) instead of killing the batch.
+    Results keep the caller's URL order regardless of completion order.
+    """
+    if len(urls) > _SCRAPE_MANY_MAX:
+        raise ValueError(
+            f"batch scrape is capped at {_SCRAPE_MANY_MAX} URLs per run; got {len(urls)}"
+        )
+    concurrency = max(1, min(concurrency, 16))
+    locks = _host_locks_for(urls)
+    items: list[BatchItem | None] = [None] * len(urls)
+
+    def work(url: str) -> BatchItem:
+        lock = locks.get(urllib.parse.urlsplit(url).hostname or "")
+        guard: Any = lock if lock is not None else contextlib.nullcontext()
+        with guard:
+            try:
+                page = scrape_page(
+                    cfg,
+                    url,
+                    max_chars=max_chars,
+                    ignore_robots=ignore_robots,
+                    smart=smart,
+                    cache=cache,
+                    refresh=refresh,
+                    progress=progress,
+                )
+            except ScrapeError as exc:
+                return BatchItem(url=url, ok=False, error=str(exc))
+            except Exception as exc:  # a hostile page must not kill the batch
+                return BatchItem(url=url, ok=False, error=f"{type(exc).__name__}: {exc}")
+            return BatchItem(
+                url=url,
+                ok=True,
+                title=page.title,
+                text=page.text,
+                chars=len(page.text),
+                via=page.via,
+                truncated=page.truncated,
+            )
+
+    if concurrency == 1 or len(urls) <= 1:
+        items = [work(url) for url in urls]
+        return [item for item in items if item is not None]
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="scrape-many") as pool:
+        futures = [pool.submit(work, url) for url in urls]
+        for position, future in enumerate(futures):
+            items[position] = future.result()
+    return [item for item in items if item is not None]
+
+
 def run_scrape_tool(cfg: BridgeConfig, arguments: dict[str, Any]) -> str:
     """MCP ``web_scrape`` dispatch. robots.txt is not consulted here either:
     it is attacker-controlled text and a prompt-injection vector against the
-    agent itself (see the module docstring)."""
+    agent itself (see the module docstring). The smart-fetch ladder is on:
+    a refusal from the honest first attempt walks the alternate read paths."""
     url = str(arguments.get("url") or "").strip()
     if not url:
         raise ValueError("web_scrape requires a 'url' argument")
@@ -882,4 +1200,5 @@ def run_scrape_tool(cfg: BridgeConfig, arguments: dict[str, Any]) -> str:
         max_chars=max_chars,
         question=question,
         ignore_robots=True,
+        smart=arguments.get("smart", True) is not False,
     )

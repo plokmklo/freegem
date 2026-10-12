@@ -8,6 +8,7 @@ One command runs either face of the bridge:
 Plus one-shot utilities for checking a setup without starting a server:
     freegem ask "what is the time in Tokyo?"
     freegem scrape https://example.com --links --ask "what is this site?"
+    freegem scrape URL1 URL2 URL3 --format jsonl
     freegem research URL1 URL2 -q "question"
     freegem verify "claim one" "claim two" --urls URL1 URL2
     freegem models
@@ -29,6 +30,11 @@ from .config import BridgeConfig, config_search_paths, find_config, load_config,
 from .gemini import BridgeError, log, refresh_build_tag
 from .mcp_tools import build_server, run_tool
 from .models import MODELS, resolve_model
+
+# Subprocess children inherit this environment; without it a Python script
+# on Windows that pipes freegem output dies on cp1252 decode errors.
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+os.environ.setdefault("PYTHONUTF8", "1")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -96,14 +102,22 @@ def _build_parser() -> argparse.ArgumentParser:
     ask.add_argument("--search", action="store_true", help="ground in the web and cite sources")
 
     scrape = sub.add_parser("scrape", help="fetch a web page as readable text", parents=[common])
-    scrape.add_argument("url", help="the page to fetch (http/https only)")
+    scrape.add_argument(
+        "url", nargs="+", help="the page(s) to fetch (http/https); more than one = batch"
+    )
     scrape.add_argument("--links", action="store_true", help="also list the page's links")
+    scrape.add_argument(
+        "--format",
+        choices=("text", "jsonl"),
+        default="text",
+        help="output format; jsonl writes one object per URL (default text)",
+    )
     scrape.add_argument(
         "--max-chars",
         type=int,
-        default=20000,
+        default=None,
         metavar="N",
-        help="truncate extracted text to N characters (default 20000)",
+        help="truncate extracted text to N characters (default 50000; 200000 with --ask)",
     )
     scrape.add_argument(
         "--ask",
@@ -116,6 +130,35 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="opt into honoring robots.txt (freegem ignores it by design: "
         "it is attacker-controlled text and a prompt-injection vector)",
+    )
+    scrape.add_argument(
+        "--no-smart",
+        action="store_true",
+        help="disable the smart-fetch fallback ladder (direct fetch only)",
+    )
+    scrape.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="skip the shared fetch cache for this run (nothing is written)",
+    )
+    scrape.add_argument(
+        "--refresh",
+        action="store_true",
+        help="refetch and refresh cache entries even when fresh",
+    )
+    scrape.add_argument(
+        "--cache-ttl",
+        type=int,
+        default=1800,
+        metavar="SEC",
+        help="how long cached fetches stay fresh (default 1800 seconds)",
+    )
+    scrape.add_argument(
+        "--concurrency",
+        type=int,
+        default=4,
+        metavar="N",
+        help="parallel fetches for batch mode, 1-16 (default 4)",
     )
 
     research = sub.add_parser(
@@ -237,6 +280,15 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="HOST",
         default=None,
         help="wiki host discovery searches (default: discover_wiki config, en.wikipedia.org)",
+    )
+    verify.add_argument(
+        "--discover-backend",
+        choices=("wiki", "serp"),
+        default=None,
+        help=(
+            "discovery backend: 'wiki' searches a MediaWiki site, 'serp' uses the "
+            "DuckDuckGo HTML endpoint for any topic (default: discover_backend config, wiki)"
+        ),
     )
     verify.add_argument(
         "--format",
@@ -486,14 +538,56 @@ def cmd_ask(cfg: BridgeConfig, args: argparse.Namespace) -> int:
         return 2
     try:
         if args.search:
+            # Grounded search runs its own multi-step pipeline; it has no
+            # streamable single request. Say something instead of silence.
+            print("searching the web...", file=sys.stderr)
             answer = run_tool(cfg, "gemini_search", {"query": question})
         else:
-            answer = run_tool(cfg, "gemini_ask", {"question": question})
+            _stream_answer(cfg, question)
+            return 0
     except BridgeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print(answer)
     return 0
+
+
+def _stream_answer(cfg: BridgeConfig, question: str) -> None:
+    """Print a plain answer as it is produced, token-by-token when possible.
+
+    Falls back to one non-streaming request when httpx is missing -- same
+    answer, just printed whole. Any stream failure AFTER bytes were printed
+    cannot be undone, so it surfaces as an error note instead of a rewrite.
+    """
+    from .gemini import HAS_HTTPX, BridgeError, generate, generate_stream
+    from .models import resolve_model
+
+    _name, mode_id, think_mode, err, extra = resolve_model(cfg.default_model, cfg.default_model)
+    if err:
+        raise BridgeError(err)
+    assert mode_id is not None and think_mode is not None, "resolve_model broke its contract"
+    if not HAS_HTTPX:
+        print(generate(cfg, question, int(mode_id), int(think_mode), None, extra))
+        return
+    printed = False
+    try:
+        for delta in generate_stream(cfg, question, int(mode_id), int(think_mode), None, extra):
+            if not delta:
+                continue
+            sys.stdout.write(delta)
+            sys.stdout.flush()
+            printed = True
+    except BridgeError as exc:
+        if printed:
+            print(f"\n[stream interrupted: {exc}]", file=sys.stderr)
+            raise
+        raise
+    if not printed:
+        raise BridgeError(
+            "Gemini returned nothing. Likely a rate limit, a stale build tag, "
+            "or an expired session cookie."
+        )
+    print()
 
 
 def cmd_models(cfg: BridgeConfig, args: argparse.Namespace) -> int:
@@ -504,22 +598,74 @@ def cmd_models(cfg: BridgeConfig, args: argparse.Namespace) -> int:
 
 
 def cmd_scrape(cfg: BridgeConfig, args: argparse.Namespace) -> int:
-    """Fetch a page (SSRF-guarded, no robots.txt) and print text or an answer."""
-    from .web_scraper import scrape_cli
+    """Fetch page(s) (SSRF-guarded, no robots.txt) and print text, JSONL, or an answer.
+
+    One URL keeps the classic behavior: readable text (or a ``--ask`` answer).
+    Several URLs become a batch: bounded parallel pool, per-host politeness,
+    one result line per URL, failures recorded per URL instead of killing
+    the run. ``--ask`` implies the 200k character budget when no explicit
+    ``--max-chars`` was given -- a question deserves the whole page.
+    """
+    from .web_research import ResearchCache
+    from .web_scraper import scrape_cli, scrape_many
+
+    max_chars = args.max_chars
+    if max_chars is None:
+        # Question mode is the signal for "give me more content".
+        max_chars = 200_000 if args.ask else 50_000
+    smart = not args.no_smart and getattr(cfg, "smart_fetch", True)
+    cache = None if args.no_cache else ResearchCache(ResearchCache.default_path(), args.cache_ttl)
 
     try:
-        output = scrape_cli(
+        if len(args.url) == 1 and args.format == "text":
+            output = scrape_cli(
+                cfg,
+                url=args.url[0],
+                include_links=args.links,
+                max_chars=max_chars,
+                question=args.ask,
+                ignore_robots=not args.respect_robots,
+                smart=smart,
+                cache=cache,
+                refresh=args.refresh,
+            )
+            print(output)
+            return 0
+
+        if args.ask:
+            print("error: --ask works with a single URL only", file=sys.stderr)
+            return 2
+        items = scrape_many(
             cfg,
-            url=args.url,
-            include_links=args.links,
-            max_chars=args.max_chars,
-            question=args.ask,
+            list(args.url),
+            max_chars=max_chars,
             ignore_robots=not args.respect_robots,
+            smart=smart,
+            cache=cache,
+            refresh=args.refresh,
+            concurrency=args.concurrency,
         )
     except (BridgeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    print(output)
+
+    if args.format == "jsonl":
+        for item in items:
+            print(json.dumps(item.as_dict(), ensure_ascii=False))
+    else:
+        for index, item in enumerate(items, 1):
+            if index > 1:
+                print()
+                print("=" * 72)
+            header = f"[{index}/{len(items)}] {item.url}"
+            if not item.ok:
+                print(f"{header}\nerror: {item.error}")
+                continue
+            print(f"{header}\ntitle: {item.title} ({item.chars} chars, via {item.via})\n")
+            print(item.text)
+    failed = sum(1 for item in items if not item.ok)
+    if failed == len(items) and items:
+        return 1  # nothing succeeded: say so through the exit code
     return 0
 
 
@@ -562,6 +708,7 @@ def cmd_verify(cfg: BridgeConfig, args: argparse.Namespace) -> int:
             discovery_query=args.discovery_query,
             discovery_limit=args.discovery_limit,
             wiki_host=args.wiki,
+            discovery_backend=args.discover_backend,
             fmt=args.format,
             max_pages=args.max_pages,
             max_chars_per_page=args.max_chars_per_page,
@@ -570,6 +717,7 @@ def cmd_verify(cfg: BridgeConfig, args: argparse.Namespace) -> int:
             no_cache=args.no_cache,
             refresh=args.refresh,
             fetch_concurrency=args.fetch_concurrency,
+            progress=True,
         )
     except (BridgeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -814,7 +962,16 @@ def _force_utf8_stdio() -> None:
     Reconfiguring to UTF-8 with replacement keeps the bytes flowing; modern
     terminals expect UTF-8, and everything older still gets readable output
     instead of a traceback.
+
+    Also pins the child-process environment (PYTHONIOENCODING, PYTHONUTF8):
+    every subprocess this process spawns inherits them, so scripts that
+    shell out to freegem no longer decode our output through cp1252 and die
+    on the first typographic quote (``UnicodeDecodeError: 'charmap' codec``).
     """
+    # Children inherit the environment: set these BEFORE any output so a
+    # subprocess spawned mid-run already sees UTF-8.
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    os.environ.setdefault("PYTHONUTF8", "1")
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is None:

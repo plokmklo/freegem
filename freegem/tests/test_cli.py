@@ -87,7 +87,7 @@ class AskCommandTests(unittest.TestCase):
         return code, out.getvalue(), err.getvalue()
 
     def test_ask_prints_answer(self) -> None:
-        with mock.patch("freegem.mcp_tools._run", return_value="the answer"):
+        with mock.patch("freegem.gemini.generate_stream", return_value=iter(["the answer"])):
             code, out, _ = self.run_cli(["ask", "what", "is", "this"])
         self.assertEqual(code, 0)
         self.assertIn("the answer", out)
@@ -98,15 +98,30 @@ class AskCommandTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(run.call_args[0][1], "gemini_search")
 
-    def test_ask_plain_routes_to_ask_tool(self) -> None:
-        with mock.patch("freegem.cli.run_tool", return_value="plain") as run:
-            self.run_cli(["ask", "hello"])
-        self.assertEqual(run.call_args[0][1], "gemini_ask")
+    def test_ask_plain_streams_answer(self) -> None:
+        """Plain ask streams: generate_stream is consumed and printed live."""
+        with mock.patch(
+            "freegem.gemini.generate_stream", return_value=iter(["hel", "lo wor", "ld"])
+        ) as stream:
+            code, out, _ = self.run_cli(["ask", "hello"])
+        self.assertEqual(code, 0)
+        self.assertIn("hello world", out)
+        self.assertTrue(stream.called)
+
+    def test_ask_plain_falls_back_without_httpx(self) -> None:
+        with (
+            mock.patch("freegem.gemini.HAS_HTTPX", False),
+            mock.patch("freegem.gemini.generate", return_value="whole answer") as gen,
+        ):
+            code, out, _ = self.run_cli(["ask", "hello"])
+        self.assertEqual(code, 0)
+        self.assertIn("whole answer", out)
+        self.assertTrue(gen.called)
 
     def test_ask_failure_returns_nonzero(self) -> None:
         from freegem.gemini import BridgeError
 
-        with mock.patch("freegem.cli.run_tool", side_effect=BridgeError("no session")):
+        with mock.patch("freegem.gemini.generate_stream", side_effect=BridgeError("no session")):
             code, _, err = self.run_cli(["ask", "hello"])
         self.assertEqual(code, 1)
         self.assertIn("no session", err)
@@ -390,3 +405,98 @@ class FlagPlacementTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ScrapeBatchCliTests(unittest.TestCase):
+    """Batch scrape at the CLI: JSONL output, cache flags, honest exit codes."""
+
+    def run_cli(self, argv: list[str]) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = main(argv)
+        return code, out.getvalue(), err.getvalue()
+
+    def _items(self) -> list[Any]:
+        from freegem.web_scraper import BatchItem
+
+        return [
+            BatchItem(
+                url="https://a.example/",
+                ok=True,
+                title="A",
+                text="alpha page",
+                chars=10,
+                via="html",
+            ),
+            BatchItem(url="https://b.example/", ok=False, error="HTTP 403 fetching 'u'"),
+        ]
+
+    def test_batch_jsonl_output(self) -> None:
+        with mock.patch("freegem.web_scraper.scrape_many", return_value=self._items()) as many:
+            code, out, _ = self.run_cli(
+                ["scrape", "https://a.example/", "https://b.example/", "--format", "jsonl"]
+            )
+        self.assertEqual(code, 0)
+        lines = [json.loads(line) for line in out.strip().splitlines()]
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(lines[0]["ok"])
+        self.assertEqual(lines[0]["title"], "A")
+        self.assertIn("alpha page", lines[0]["text"])
+        self.assertFalse(lines[1]["ok"])
+        self.assertIn("HTTP 403", lines[1]["error"])
+        self.assertEqual(many.call_args.kwargs["concurrency"], 4)
+
+    def test_batch_text_output_marks_failures(self) -> None:
+        with mock.patch("freegem.web_scraper.scrape_many", return_value=self._items()):
+            code, out, _ = self.run_cli(["scrape", "https://a.example/", "https://b.example/"])
+        self.assertEqual(code, 0)
+        self.assertIn("alpha page", out)
+        self.assertIn("error: HTTP 403", out)
+
+    def test_batch_all_failed_exits_one(self) -> None:
+        from freegem.web_scraper import BatchItem
+
+        dead = [BatchItem(url="https://x.example/", ok=False, error="HTTP 403")]
+        with mock.patch("freegem.web_scraper.scrape_many", return_value=dead):
+            code, _, _ = self.run_cli(["scrape", "https://x.example/"])
+        self.assertEqual(code, 1)
+
+    def test_cache_flags_reach_the_scraper(self) -> None:
+        with mock.patch("freegem.web_scraper.scrape_cli", return_value="ok") as scrape:
+            code, _, _ = self.run_cli(
+                ["scrape", "https://a.example/", "--refresh", "--cache-ttl", "60"]
+            )
+        self.assertEqual(code, 0)
+        self.assertIsNotNone(scrape.call_args.kwargs["cache"])
+        self.assertTrue(scrape.call_args.kwargs["refresh"])
+        self.assertEqual(scrape.call_args.kwargs["cache"].ttl, 60)
+
+    def test_no_cache_skips_cache_entirely(self) -> None:
+        with mock.patch("freegem.web_scraper.scrape_cli", return_value="ok") as scrape:
+            self.run_cli(["scrape", "https://a.example/", "--no-cache"])
+        self.assertIsNone(scrape.call_args.kwargs["cache"])
+
+    def test_ask_auto_uses_200k_budget(self) -> None:
+        with (
+            mock.patch("freegem.web_scraper.scrape_cli", return_value="ok") as scrape,
+            mock.patch("freegem.web_scraper._ask_gemini", return_value="answer"),
+        ):
+            self.run_cli(["scrape", "https://a.example/", "--ask", "what?"])
+        self.assertEqual(scrape.call_args.kwargs["max_chars"], 200_000)
+
+    def test_no_max_chars_default_is_50k(self) -> None:
+        with mock.patch("freegem.web_scraper.scrape_cli", return_value="ok") as scrape:
+            self.run_cli(["scrape", "https://a.example/"])
+        self.assertEqual(scrape.call_args.kwargs["max_chars"], 50_000)
+
+    def test_no_smart_disables_ladder(self) -> None:
+        with mock.patch("freegem.web_scraper.scrape_cli", return_value="ok") as scrape:
+            self.run_cli(["scrape", "https://a.example/", "--no-smart"])
+        self.assertFalse(scrape.call_args.kwargs["smart"])
+
+    def test_ask_rejected_for_batch(self) -> None:
+        code, _, err = self.run_cli(
+            ["scrape", "https://a.example/", "https://b.example/", "--ask", "what?"]
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("--ask works with a single URL", err)

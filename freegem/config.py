@@ -63,6 +63,20 @@ DEFAULT_CONFIG: Mapping[str, Any] = MappingProxyType(
         # the Wikimedia API portal (or the site's own OpenSearch API for
         # non-Wikimedia MediaWiki hosts). robots.txt is honored either way.
         "discover_wiki": "en.wikipedia.org",
+        # Discovery backend for verify --discover: "wiki" searches the MediaWiki
+        # site above; "serp" searches the web through the DuckDuckGo HTML
+        # endpoint (better for claims about software, companies, current events).
+        "discover_backend": "wiki",
+        # Smart-fetch fallback ladder: when the direct, self-identifying fetch
+        # is refused (403/405/401/...), retry through legitimate read paths
+        # (browser-identifying headers, r.jina.ai public reader, Internet
+        # Archive, Gemini search) and remember what worked per host. No CAPTCHA
+        # solving, no challenge answering, no identity rotation -- a site that
+        # insists on a CAPTCHA stays unread and the failure says so.
+        "smart_fetch": True,
+        # The last ladder step is AI-mediated (Gemini search asked for the
+        # page's content, cited and labeled via="ai-search"). Needs a session.
+        "smart_fetch_ai": True,
         # Optional bearer key for the server's own job/result/artifact REST API
         # and the MCP adapter. None keeps the loopback-only, unauthenticated
         # behavior; a non-None value makes those endpoints demand
@@ -70,6 +84,10 @@ DEFAULT_CONFIG: Mapping[str, Any] = MappingProxyType(
         # separate: this key gates OUR api, it never authenticates to Google.
         "api_key": None,
         "brave_api_key": "",
+        # Optional r.jina.ai reader key. The reader serves anonymous queries
+        # from well-reputed IPs; datacenter IPs get 401 and must authenticate.
+        # Sent ONLY to r.jina.ai, only by the smart-fetch ladder.
+        "reader_api_key": "",
         # Bounded background-job execution (2.9): fixed worker pool, bounded
         # pending queue (saturation answers HTTP 429), per-job execution
         # timeout with a watchdog, capped retries, retention window.
@@ -110,18 +128,22 @@ _INT_FIELDS = frozenset(
     }
 )
 _FLOAT_FIELDS = frozenset({"request_queue_wait_sec"})
-_BOOL_FIELDS = frozenset({"temporary_chats", "log_requests", "research_evidence"})
+_BOOL_FIELDS = frozenset(
+    {"temporary_chats", "log_requests", "research_evidence", "smart_fetch", "smart_fetch_ai"}
+)
 _STR_FIELDS = frozenset(
     {
         "host",
         "gemini_bl",
         "default_model",
         "discover_wiki",
+        "discover_backend",
         "cookie_file",
         "proxy",
         "auth_user",
         "xsrf_token",
         "brave_api_key",
+        "reader_api_key",
         "api_key",
         "job_db",
         "job_queue_url",
@@ -221,8 +243,12 @@ class BridgeConfig:
     request_queue_wait_sec: float = DEFAULT_CONFIG["request_queue_wait_sec"]
     research_evidence: bool = DEFAULT_CONFIG["research_evidence"]
     discover_wiki: str = DEFAULT_CONFIG["discover_wiki"]
+    discover_backend: str = DEFAULT_CONFIG["discover_backend"]
+    smart_fetch: bool = DEFAULT_CONFIG["smart_fetch"]
+    smart_fetch_ai: bool = DEFAULT_CONFIG["smart_fetch_ai"]
     api_key: str | None = DEFAULT_CONFIG["api_key"]
     brave_api_key: str = DEFAULT_CONFIG["brave_api_key"]
+    reader_api_key: str = DEFAULT_CONFIG["reader_api_key"]
     job_max_workers: int = DEFAULT_CONFIG["job_max_workers"]
     job_max_pending: int = DEFAULT_CONFIG["job_max_pending"]
     job_timeout_sec: int = DEFAULT_CONFIG["job_timeout_sec"]
@@ -300,6 +326,9 @@ class BridgeConfig:
             "request_queue_wait_sec": self.request_queue_wait_sec,
             "research_evidence": self.research_evidence,
             "discover_wiki": self.discover_wiki,
+            "discover_backend": self.discover_backend,
+            "smart_fetch": self.smart_fetch,
+            "smart_fetch_ai": self.smart_fetch_ai,
             # Booleans and paths only; never the token itself.
             "xsrf_token_set": bool(self.xsrf_token),
             "api_key_set": bool(self.api_key),

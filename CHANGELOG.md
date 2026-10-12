@@ -7,7 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.9.0] — 2026-10-12
 
-Release gate, browser/proxy security, and bounded background jobs.
+Release gate, browser/proxy security, bounded background jobs, and a
+smarter, limit-free scraping stack.
+
+### Smart fetching and scraping
+
+- **`freegem/smart_fetch.py`** (new): a fallback ladder for pages that
+  refuse the first, honest request. After a 403/405/401/407/429/5xx,
+  timeout, reset — or a 200 that extracts ZERO readable text (a JS shell
+  is not a success) — freegem walks legitimate read paths in order —
+  a browser-identifying retry, the r.jina.ai public reader (optional
+  `reader_api_key` config for datacenter IPs), the Internet Archive's
+  closest snapshot, and (last, labeled `via="ai-search"`) the bridge's own
+  Gemini search, which is attempted anonymously where the network allows
+  and whose "I could not access that page" replies are recorded as honest
+  failures, never presented as content — and REMEMBERS which path worked
+  per host (`~/.cache/freegem/smart_fetch_memory.json`), so repeat
+  fetches go straight to the working strategy. No CAPTCHA is ever solved
+  and no challenge answered: a bot wall stays unread, and the failure
+  taxonomy names every attempted path and its exact refusal.
+- **Body cap 5 MB → 100 MB** (wire AND decompressed, still enforced while
+  reading and while gunzipping): huge homepages (cnn.com) and big
+  reference pages died at 5 MB with a cap error instead of being read.
+- **MediaWiki full-parse adapter**: wiki articles now come through
+  `action=parse` (complete rendered article, tables included) instead of
+  the extract-capped `prop=extracts` API — the gap that made reader
+  services look "better" on long Wikipedia pages (87k vs 495k chars).
+  The plain-text extracts API (now with `exlimit=1`,
+  `exsectionformat=plain`) remains the fallback.
+- **Default `max_chars` 20,000 → 50,000**: long pages (HN threads, API
+  references) were truncated before the interesting part.
+- **`--ask` reads the whole page**: question mode auto-raises the
+  character budget to the 200k hard limit when no explicit `--max-chars`
+  was given — a question against a truncated page guarantees a useless
+  answer. Explicit budgets are always respected.
+- **Batch scrape**: `freegem scrape URL1 URL2 URL3 --format jsonl` —
+  bounded parallel pool (per-host locks), one JSON object per line with
+  the result or the honest error, per-URL failures never kill the run,
+  exit 1 only when nothing succeeded. Text mode labels each page with
+  title/chars/via.
+- **Shared fetch cache**: `scrape_page()` accepts the research cache, so
+  one-shot scrapes stop re-hitting URLs fetched minutes ago. CLI flags
+  `--no-cache` / `--refresh` / `--cache-ttl` (default on, 1800s TTL).
+- **`verify --discover-backend serp`**: claim-verification discovery can
+  search the web through the DuckDuckGo HTML endpoint instead of
+  Wikipedia only — claims about software, companies, or current events
+  get real evidence (config `discover_backend`).
+- **CLI streaming**: `freegem ask` prints the answer as it is generated
+  (token-by-token via `generate_stream`, whole-answer fallback without
+  httpx); `freegem verify` announces its stages (discover → fetch →
+  judge) on stderr instead of seconds of silence.
+- **Hacker News anchor**: `id="hnmain"` joins the main-content anchors,
+  so HN threads keep their stories instead of losing them to the
+  chrome stripper.
+- **Windows stdout encoding**: `PYTHONIOENCODING=utf-8` and
+  `PYTHONUTF8=1` are pinned at import so every subprocess inherits them
+  — scripts piping freegem output no longer die on cp1252 decode errors.
 
 ### Release gate
 

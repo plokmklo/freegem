@@ -20,6 +20,7 @@ import io
 import json
 import socket
 import ssl
+import tempfile
 import threading
 import unittest
 import urllib.error
@@ -29,6 +30,7 @@ from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
 from email.message import Message
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from unittest import mock
 
@@ -454,7 +456,7 @@ class ScrapeFetchTests(_FakeSiteTestCase):
         self.assertIn("response exceeds", str(caught.exception))
 
     def test_gzip_bomb_refused_at_decompress_cap(self) -> None:
-        self.assertEqual(_MAX_BYTES, 5 * 1024 * 1024)  # the documented 5 MB cap
+        self.assertEqual(_MAX_BYTES, 100 * 1024 * 1024)  # the documented 100 MB cap
         with mock.patch("freegem.web_scraper._MAX_BYTES", 1000):
             with self.assertRaises(ScrapeError) as caught:
                 scrape_page(self.cfg, f"{self.base}/bomb")
@@ -467,7 +469,9 @@ class ScrapeFetchTests(_FakeSiteTestCase):
         self.assertIn("[content truncated", format_page(result))
 
     def test_default_max_chars_constant(self) -> None:
-        self.assertEqual(DEFAULT_MAX_CHARS, 20_000)
+        # 2.9: raised 20,000 -> 50,000 so long pages (HN threads, API
+        # references) are not truncated before the interesting part.
+        self.assertEqual(DEFAULT_MAX_CHARS, 50_000)
 
     def test_non_html_content_type_refused(self) -> None:
         with self.assertRaises(ScrapeError) as caught:
@@ -590,7 +594,7 @@ class ScrapeCliTests(_FakeSiteTestCase):
                 "--respect-robots",
             ]
         )
-        self.assertEqual(args.url, "https://example.com")
+        self.assertEqual(args.url, ["https://example.com"])
         self.assertTrue(args.links)
         self.assertEqual(args.max_chars, 500)
         self.assertEqual(args.ask, "what is this?")
@@ -599,9 +603,19 @@ class ScrapeCliTests(_FakeSiteTestCase):
     def test_parser_defaults(self) -> None:
         args = _build_parser().parse_args(["scrape", "https://example.com"])
         self.assertFalse(args.links)
-        self.assertEqual(args.max_chars, 20000)
+        # None means "caller did not choose": 50k, or 200k with --ask.
+        self.assertIsNone(args.max_chars)
         self.assertIsNone(args.ask)
         self.assertFalse(args.respect_robots)
+        self.assertFalse(args.no_smart)
+        self.assertFalse(args.no_cache)
+
+    def test_parser_accepts_multiple_urls(self) -> None:
+        args = _build_parser().parse_args(
+            ["scrape", "https://a.example", "https://b.example", "--format", "jsonl"]
+        )
+        self.assertEqual(args.url, ["https://a.example", "https://b.example"])
+        self.assertEqual(args.format, "jsonl")
 
     def test_main_prints_page(self) -> None:
         with (
@@ -871,12 +885,17 @@ class MediaWikiAdapterTests(unittest.TestCase):
         ).encode()
 
     def test_article_fetched_via_api(self) -> None:
-        response = _FakeBytesResponse(
-            self._api_body("Alexander the Great", "Alexander III of Macedon ... " * 30)
-        )
+        # Two responses: the full-parse API is tried first; this mock only
+        # speaks the extracts dialect, so the adapter falls back to it.
+        responses = [
+            _FakeBytesResponse(self._api_body("Alexander the Great", "")),
+            _FakeBytesResponse(
+                self._api_body("Alexander the Great", "Alexander III of Macedon ... " * 30)
+            ),
+        ]
         with (
             mock.patch("freegem.web_scraper._check_robots") as robots,
-            mock.patch("freegem.web_scraper._fetch", return_value=response) as fetch,
+            mock.patch("freegem.web_scraper._fetch", side_effect=responses) as fetch,
         ):
             result = scrape_page(self.cfg, "https://en.wikipedia.org/wiki/Alexander_the_Great")
         self.assertEqual(result.via, "mediawiki-api")
@@ -889,13 +908,34 @@ class MediaWikiAdapterTests(unittest.TestCase):
         self.assertTrue(api_url.startswith("https://en.wikipedia.org/w/api.php?"))
         self.assertIn("titles=Alexander_the_Great", api_url)
 
-    def test_missing_article_is_a_scrape_error(self) -> None:
-        response = _FakeBytesResponse(
-            json.dumps({"query": {"pages": [{"missing": True}]}}).encode()
+    def test_full_parse_api_returns_whole_article(self) -> None:
+        """action=parse returns the COMPLETE rendered article (tables and all)
+        -- the extracts API caps its output and loses the tail of long pages."""
+        long_html = (
+            '<div class="mw-parser-output"><p>' + ("Real content sentence. " * 500) + "</p></div>"
         )
+        parse_body = json.dumps({"parse": {"title": "Big Article", "text": long_html}}).encode()
         with (
             mock.patch("freegem.web_scraper._check_robots"),
-            mock.patch("freegem.web_scraper._fetch", return_value=response),
+            mock.patch(
+                "freegem.web_scraper._fetch", return_value=_FakeBytesResponse(parse_body)
+            ) as fetch,
+        ):
+            result = scrape_page(self.cfg, "https://en.wikipedia.org/wiki/Big_Article")
+        self.assertEqual(result.via, "mediawiki-api-parse")
+        self.assertEqual(result.title, "Big Article")
+        self.assertIn("Real content sentence.", result.text)
+        self.assertGreater(len(result.text), 10_000)
+        self.assertIn("action=parse", fetch.call_args[0][1])
+
+    def test_missing_article_is_a_scrape_error(self) -> None:
+        responses = [
+            _FakeBytesResponse(json.dumps({"error": {"code": "missingtitle"}}).encode()),
+            _FakeBytesResponse(json.dumps({"query": {"pages": [{"missing": True}]}}).encode()),
+        ]
+        with (
+            mock.patch("freegem.web_scraper._check_robots"),
+            mock.patch("freegem.web_scraper._fetch", side_effect=responses),
         ):
             with self.assertRaises(ScrapeError) as caught:
                 scrape_page(self.cfg, "https://en.wikipedia.org/wiki/No_Such_Article_Xyz")
@@ -905,15 +945,18 @@ class MediaWikiAdapterTests(unittest.TestCase):
         """robots.txt is not consulted anywhere in the scrape path -- even a
         _check_robots that would refuse must never be called, and the wiki
         adapter keeps using the site's own API."""
-        response = _FakeBytesResponse(
-            self._api_body("Alexander the Great", "Alexander III of Macedon ... " * 30)
-        )
+        responses = [
+            _FakeBytesResponse(self._api_body("Alexander the Great", "")),
+            _FakeBytesResponse(
+                self._api_body("Alexander the Great", "Alexander III of Macedon ... " * 30)
+            ),
+        ]
         with (
             mock.patch(
                 "freegem.web_scraper._check_robots",
                 side_effect=ScrapeError("robots.txt disallows everything"),
             ) as robots,
-            mock.patch("freegem.web_scraper._fetch", return_value=response) as fetch,
+            mock.patch("freegem.web_scraper._fetch", side_effect=responses) as fetch,
         ):
             result = scrape_page(self.cfg, "https://en.wikipedia.org/wiki/Alexander_the_Great")
         self.assertEqual(result.via, "mediawiki-api")
@@ -936,9 +979,13 @@ class MediaWikiAdapterTests(unittest.TestCase):
 
     def test_extract_truncated_to_max_chars(self) -> None:
         body = self._api_body("Big", "word " * 5000)
+        responses = [
+            _FakeBytesResponse(self._api_body("Big", "")),
+            _FakeBytesResponse(body),
+        ]
         with (
             mock.patch("freegem.web_scraper._check_robots"),
-            mock.patch("freegem.web_scraper._fetch", return_value=_FakeBytesResponse(body)),
+            mock.patch("freegem.web_scraper._fetch", side_effect=responses),
         ):
             result = scrape_page(self.cfg, "https://en.wikipedia.org/wiki/Big", max_chars=500)
         self.assertTrue(result.truncated)
@@ -982,3 +1029,176 @@ class VoidElementSkipTests(unittest.TestCase):
         self.assertIn("Real heading", result.text)
         self.assertIn("Real paragraph content.", result.text)
         self.assertNotIn("Menu", result.text)  # nav itself still skipped
+
+
+# ─── batch scrape, shared cache, hnmain anchor, ask budget (2.9) ────────────
+
+
+class BatchScrapeTests(_FakeSiteTestCase):
+    """scrape_many: one bounded pool, per-URL results, failures recorded.
+
+    smart=False throughout: these tests exercise the BATCH mechanics, not
+    the fallback ladder (which would try real reader/archive hosts on
+    failure -- the ladder has its own test module with scripted mocks).
+    """
+
+    def test_results_keep_caller_order(self) -> None:
+        from freegem.web_scraper import scrape_many
+
+        urls = [f"{self.base}/plain", f"{self.base}/page", f"{self.base}/big"]
+        items = scrape_many(self.cfg, urls, max_chars=1000, concurrency=3, smart=False)
+        self.assertEqual([item.url for item in items], urls)
+        self.assertTrue(all(item.ok for item in items))
+        self.assertIn("just plain text here", items[0].text)
+
+    def test_failures_recorded_per_url(self) -> None:
+        from freegem.web_scraper import scrape_many
+
+        items = scrape_many(
+            self.cfg,
+            [f"{self.base}/no-such-page", f"{self.base}/page"],
+            concurrency=2,
+            smart=False,
+        )
+        self.assertFalse(items[0].ok)
+        self.assertIn("HTTP 404", items[0].error)
+        self.assertTrue(items[1].ok)
+        # A dead URL never kills the batch.
+
+    def test_all_failure_is_reportable(self) -> None:
+        from freegem.web_scraper import scrape_many
+
+        items = scrape_many(self.cfg, [f"{self.base}/no-such-page"], concurrency=1, smart=False)
+        self.assertFalse(items[0].ok)
+
+    def test_batch_over_cap_refused(self) -> None:
+        from freegem.web_scraper import scrape_many
+
+        with self.assertRaises(ValueError):
+            scrape_many(self.cfg, [f"{self.base}/page"] * 101)
+
+
+class ScrapeCacheTests(_FakeSiteTestCase):
+    """scrape_page(cache=...) shares the research cache with one-shot scrapes."""
+
+    def _cache(self, tmp: str, ttl: int = 600) -> Any:
+        from freegem.web_research import ResearchCache
+
+        return ResearchCache(Path(tmp) / "cache.json", ttl)
+
+    def test_hit_skips_the_network(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = self._cache(tmp)
+            first = scrape_page(self.cfg, f"{self.base}/page", cache=cache)
+            with mock.patch(
+                "freegem.web_scraper._fetch", side_effect=AssertionError("network hit")
+            ):
+                second = scrape_page(self.cfg, f"{self.base}/page", cache=cache)
+            self.assertEqual(second.via, "cache")
+            self.assertEqual(second.text, first.text)
+            self.assertEqual(second.title, first.title)
+
+    def test_refresh_refetches_and_rewrites(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = self._cache(tmp)
+            scrape_page(self.cfg, f"{self.base}/page", cache=cache)
+            with mock.patch("freegem.web_scraper._fetch") as fetch:
+                fetch.return_value = _FakeBytesResponse(
+                    PAGE_HTML.encode(), {"Content-Type": "text/html; charset=utf-8"}
+                )
+                refreshed = scrape_page(self.cfg, f"{self.base}/page", cache=cache, refresh=True)
+            self.assertTrue(fetch.called)
+            self.assertNotEqual(refreshed.via, "cache")
+
+    def test_no_cache_argument_misses_cleanly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = self._cache(tmp, ttl=0)  # ttl<=0: never serve from cache
+            scrape_page(self.cfg, f"{self.base}/page", cache=cache)
+            second = scrape_page(self.cfg, f"{self.base}/page", cache=cache)
+            self.assertEqual(second.via, "html")
+
+    def test_scrape_many_writes_through(self) -> None:
+        from freegem.web_scraper import scrape_many
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = self._cache(tmp)
+            scrape_many(self.cfg, [f"{self.base}/page", f"{self.base}/plain"], cache=cache)
+            # Both entries are now cached: zero network on the second run.
+            with mock.patch(
+                "freegem.web_scraper._fetch", side_effect=AssertionError("network hit")
+            ):
+                again = scrape_many(
+                    self.cfg,
+                    [f"{self.base}/page", f"{self.base}/plain"],
+                    cache=cache,
+                    concurrency=2,
+                )
+            self.assertTrue(all(item.via == "cache" for item in again))
+
+
+class MainRegionAnchorsTests(unittest.TestCase):
+    """Site-specific content anchors: Hacker News' hnmain container."""
+
+    def test_hnmain_anchor_selected(self) -> None:
+        from freegem.web_scraper import _main_region
+
+        html = (
+            "<html><head><title>HN</title></head><body><center>logo bar</center>"
+            '<div id="hnmain"><table><tr><td>1. Story one</td></tr>'
+            "<tr><td>2. Story two</td></tr></table></div>"
+            "<div>footer junk</div></body></html>"
+        )
+        region = _main_region(html)
+        assert region is not None
+        start, end = region
+        self.assertIn("Story one", html[start:end])
+        self.assertNotIn("logo bar", html[start:end])
+
+    def test_hnmain_single_quote_variant(self) -> None:
+        from freegem.web_scraper import _main_region
+
+        html = "<html><body><div id='hnmain'><p>thread body</p></div></body></html>"
+        self.assertIsNotNone(_main_region(html))
+
+
+class AskBudgetTests(unittest.TestCase):
+    """Question mode reads the whole page: --ask auto-raises max_chars."""
+
+    def setUp(self) -> None:
+        self.cfg = BridgeConfig(log_requests=False)
+
+    def _page(self) -> ScrapeResult:
+        return ScrapeResult(url="https://x.example/", title="T", text="page text " * 50)
+
+    def test_ask_raises_default_budget_to_hard_limit(self) -> None:
+        from freegem.web_scraper import _MAX_CHARS_HARD_LIMIT, scrape_cli
+
+        with (
+            mock.patch(
+                "freegem.web_scraper.scrape_page", return_value=self._page()
+            ) as scrape_page_mock,
+            mock.patch("freegem.web_scraper._ask_gemini", return_value="an answer"),
+        ):
+            scrape_cli(self.cfg, url="https://x.example/", question="what?")
+        self.assertEqual(scrape_page_mock.call_args.kwargs["max_chars"], _MAX_CHARS_HARD_LIMIT)
+
+    def test_explicit_budget_is_respected(self) -> None:
+        from freegem.web_scraper import scrape_cli
+
+        with (
+            mock.patch(
+                "freegem.web_scraper.scrape_page", return_value=self._page()
+            ) as scrape_page_mock,
+            mock.patch("freegem.web_scraper._ask_gemini", return_value="an answer"),
+        ):
+            scrape_cli(self.cfg, url="https://x.example/", question="what?", max_chars=800)
+        self.assertEqual(scrape_page_mock.call_args.kwargs["max_chars"], 800)
+
+    def test_no_question_keeps_default(self) -> None:
+        from freegem.web_scraper import DEFAULT_MAX_CHARS, scrape_cli
+
+        with mock.patch(
+            "freegem.web_scraper.scrape_page", return_value=self._page()
+        ) as scrape_page_mock:
+            scrape_cli(self.cfg, url="https://x.example/")
+        self.assertEqual(scrape_page_mock.call_args.kwargs["max_chars"], DEFAULT_MAX_CHARS)

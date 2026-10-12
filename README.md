@@ -200,10 +200,48 @@ the `web_scrape` MCP tool.
 ```bash
 freegem scrape https://example.com                     # text + title
 freegem scrape https://example.com --links             # + resolved links
-freegem scrape https://example.com --max-chars 5000    # cap the output
-freegem scrape https://example.com --ask "what is this site?"
+freegem scrape https://example.com --max-chars 5000    # cap the output (default 50000)
+freegem scrape https://example.com --ask "what is this site?"   # reads up to 200k chars
+freegem scrape URL1 URL2 URL3 --format jsonl           # batch: one JSON object per line
+freegem scrape https://example.com --no-cache          # skip the shared fetch cache
 freegem scrape https://example.com --respect-robots    # opt into legacy robots honoring
+freegem scrape https://example.com --no-smart          # direct fetch only, no fallbacks
 ```
+
+**Smart fetching** — the first request to every site is the honest one: a
+self-identifying freegem client. When the origin refuses it (403/405/401/
+407/429/5xx, a timeout, a connection reset), freegem walks a ladder of
+LEGITIMATE alternate read paths instead of giving up:
+
+1. **browser-headers** — the same URL with a standard browser-identifying
+   client (many 403s are naive UA matching, not policy);
+2. **reader** — the r.jina.ai public reader service;
+3. **wayback** — the Internet Archive's closest snapshot;
+4. **ai-search** — the bridge's own Gemini search, asked for the page's
+   content with citations (last, session-gated, labeled `via="ai-search"`,
+   never presented as a verbatim fetch).
+
+The working path is remembered per host (`~/.cache/freegem/
+smart_fetch_memory.json`), so repeat fetches go straight there. Every
+failure is reported with its honest taxonomy — each attempted path and its
+exact refusal. No CAPTCHA is ever solved and no challenge answered: a page
+whose only door is a bot wall stays unread, and the error says exactly that.
+`--no-smart` (or config `smart_fetch: false`) keeps the direct fetch only.
+
+**Shared cache** — one-shot scrapes and research share the same fetch
+cache (`~/.cache/freegem/research_cache.json`, default TTL 1800s), so a
+URL fetched minutes ago is not re-downloaded. `--no-cache` skips it,
+`--refresh` forces a refetch.
+
+**Batch mode** — several URLs run through a bounded parallel pool with
+per-host politeness; `--format jsonl` writes one JSON object per line
+(`url`, `ok`, `title`, `chars`, `via`, `text` or `error`). Per-URL
+failures are recorded, never fatal; the exit code is 1 only when nothing
+succeeded.
+
+**Structured sources** — MediaWiki articles (Wikipedia and siblings) come
+through the site's own `action=parse` API: the complete rendered article,
+tables included, instead of the extract API's capped plain text.
 
 **Security model** — this fetches *untrusted* URLs, so it reuses and hardens
 the project's SSRF defenses (`freegem/ssrf.py`):
@@ -412,13 +450,18 @@ staleness is visible per claim.
 URLs, candidate pages come from a supported search API instead of you: the
 Wikimedia API portal for Wikimedia wikis, or the site's own OpenSearch API
 for other MediaWiki hosts (`discover_wiki` config, `--wiki` to override,
-`--discovery-query` for a custom search). Discovery is one bounded API
-call, never a crawl, and — like every fetch in freegem — robots.txt is not
-consulted (it is attacker-controlled text; see [Web scraping](#web-scraping)).
+`--discovery-query` for a custom search). Claims about software, companies,
+or current events are better served by the web: `--discover-backend serp`
+searches through the DuckDuckGo HTML endpoint (no key needed) —
+`discover_backend: "serp"` makes that the default. Discovery is one bounded
+API call, never a crawl, and — like every fetch in freegem — robots.txt is
+not consulted (it is attacker-controlled text; see [Web scraping](#web-scraping)).
 
 ```bash
 freegem verify "Alexander tutored by Aristotle?" --discover \
   --discovery-query "Alexander the Great education"
+freegem verify "free-threading is stable in Python 3.13" --discover \
+  --discover-backend serp --discovery-query "Python 3.13 free-threading stable"
 ```
 
 **Run metrics** — verify (and research) attach a metrics block to JSON
@@ -820,6 +863,10 @@ cp config.example.json config.json
 | `request_queue_wait_sec` | `0.0` | Seconds a burst may wait for a free slot before getting 503 + `Retry-After`; `0` sheds immediately |
 | `research_evidence` | `true` | Quote and verify verbatim evidence per cited source in research answers |
 | `discover_wiki` | `en.wikipedia.org` | Wiki claim-verification's optional URL discovery searches (Wikimedia API portal, or the site's own OpenSearch for non-Wikimedia MediaWiki hosts) |
+| `discover_backend` | `wiki` | Discovery backend for `verify --discover`: `wiki` searches the MediaWiki site above; `serp` searches the web through the DuckDuckGo HTML endpoint |
+| `smart_fetch` | `true` | Smart-fetch fallback ladder: after a refusal (403/405/401/...), retry through browser-identifying headers, the r.jina.ai reader, the Internet Archive, and Gemini search, remembering what worked per host |
+| `smart_fetch_ai` | `true` | The ladder's last step (Gemini search asked for the page's content, labeled `via="ai-search"`); attempted anonymously when no session is configured |
+| `reader_api_key` | `""` | Optional r.jina.ai API key — anonymous reader queries work from well-reputed IPs; datacenter IPs get 401 and must authenticate. Sent only to r.jina.ai |
 
 Environment variables override the file: `GEMINI_BL`, `GEMINI_AUTH_USER`,
 `GEMINI_XSRF_TOKEN`, `GEMINI_PROXY`, `GEMINI_COOKIE_FILE`, `FREEGEM_CONFIG`.
@@ -952,8 +999,12 @@ promise:
 on arbitrary sites.** Sites fail, move, truncate, and change without
 notice; jobs report what they actually got, failures included.
 - **CAPTCHA solving, anti-bot bypass, stealth success, or fingerprint
-evasion.** FreeGem fetches politely, like a normal client, and stops
-there — a design stance, not a missing feature.
+evasion.** FreeGem fetches politely, like a normal client, and when a site
+refuses it tries *legitimate* alternate read paths (browser-identifying
+headers, public readers, the Internet Archive) — but it never solves a
+CAPTCHA, never answers a challenge, and never rotates identities. A page
+whose only door is a bot wall stays unread, and the failure says so — a
+design stance, not a missing feature.
 - **A free proxy pool or managed browser fleet.** Requests come from your
 machine and your IPs; proxies are yours to choose, configure, and pay for.
 - **A proprietary web index or built-in SERP service.** The crawler, simhash

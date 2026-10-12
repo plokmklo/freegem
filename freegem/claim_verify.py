@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import urllib.parse
 from dataclasses import dataclass, field
 from typing import Any
@@ -554,26 +555,59 @@ def _opensearch_discover(
     return found
 
 
+def _serp_discover(
+    cfg: BridgeConfig, query: str, limit: int, provider_name: str
+) -> list[dict[str, Any]]:
+    """Find candidate URLs through a SERP provider (DuckDuckGo HTML by default).
+
+    Wikipedia is a poor discovery backend for claims about software,
+    companies, or current events; the SERP provider returns whatever the web
+    ranks. Same service boundary as everywhere: discovery returns URLs, the
+    normal guarded fetch reads them.
+    """
+    from .serp import ProviderNotConfigured, get_provider  # lazy: serp imports config only
+
+    try:
+        provider = get_provider(provider_name, cfg)
+        hits = provider.search(query, max_results=limit)
+    except ProviderNotConfigured as exc:
+        raise VerifyError(f"serp discovery unavailable: {exc}") from exc
+    found: list[dict[str, Any]] = []
+    for hit in hits:
+        if not hit.url.startswith(("http://", "https://")):
+            continue
+        found.append({"url": hit.url, "title": hit.title, "via": f"serp-{provider_name}"})
+        if len(found) >= limit:
+            break
+    return found
+
+
 def discover_urls(
     cfg: BridgeConfig,
     query: str,
     *,
     limit: int = DEFAULT_DISCOVERY_LIMIT,
     wiki_host: str | None = None,
+    backend: str | None = None,
 ) -> list[dict[str, Any]]:
     """Find candidate article URLs for ``query`` via a supported search API.
 
-    Wikimedia wikis go through the api.wikimedia.org portal; other
-    MediaWiki hosts use their own OpenSearch endpoint. Every request is
-    robots-checked like any other fetch -- if a site refuses its search
-    API to us, discovery refuses too and says to supply URLs explicitly.
-    This is ONE bounded API call, never a crawl: no link extraction, no
-    following results-of-results.
+    ``backend`` picks the discovery service: ``"wiki"`` (default) searches
+    a MediaWiki site -- Wikimedia wikis through the api.wikimedia.org
+    portal, other MediaWiki hosts through their own OpenSearch endpoint;
+    ``"serp"`` (or a provider name) searches the web through the DuckDuckGo
+    HTML endpoint. Every request is guarded like any other fetch. This is
+    ONE bounded API call, never a crawl: no link extraction, no following
+    results-of-results.
     """
     query = (query or "").strip()
     if not query:
         raise VerifyError("discovery requires a non-empty query")
     limit = max(1, min(int(limit), _DISCOVERY_LIMIT_CAP))
+    chosen = (backend or getattr(cfg, "discover_backend", "wiki") or "wiki").strip().lower()
+    if chosen in ("serp", "duckduckgo", "brave"):
+        provider_name = "duckduckgo" if chosen == "serp" else chosen
+        return _serp_discover(cfg, query, limit, provider_name)
     host = (wiki_host or cfg.discover_wiki or "en.wikipedia.org").strip().lower()
     portal = _wiki_project_lang(host)
     if portal is not None:
@@ -845,12 +879,14 @@ def verify(
     discovery_query: str | None = None,
     discovery_limit: int = DEFAULT_DISCOVERY_LIMIT,
     wiki_host: str | None = None,
+    discovery_backend: str | None = None,
     max_pages: int = DEFAULT_MAX_PAGES,
     max_chars_per_page: int = DEFAULT_MAX_CHARS_PER_PAGE,
     total_budget: int = DEFAULT_TOTAL_BUDGET,
     cache: ResearchCache | None = None,
     refresh: bool = False,
     concurrency: int | None = None,
+    progress: bool = False,
 ) -> VerifyResult:
     """Verify claims against fetched sources; never raises for dead sources.
 
@@ -858,6 +894,8 @@ def verify(
     off, discovery refused). One model call judges all claims; the model's
     statuses are schema-validated, its quotes machine-checked verbatim,
     and its locations computed by finding each quote in the fetched text.
+    ``progress`` announces stage transitions on stderr so interactive runs
+    are not silent for seconds at a time.
     """
     started_metrics = RunMetrics()
     claims = _normalize_claims(claims)
@@ -868,14 +906,22 @@ def verify(
             normalized = _normalize_urls([str(u) for u in urls])
         elif discover:
             query = (discovery_query or " ".join(claims)).strip()
+            backend = (
+                discovery_backend or getattr(cfg, "discover_backend", "wiki") or "wiki"
+            ).lower()
             host = (wiki_host or cfg.discover_wiki or "en.wikipedia.org").lower()
+            if progress:
+                print(f"verify: discovering sources via {backend} ({query!r})...", file=sys.stderr)
             try:
-                found = discover_urls(cfg, query, limit=discovery_limit, wiki_host=wiki_host)
+                found = discover_urls(
+                    cfg, query, limit=discovery_limit, wiki_host=wiki_host, backend=backend
+                )
             except BridgeError as exc:
                 raise VerifyError(str(exc)) from exc
             normalized = [item["url"] for item in found]
             discovered_info = {
                 "used": True,
+                "backend": backend,
                 "wiki": host,
                 "query": query,
                 "found": len(normalized),
@@ -890,6 +936,8 @@ def verify(
     if not normalized:
         raise VerifyError("verify requires at least one URL")
 
+    if progress:
+        print(f"verify: fetching {len(normalized)} page(s)...", file=sys.stderr)
     with started_metrics.stage("fetch"):
         sources, material = _collect_sources(
             cfg,
@@ -926,6 +974,11 @@ def verify(
                 )
             )
     else:
+        if progress:
+            print(
+                f"verify: judging {len(claims)} claim(s) from {len(material)} source(s)...",
+                file=sys.stderr,
+            )
         with started_metrics.stage("generate"):
             prompt_material = _fit_material(material, claims)
             hints = {
@@ -1211,6 +1264,7 @@ def verify_cli(
     discovery_query: str | None = None,
     discovery_limit: int = DEFAULT_DISCOVERY_LIMIT,
     wiki_host: str | None = None,
+    discovery_backend: str | None = None,
     fmt: str = "text",
     max_pages: int = DEFAULT_MAX_PAGES,
     max_chars_per_page: int = DEFAULT_MAX_CHARS_PER_PAGE,
@@ -1219,6 +1273,7 @@ def verify_cli(
     no_cache: bool = False,
     refresh: bool = False,
     fetch_concurrency: int | None = None,
+    progress: bool = False,
 ) -> str:
     """One-shot claim verification for the CLI: renders in the requested format."""
     cache = None if no_cache else ResearchCache(ResearchCache.default_path(), cache_ttl)
@@ -1230,12 +1285,14 @@ def verify_cli(
         discovery_query=discovery_query,
         discovery_limit=discovery_limit,
         wiki_host=wiki_host,
+        discovery_backend=discovery_backend,
         max_pages=max_pages,
         max_chars_per_page=max_chars_per_page,
         total_budget=total_budget,
         cache=cache,
         refresh=refresh,
         concurrency=fetch_concurrency,
+        progress=progress,
     )
     if fmt == "json":
         return render_json(result)
@@ -1277,6 +1334,7 @@ def run_verify_tool(cfg: BridgeConfig, arguments: dict[str, Any]) -> str:
     discover = arguments.get("discover") is True
     discovery_query = str(arguments.get("discovery_query") or "").strip() or None
     wiki_host = str(arguments.get("wiki_host") or "").strip() or None
+    discovery_backend = str(arguments.get("discovery_backend") or "").strip() or None
 
     if not urls and not discover:
         raise ValueError("web_verify needs 'urls' (a non-empty list) or 'discover': true")
@@ -1289,6 +1347,7 @@ def run_verify_tool(cfg: BridgeConfig, arguments: dict[str, Any]) -> str:
         discovery_query=discovery_query,
         discovery_limit=discovery_limit,
         wiki_host=wiki_host,
+        discovery_backend=discovery_backend,
         fmt="text",
         max_pages=max_pages,
         max_chars_per_page=max_chars,

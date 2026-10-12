@@ -443,6 +443,79 @@ class DiscoveryTests(_TmpDirTestCase):
         self.assertEqual(result.claims[0].status, STATUS_SUPPORTED)
 
 
+class SerpDiscoveryTests(_TmpDirTestCase):
+    """--discover-backend serp: web search discovery beyond Wikipedia."""
+
+    def _hits(self) -> list[Any]:
+        from freegem.serp import SearchHit
+
+        return [
+            SearchHit(
+                title="Python release notes",
+                url="https://docs.python.org/3/whatsnew/3.13.html",
+                snippet="s",
+                position=1,
+                source="duckduckgo",
+            ),
+            SearchHit(
+                title="PEP 779",
+                url="https://peps.python.org/pep-0779/",
+                snippet="s",
+                position=2,
+                source="duckduckgo",
+            ),
+        ]
+
+    def test_serp_backend_returns_ranked_urls(self) -> None:
+        from freegem.serp import DuckDuckGoHTMLProvider
+
+        with mock.patch.object(
+            DuckDuckGoHTMLProvider, "search", return_value=self._hits()
+        ) as search:
+            found = discover_urls(
+                BridgeConfig(), "python 3.13 free-threading", limit=2, backend="serp"
+            )
+        self.assertEqual(search.call_args.kwargs["max_results"], 2)
+        self.assertEqual([item["url"] for item in found], self._urls())
+        self.assertEqual([item["via"] for item in found], ["serp-duckduckgo"] * 2)
+
+    def _urls(self) -> list[str]:
+        return [hit.url for hit in self._hits()]
+
+    def test_non_http_serp_hits_dropped(self) -> None:
+        from freegem.serp import DuckDuckGoHTMLProvider, SearchHit
+
+        junk = SearchHit(
+            title="bad", url="javascript:alert(1)", snippet="", position=3, source="duckduckgo"
+        )
+        with mock.patch.object(DuckDuckGoHTMLProvider, "search", return_value=[junk]):
+            found = discover_urls(BridgeConfig(), "query", limit=3, backend="serp")
+        self.assertEqual(found, [])
+
+    def test_config_backend_used_when_param_absent(self) -> None:
+        from freegem.serp import DuckDuckGoHTMLProvider
+
+        cfg = BridgeConfig(discover_backend="serp")
+        with mock.patch.object(DuckDuckGoHTMLProvider, "search", return_value=self._hits()):
+            found = discover_urls(cfg, "anything", limit=2)
+        self.assertEqual(found[0]["via"], "serp-duckduckgo")
+
+    def test_wiki_backend_still_default(self) -> None:
+        """Without serp anywhere, discovery still goes through the wiki portal."""
+        from freegem.tests.test_claim_verify import _FakeResponse
+
+        response = _FakeResponse(json.dumps({"pages": []}).encode())
+        with (
+            mock.patch("freegem.web_scraper._check_robots", lambda cfg, url: None),
+            mock.patch(
+                "freegem.web_scraper._fetch",
+                lambda cfg, url, timeout=30, headers=None: response,
+            ),
+        ):
+            found = discover_urls(BridgeConfig(), "xyzzy nothing", limit=2)
+        self.assertEqual(found, [])
+
+
 class SectionAndLocationTests(_TmpDirTestCase):
     """Deterministic splitting, scoring, and quote location."""
 
