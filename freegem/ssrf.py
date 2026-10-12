@@ -28,6 +28,25 @@ anonymous-entitlement flows work (a 302 that sets a cookie and loops back is
 a normal browser pattern, and the ladder's shared jar resolves it on the
 next attempt). The jar never carries credentials we did not receive from
 the origin itself.
+
+Proxy mode, precisely: DNS belongs to the proxy, so the dial cannot be
+pinned. What the client CAN still do is refuse hosts that locally resolve
+to a non-public address -- :class:`PreflightedProxyHandler` runs that check
+before every proxied request (initial URL included). A name that does not
+resolve locally is allowed through, because in a proxy-only deployment the
+proxy is the only resolver; refusing unresolvable names would break split-
+horizon setups. That residual -- the proxy resolving to an address we could
+not pre-check -- is documented in the README security section. Redirect
+hops stay strict: :class:`SafeRedirect` refuses unresolvable names outright,
+because a redirect is attacker-influenced, not user intent.
+
+Browsers (Playwright, Selenium) cannot be pinned at all -- the browser does
+its own DNS and dials its own sockets for the main frame AND every
+subresource. :mod:`freegem.browser_guard` layers the next-best controls on
+top of this module's policy: strict resolve-and-check on the initial URL,
+per-request validation of every navigation and subresource (Playwright
+routes), a CDP blocklist plus resolver rules (Selenium), and a final-URL
+re-validation before any content is returned.
 """
 
 from __future__ import annotations
@@ -46,9 +65,12 @@ from typing import Any
 __all__ = [
     "PinnedHTTPHandler",
     "PinnedHTTPSHandler",
+    "PreflightedProxyHandler",
     "SSRFRefused",
     "SafeRedirect",
     "build_guarded_opener",
+    "host_public_or_unresolvable",
+    "host_public_strict",
     "ip_is_nonpublic",
     "pick_public_ip",
     "pick_public_ips",
@@ -72,6 +94,44 @@ _EXTRA_NONPUBLIC_NETS = (
     ipaddress.ip_network("100.64.0.0/10"),  # CGNAT / RFC 6598
     ipaddress.ip_network("fec0::/10"),  # deprecated IPv6 site-local
 )
+
+#: Hostnames that must never be contacted even when DNS calls them public:
+#: cloud metadata services that resolve by name on their own networks.
+_METADATA_HOSTNAMES = frozenset(
+    {
+        "metadata",  # GCE short name via its own resolver
+        "metadata.google.internal",  # GCP
+        "metadata.goog",  # GCP alternate
+        "instance-data",  # generic
+        "metadata.azure.internal",
+    }
+)
+
+#: Special-use suffixes a public-web fetch has no business resolving
+#: (RFC 6761 localhost, RFC 6762 .local mDNS, RFC 8375 .home.arpa, and the
+#: ICANN-reserved .internal). Fail closed -- the public web does not use them.
+_SPECIAL_SUFFIXES = (".internal", ".local", ".localhost", ".home.arpa")
+
+
+def _is_special_name(bare: str) -> bool:
+    """True for localhost, cloud-metadata names, and special-use suffixes."""
+
+    low = bare.lower().rstrip(".")
+    if low == "localhost" or low in _METADATA_HOSTNAMES:
+        return True
+    return any(low.endswith(suffix) for suffix in _SPECIAL_SUFFIXES)
+
+
+def _ip_literal_nonpublic(bare: str) -> bool:
+    """True when ``bare`` is an IP literal we refuse. Non-IP strings are False."""
+
+    try:
+        ip = ipaddress.ip_address(bare)
+    except ValueError:
+        return False
+    if ip.version == 6 and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return ip_is_nonpublic(ip)
 
 
 def ip_is_nonpublic(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -194,6 +254,63 @@ def url_allowed(url: str) -> str:
     return url
 
 
+def host_public_or_unresolvable(host: str) -> str:
+    """Proxy-mode preflight: refuse hosts that RESOLVE non-public, allow the rest.
+
+    Proxy mode cannot pin the dial, so this is the strongest client-side check
+    that does not break proxy-only deployments: a host that locally resolves
+    to a non-public address (or IS one) is refused; a host that does not
+    resolve locally is allowed through, because the proxy owns DNS there.
+    Metadata/special-use hostnames are refused unconditionally -- no proxy
+    deployment has a legitimate reason to scrape its own cloud metadata.
+    Used by :class:`PreflightedProxyHandler` before every proxied request.
+    """
+    bare = _host_only(host)
+    if not bare:
+        raise SSRFRefused("refusing empty host")
+    if _is_special_name(bare):
+        raise SSRFRefused(f"{bare!r} is a metadata/special-use hostname")
+    if _ip_literal_nonpublic(bare):
+        raise SSRFRefused(f"{bare!r} is a non-public address")
+    try:
+        ipaddress.ip_address(bare)
+        return bare  # a public IP literal: nothing to resolve
+    except ValueError:
+        pass
+    try:
+        infos = socket.getaddrinfo(bare, None)
+    except OSError:
+        return bare  # local DNS silent -> the proxy resolves; allowed here
+    _checked_addresses(bare, infos)  # raises on ANY non-public address
+    return bare
+
+
+def host_public_strict(host: str) -> str:
+    """Browser-mode preflight: strict local resolve-and-check.
+
+    For browser fetches the local resolver IS the resolver the browser uses,
+    so there is no split-horizon excuse: an unresolvable name is refused the
+    same as a non-public one (it is a failed fetch either way -- refusing
+    keeps the classification honest). Metadata/special-use hostnames and
+    non-public IP literals are refused. Playwright's route guard and
+    Selenium's final-URL check run this per request.
+    """
+    bare = _host_only(host)
+    if not bare:
+        raise SSRFRefused("refusing empty host")
+    if _is_special_name(bare):
+        raise SSRFRefused(f"{bare!r} is a metadata/special-use hostname")
+    if _ip_literal_nonpublic(bare):
+        raise SSRFRefused(f"{bare!r} is a non-public address")
+    try:
+        ipaddress.ip_address(bare)
+        return bare  # a public IP literal: nothing to resolve
+    except ValueError:
+        pass
+    pick_public_ips(bare)  # raises on unresolvable OR any non-public address
+    return bare
+
+
 class SafeRedirect(urllib.request.HTTPRedirectHandler):
     """Re-validate the scheme and the host of every redirect hop.
 
@@ -314,6 +431,26 @@ class PinnedHTTPSHandler(urllib.request.HTTPSHandler):
         return self.do_open(conn_class, req)
 
 
+class PreflightedProxyHandler(urllib.request.ProxyHandler):
+    """Proxy-mode opening with a client-side public-IP preflight.
+
+    Subclasses :class:`urllib.request.ProxyHandler` so the proxy semantics
+    are untouched -- the ONLY change is that :meth:`proxy_open` (which every
+    ``<scheme>_open`` lambda installed by ``ProxyHandler.__init__``
+    dispatches through) runs :func:`host_public_or_unresolvable` on the
+    request host BEFORE the proxy is contacted. That covers the initial URL
+    and everything stdlib re-dispatches through the opener; redirect hops
+    get the stricter :class:`SafeRedirect` check on top.
+    """
+
+    def __init__(self, proxy: str) -> None:
+        super().__init__({"http": proxy, "https": proxy})
+
+    def proxy_open(self, req: urllib.request.Request, proxy: Any = None, type: Any = None) -> Any:
+        host_public_or_unresolvable(req.host)
+        return super().proxy_open(req, proxy, type)
+
+
 def build_guarded_opener(
     proxy: str | None = None,
     context: ssl.SSLContext | None = None,
@@ -349,7 +486,7 @@ def build_guarded_opener(
     )
     if proxy:
         return urllib.request.build_opener(
-            urllib.request.ProxyHandler({"http": proxy, "https": proxy}),
+            PreflightedProxyHandler(proxy),
             SafeRedirect(),
             *cookie_handler,
         )

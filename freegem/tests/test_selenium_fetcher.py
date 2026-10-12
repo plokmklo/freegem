@@ -168,7 +168,13 @@ def test_fetch_with_selenium_happy_path(fake_selenium: type[FakeDriver]) -> None
     driver = fake_selenium.instances[0]
     assert driver.urls == ["about:blank", "https://example.org/page"]
     assert driver.quit_called is True  # cleanup ran
-    assert [c for c, _ in driver.cdp] == ["Page.printToPDF"]
+    cdp_names = [c for c, _ in driver.cdp]
+    # The SSRF blocklist is installed first (Network.enable +
+    # Network.setBlockedURLs), then the PDF export runs.
+    assert cdp_names[:2] == ["Network.enable", "Network.setBlockedURLs"]
+    assert "Page.printToPDF" in cdp_names
+    blocked_urls = dict(driver.cdp)["Network.setBlockedURLs"]["urls"]
+    assert any("169.254.*" in pattern for pattern in blocked_urls)
 
 
 def test_fetch_with_selenium_seeds_cookies_from_storage_state(

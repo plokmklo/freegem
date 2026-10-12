@@ -29,9 +29,14 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from .browser_guard import (
+    browser_request_allowed,
+    selenium_blocked_url_patterns,
+    selenium_resolver_rules,
+)
 from .config import BridgeConfig
 from .crawler.fetch import FetchOutcome, crawl_fetch
-from .ssrf import SSRFRefused, url_allowed
+from .ssrf import SSRFRefused
 
 __all__ = [
     "SeleniumError",
@@ -105,6 +110,11 @@ def _build_driver(opts: SeleniumOptions) -> Any:
     chrome_opts.add_argument("--headless=new")
     chrome_opts.add_argument("--no-sandbox")
     chrome_opts.add_argument(f"--window-size={opts.viewport_width},{opts.viewport_height}")
+    # Kill name resolution for localhost/metadata/special-use suffixes at the
+    # browser's own resolver -- main frame AND subresources, any depth. The
+    # strict URL checks and the CDP blocklist carry the rest (see
+    # browser_guard.py for the honest layering).
+    chrome_opts.add_argument(f"--host-resolver-rules={selenium_resolver_rules()}")
     if opts.user_agent:
         chrome_opts.add_argument(f"--user-agent={opts.user_agent}")
     for name, value in opts.extra_headers.items():
@@ -146,6 +156,25 @@ def _apply_storage_state(driver: Any, opts: SeleniumOptions) -> None:
             continue  # a cookie for another domain must not kill the fetch
 
 
+def _install_cdp_blocklist(driver: Any) -> None:
+    """Best-effort CDP request blocklist (chromium sessions only).
+
+    The sync Selenium API cannot intercept-and-validate each request, so the
+    pattern layer blocks the well-known private/special targets at the CDP
+    level instead. Silently skipped for non-chromium drivers (Firefox) or
+    sessions that reject the command -- the strict initial-URL check and the
+    final-URL re-validation remain, and the residual is documented.
+    """
+    cmd = getattr(driver, "execute_cdp_cmd", None)
+    if cmd is None:
+        return
+    try:
+        cmd("Network.enable", {})
+        cmd("Network.setBlockedURLs", {"urls": selenium_blocked_url_patterns()})
+    except Exception:
+        pass  # non-chromium or restricted session; layered checks remain
+
+
 def fetch_with_selenium(opts: SeleniumOptions) -> SeleniumResult:
     """Render one URL in an isolated (fresh) Selenium session."""
     started = time.monotonic()
@@ -154,7 +183,7 @@ def fetch_with_selenium(opts: SeleniumOptions) -> SeleniumResult:
         return int((time.monotonic() - started) * 1000)
 
     try:
-        target_url = url_allowed(opts.url)
+        target_url = browser_request_allowed(opts.url)
     except SSRFRefused as exc:
         return SeleniumResult(
             url=opts.url,
@@ -170,6 +199,7 @@ def fetch_with_selenium(opts: SeleniumOptions) -> SeleniumResult:
         driver = _build_driver(opts)
         driver.set_page_load_timeout(opts.page_load_timeout_sec)
         driver.implicitly_wait(opts.implicit_wait_sec)
+        _install_cdp_blocklist(driver)
 
         driver.get("about:blank")
         _apply_storage_state(driver, opts)
@@ -187,6 +217,23 @@ def fetch_with_selenium(opts: SeleniumOptions) -> SeleniumResult:
         title = driver.title or ""
         html = driver.page_source or ""
         final_url = driver.current_url or target_url
+
+        # Final-URL re-validation BEFORE any content is returned: a redirect
+        # (or JS navigation) that landed on an internal host yields a
+        # refusal with EMPTY text, never the internal page. The browser may
+        # have already made the request -- that residual is documented;
+        # what must never happen is handing the internal content back.
+        try:
+            browser_request_allowed(final_url)
+        except SSRFRefused as exc:
+            return SeleniumResult(
+                url=opts.url,
+                final_url=final_url,
+                status=0,
+                ok=False,
+                error=f"SSRF refused (final URL): {exc}",
+                elapsed_ms=_elapsed(),
+            )
 
         screenshot_path: str | None = None
         pdf_path: str | None = None

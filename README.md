@@ -548,6 +548,47 @@ and traces, with `finally`-guaranteed cleanup. `fetch_http_first()` runs
 the guarded HTTP fetch and falls back to the browser when the body is a
 JS shell.
 
+**Browser and proxy security model.** The same public-only SSRF policy is
+enforced on every path, but the mechanism differs by what the transport
+allows — stated precisely, because "we block SSRF" means three different
+things here:
+
+- **Direct HTTP (no proxy).** Each URL is resolved once, every resolved
+  address must be public, and the TCP dial is pinned to exactly those
+  addresses while TLS keeps verifying the hostname — no resolve-check-
+  reconnect window for DNS rebinding. Every redirect hop is re-resolved,
+  re-checked, and re-pinned the same way.
+- **Proxy mode (`proxy` config).** The proxy owns DNS, so the client
+  cannot pin the dial. Before every proxied request (initial URL
+  included) the host is checked against local DNS and refused if it
+  resolves to a private/loopback/link-local/metadata address; cloud
+  metadata names (`metadata.google.internal`, etc.) are refused
+  unconditionally. A name that does not resolve *locally* is allowed
+  through, because in a proxy-only deployment the proxy is the only
+  resolver — **that is the residual risk of proxy mode**: the proxy may
+  resolve to an address the client could not pre-check. Use a proxy you
+  trust; every redirect hop is still checked strictly (unresolvable names
+  refused on redirects).
+- **Browsers (Playwright / Selenium).** The browser resolves and dials on
+  its own for the main frame *and every subresource*, so pinning is
+  impossible. Layered instead: (1) the initial URL passes the strict
+  public-only check before any browser launches; (2) Playwright registers
+  a context-wide route guard that validates *every* request — redirects,
+  meta-refresh, JS navigation, and all subresources — aborting refused
+  ones (a blocked navigation fails the fetch; a blocked subresource is
+  just dropped); (3) Selenium, whose sync API cannot intercept requests,
+  installs a CDP `Network.setBlockedURLs` blocklist (special-use IPv4/IPv6
+  ranges, localhost and metadata names, across http/https/ws/wss) plus
+  `--host-resolver-rules` that kill name resolution for
+  metadata/localhost/special suffixes at the browser's own resolver, and
+  re-validates the *final* URL after navigation — a redirect that landed
+  internally returns a refusal with empty text, never the internal page.
+  Residuals, honestly: the browser's own DNS/TCP cannot be pinned
+  (request-time validation narrows the rebinding window, it does not
+  close it); Selenium's pattern layer cannot enumerate every private DNS
+  name (Firefox gets only the initial and final-URL checks); and with a
+  Grid, the *node's* network position decides what is reachable.
+
 **Session profiles** (`freegem.session_profiles`): named storage-state
 profiles (cookies + origins, Playwright-compatible) under
 `~/.config/freegem/profiles/`, with `expires_at` enforced on load,

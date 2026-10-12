@@ -47,14 +47,28 @@ class TestPlaywrightFetcher(unittest.TestCase):
             fetch_with_playwright(opts)
 
     @patch("freegem.playwright_fetcher.is_playwright_available", return_value=True)
-    @patch("freegem.playwright_fetcher.url_allowed")
-    def test_fetch_with_playwright_ssrf_refusal(self, mock_allowed: Any, mock_avail: Any) -> None:
+    @patch("freegem.playwright_fetcher.browser_request_allowed")
+    def test_fetch_with_playwright_ssrf_refusal(
+        self, mock_allowed: Any, mock_avail: Any
+    ) -> None:
         from freegem.ssrf import SSRFRefused
 
+        # The browser fetcher validates the FULL policy (strict resolve-and-
+        # check, not just syntax) before any browser launches.
         mock_allowed.side_effect = SSRFRefused("127.0.0.1 refused")
 
         opts = PlaywrightOptions(url="http://127.0.0.1")
         res = fetch_with_playwright(opts)
+        self.assertFalse(res.ok)
+        assert res.error is not None
+        self.assertIn("SSRF refused", res.error)
+
+    def test_fetch_with_playwright_refuses_loopback_without_launching(self) -> None:
+        # No mocks on the guard: a loopback URL must be refused by the REAL
+        # policy, and refusal must happen BEFORE any browser import/launch
+        # (this sandbox has no playwright installed, so a launch would raise
+        # RuntimeError -- refusal returning a clean result proves ordering).
+        res = fetch_with_playwright(PlaywrightOptions(url="http://169.254.169.254/latest/meta-data/"))
         self.assertFalse(res.ok)
         assert res.error is not None
         self.assertIn("SSRF refused", res.error)

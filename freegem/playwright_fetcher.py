@@ -13,9 +13,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from .browser_guard import browser_request_allowed, install_playwright_route_guard
 from .config import BridgeConfig
 from .crawler.fetch import FetchOutcome, crawl_fetch
-from .ssrf import SSRFRefused, url_allowed
+from .ssrf import SSRFRefused
 
 
 @dataclass
@@ -73,16 +74,14 @@ def fetch_with_playwright(opts: PlaywrightOptions) -> PlaywrightResult:
 
     Raises RuntimeError if Playwright is not installed.
     """
-    if not is_playwright_available():
-        raise RuntimeError(
-            "Playwright package is not installed. Install with `pip install playwright`."
-        )
-
     started = time.monotonic()
 
-    # SSRF verification on input URL before browser launch
+    # SSRF verification on the input URL BEFORE any availability check or
+    # browser launch: the strict policy (public-only resolution, metadata/
+    # special names, non-http(s) schemes). A refused URL must be refused
+    # regardless of which browser stack is installed.
     try:
-        target_url = url_allowed(opts.url)
+        target_url = browser_request_allowed(opts.url)
     except SSRFRefused as exc:
         return PlaywrightResult(
             url=opts.url,
@@ -91,6 +90,11 @@ def fetch_with_playwright(opts: PlaywrightOptions) -> PlaywrightResult:
             ok=False,
             error=f"SSRF refused: {exc}",
             elapsed_ms=int((time.monotonic() - started) * 1000),
+        )
+
+    if not is_playwright_available():
+        raise RuntimeError(
+            "Playwright package is not installed. Install with `pip install playwright`."
         )
 
     try:
@@ -118,17 +122,60 @@ def fetch_with_playwright(opts: PlaywrightOptions) -> PlaywrightResult:
                 context_args["extra_http_headers"] = opts.extra_headers
 
             context = browser.new_context(**context_args)
+            # Per-request guard: every request this context makes -- initial
+            # navigation, redirect hops, subresources -- must pass the same
+            # public-only policy. Installed before the first navigation.
+            guard = install_playwright_route_guard(context)
             try:
                 if opts.capture_trace and trace_file:
                     context.tracing.start(screenshots=True, snapshots=True, sources=True)
 
                 page = context.new_page()
-                response = page.goto(
-                    target_url, wait_until=opts.wait_until, timeout=opts.wait_timeout_ms
-                )
+                try:
+                    response = page.goto(
+                        target_url, wait_until=opts.wait_until, timeout=opts.wait_timeout_ms
+                    )
+                except Exception:
+                    # A blocked main-frame navigation surfaces as a generic
+                    # playwright error; translate it when OUR guard blocked it.
+                    if guard.blocked_navigations:
+                        return PlaywrightResult(
+                            url=opts.url,
+                            final_url=opts.url,
+                            status=0,
+                            ok=False,
+                            error=f"SSRF refused: {guard.blocked_navigations[-1]}",
+                            elapsed_ms=int((time.monotonic() - started) * 1000),
+                        )
+                    raise
 
                 status = response.status if response else 200
                 final_url = page.url
+
+                # Belt: re-validate the URL we actually landed on -- a redirect
+                # that ended on an internal host must not hand back content.
+                # (The route guard normally aborts that hop mid-flight; this
+                # catches any API-shape edge that slips past it.)
+                try:
+                    browser_request_allowed(final_url)
+                except SSRFRefused as exc:
+                    return PlaywrightResult(
+                        url=opts.url,
+                        final_url=final_url,
+                        status=status,
+                        ok=False,
+                        error=f"SSRF refused (final URL): {exc}",
+                        elapsed_ms=int((time.monotonic() - started) * 1000),
+                    )
+                if guard.blocked_navigations:
+                    return PlaywrightResult(
+                        url=opts.url,
+                        final_url=final_url,
+                        status=status,
+                        ok=False,
+                        error=f"SSRF refused: {guard.blocked_navigations[-1]}",
+                        elapsed_ms=int((time.monotonic() - started) * 1000),
+                    )
 
                 if opts.wait_selector:
                     page.wait_for_selector(opts.wait_selector, timeout=opts.wait_timeout_ms)
