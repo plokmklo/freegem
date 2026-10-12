@@ -62,6 +62,7 @@ class ControlPlaneTests(unittest.TestCase):
         queue.enqueue({"n": 1})
         worker = cp.join("crawler")
         handle, _ = cp.claim(worker, timeout_sec=1.0)
+        assert handle is not None  # narrow for mypy
         # simulate a renewal 3s into a 5s lease
         with cp._lock:
             cp._conn.execute(
