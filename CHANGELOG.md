@@ -55,6 +55,45 @@ Release gate, browser/proxy security, and bounded background jobs.
 - Config: `job_max_workers`, `job_max_pending`, `job_timeout_sec`,
   `job_retention`, `job_db`, `job_queue_url`.
 
+### P3 — ecosystem and advanced features
+
+- **Article/news adapter** (`freegem/article.py`): headline, authors,
+  published/modified time, section, description, image, publisher,
+  canonical, language and body text from news-shaped HTML; each field
+  resolves across four signal families (JSON-LD > OpenGraph > meta > DOM)
+  with per-field provenance in `result.signals` (news tags lie; callers
+  can audit). Offline-only.
+- **SERP providers** (`freegem/serp.py`): `duckduckgo` (HTML endpoint, no
+  key) and `brave` (official API — refuses half-configured with
+  `ProviderNotConfigured`); `get_provider` is the single opt-in point;
+  config gains `brave_api_key`. Boundary: search returns candidates and
+  never fetches them.
+- **Grid capacity management** (`freegem/grid_pool.py`): least-loaded
+  leasing over Selenium Grid nodes with honest session budgets,
+  backpressure (`GridPoolTimeout`), drain/maintenance, crash-safe release,
+  stats; `fetch_with_grid` composes lease → render → release. Pure
+  scheduling — no selenium import.
+- **Recurring scheduler** (`freegem/scheduler.py`): `run_once` ticks over
+  the crawl state's adaptive recrawl plan (due = `next_attempt_at` passed),
+  `SchedulerLoop` for long-lived deployments, and a cron/systemd-friendly
+  CLI. The scheduler never fetches; a failed probe still moves the due
+  time (no hot loop).
+- **Optional distributed control-plane** (`freegem/control_plane.py`):
+  worker registry + expiring leases + supervision (reap returns expired
+  leases; dead workers flagged) over any `WorkQueue` (SQLite locally,
+  Redis multi-host) — nothing activates unless a deployment constructs it.
+- **TypeScript SDK scaffold** (`sdk/typescript/`): typed client over the
+  four stable HTTP surfaces; widens only after the core contracts freeze.
+- **Scope document** (`docs/P3_ECOSYSTEM.md`): what shipped per P3 item and
+  where the product boundaries sit (dashboards/hosted offerings are a
+  separate product, no code in-repo by design).
+- **P3 live campaigns** (sandbox network, 2026-10-12): 1003 distinct
+  websites swept — coverage complete, 819/1003 readable (81.6%), failures
+  itemized in the state DB (bot walls, dead hosts, sandbox egress); and a
+  114-host AI-unscrappable hard-target sweep — 59/114 readable (51.8%),
+  the ladder's profile swaps, cookie jar and wayback last resort doing the
+  rescues. Politeness: per-host pacing, honest identity, no wall-cracking.
+
 ## [2.8.1] — 2026-10-12
 
 Honest scope boundaries: the service now states what it does NOT promise.
