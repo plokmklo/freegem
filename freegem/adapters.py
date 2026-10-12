@@ -64,6 +64,11 @@ def parse_pdf(data_or_path: bytes | str) -> DocumentResult:
         )
     except ImportError:
         pass
+    except Exception:
+        # pypdf is installed but the bytes are not a parseable PDF (truncated,
+        # encrypted, garbage): degrade to the stdlib fallback below instead of
+        # letting PdfStreamError escape to the caller.
+        pass
 
     # Basic stdlib PDF text extraction fallback
     raw_str = pdf_bytes.decode("latin1", errors="ignore")
@@ -134,6 +139,11 @@ def parse_docx(data_or_path: bytes | str) -> DocumentResult:
             doc_type="docx",
         )
     except ImportError:
+        pass
+    except Exception:
+        # python-docx is installed but the bytes are not a parseable DOCX (not
+        # a zip, corrupt package): degrade to the stdlib fallback below instead
+        # of letting BadZipFile escape to the caller.
         pass
 
     # Stdlib docx ZIP + XML extraction

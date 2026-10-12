@@ -134,7 +134,10 @@ class FetchImageBytesTests(unittest.TestCase):
     def test_no_credential_headers_on_fetch(self) -> None:
         """A user-supplied image URL must never receive the session cookie."""
         opener = mock.MagicMock()
-        opener.open.return_value.read.return_value = b"imagedata"
+        # fetch_image_bytes streams the body in 1 MiB blocks and stops at the
+        # first empty read; a fixed return_value here never goes empty and the
+        # loop only exits at the 25 MB cap (~2.9M recorded mock calls -> OOM).
+        opener.open.return_value.read.side_effect = [b"imagedata", b""]
         with (
             mock.patch("freegem.multimodal._host_resolves_public", return_value=True),
             mock.patch("freegem.multimodal.urllib.request.build_opener", return_value=opener),
