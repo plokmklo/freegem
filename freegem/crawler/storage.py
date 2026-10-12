@@ -36,8 +36,8 @@ class PostgresSink:
                 import psycopg2
                 self._conn = psycopg2.connect(self.config.connection_string)
                 self._ensure_table()
-            except ImportError:
-                raise RuntimeError("psycopg2 is required for PostgresSink. Install with 'pip install psycopg2-binary'.")
+            except ImportError as exc:
+                raise RuntimeError("psycopg2 is required for PostgresSink. Install with 'pip install psycopg2-binary'.") from exc
         return self._conn
 
     def _ensure_table(self) -> None:
@@ -100,8 +100,8 @@ class ObjectStorageSink:
                     endpoint_url=self.config.endpoint_url,
                     region_name=self.config.region_name,
                 )
-            except ImportError:
-                raise RuntimeError("boto3 is required for ObjectStorageSink. Install with 'pip install boto3'.")
+            except ImportError as exc:
+                raise RuntimeError("boto3 is required for ObjectStorageSink. Install with 'pip install boto3'.") from exc
         return self._client
 
     def write(self, item: dict[str, Any], key: str | None = None) -> str:

@@ -78,7 +78,7 @@ class LLMExtractor:
             except (json.JSONDecodeError, ValueError) as err:
                 logger.warning("LLM extraction attempt %d failed schema validation: %s", attempt + 1, err)
                 if attempt == self.config.max_retries:
-                    raise ValueError(f"LLM extraction failed after {attempt + 1} attempts: {err}")
+                    raise ValueError(f"LLM extraction failed after {attempt + 1} attempts: {err}") from err
                 prompt += (
                     f"\n\nERROR: Your previous output failed with error: {err}.\n"
                     "Please fix the format and return ONLY a valid JSON array conforming to the schema."

@@ -90,8 +90,8 @@ class RedisQueueAdapter(QueueAdapter):
             try:
                 import redis
                 self._client = redis.Redis.from_url(self.redis_url)
-            except ImportError:
-                raise RuntimeError("redis package is required for RedisQueueAdapter. Install with 'pip install redis'.")
+            except ImportError as exc:
+                raise RuntimeError("redis package is required for RedisQueueAdapter. Install with 'pip install redis'.") from exc
         return self._client
 
     def push(self, item: QueueItem) -> None:
@@ -133,8 +133,8 @@ class RabbitMQQueueAdapter(QueueAdapter):
                 self._connection = pika.BlockingConnection(params)
                 self._channel = self._connection.channel()
                 self._channel.queue_declare(queue=self.queue_name, durable=True)
-            except ImportError:
-                raise RuntimeError("pika package is required for RabbitMQQueueAdapter. Install with 'pip install pika'.")
+            except ImportError as exc:
+                raise RuntimeError("pika package is required for RabbitMQQueueAdapter. Install with 'pip install pika'.") from exc
         return self._channel
 
     def push(self, item: QueueItem) -> None:

@@ -108,6 +108,7 @@ __all__ = [
     "SeleniumFetcher",
     "Telemetry",
     "UnsafeXMLError",
+    "chunk_text",
     "compute_best_first_score",
     "compute_content_hash",
     "crawl_fetch",

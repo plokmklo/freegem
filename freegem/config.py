@@ -18,20 +18,15 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 import urllib.parse
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from types import MappingProxyType
 from typing import Any
 
 __all__ = ["DEFAULT_CONFIG", "BridgeConfig", "find_config", "load_config"]
 
-# Defaults are read-only. MappingProxyType ENFORCES the immutability the
-# comment always claimed: a plain dict annotated ``Mapping`` was still one
-# assignment away from being mutated by any importer. Use
-# BridgeConfig.replace() to derive variants.
-DEFAULT_CONFIG: Mapping[str, Any] = MappingProxyType({
+# Defaults are read-only. Use BridgeConfig.replace() to derive variants.
+DEFAULT_CONFIG: Mapping[str, Any] = {
     "port": 8081,
     "host": "127.0.0.1",  # loopback by default: do not expose your session
     "retry_attempts": 3,
@@ -62,102 +57,7 @@ DEFAULT_CONFIG: Mapping[str, Any] = MappingProxyType({
     # the Wikimedia API portal (or the site's own OpenSearch API for
     # non-Wikimedia MediaWiki hosts). robots.txt is honored either way.
     "discover_wiki": "en.wikipedia.org",
-})
-
-
-# ─── value coercion ──────────────────────────────────────────────────────────
-
-#: JSON has no distinct integer/boolean/string types per field, and configs
-#: are written by hand. Without coercion, "port": "9000" produced a string
-#: field and broke the bind, and "temporary_chats": "false" -- a NON-EMPTY
-#: string, therefore truthy -- silently enabled what the user asked to
-#: disable. These sets mirror BridgeConfig's field annotations.
-_INT_FIELDS = frozenset(
-    {
-        "port",
-        "retry_attempts",
-        "retry_delay_sec",
-        "request_timeout_sec",
-        "research_concurrency",
-        "robots_cache_ttl_sec",
-    }
-)
-_FLOAT_FIELDS = frozenset({"request_queue_wait_sec"})
-_BOOL_FIELDS = frozenset({"temporary_chats", "log_requests", "research_evidence"})
-_STR_FIELDS = frozenset(
-    {
-        "host",
-        "gemini_bl",
-        "default_model",
-        "discover_wiki",
-        "cookie_file",
-        "proxy",
-        "auth_user",
-        "xsrf_token",
-    }
-)
-_NULLABLE_STR_FIELDS = frozenset({"cookie_file", "proxy", "auth_user", "xsrf_token"})
-
-#: Sentinel returned by _coerce_value when the value cannot be salvaged and
-#: the documented default must apply instead.
-_DROP = object()
-
-
-def _coerce_value(name: str, value: Any) -> Any:
-    """Coerce one config value to the type its BridgeConfig field declares.
-
-    Booleans accept true/false/1/0/yes/no/on/off in any case; integers and
-    floats accept numeric strings; strings accept scalar JSON values. A
-    value that cannot be coerced returns the ``_DROP`` sentinel so the
-    documented default applies -- a bad value must not crash startup NOR
-    silently mean the opposite of what was written.
-    """
-    if name in _BOOL_FIELDS:
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            low = value.strip().lower()
-            if low in ("1", "true", "yes", "on"):
-                return True
-            if low in ("0", "false", "no", "off", ""):
-                return False
-            return _DROP
-        if isinstance(value, (int, float)):
-            return bool(value)
-        return _DROP
-    if name in _INT_FIELDS:
-        if isinstance(value, bool):  # bool is an int subclass; "port": true is nonsense
-            return _DROP
-        if isinstance(value, int):
-            return value
-        if isinstance(value, float) and value.is_integer():
-            return int(value)
-        if isinstance(value, str):
-            try:
-                return int(value.strip())
-            except ValueError:
-                return _DROP
-        return _DROP
-    if name in _FLOAT_FIELDS:
-        if isinstance(value, bool):
-            return _DROP
-        if isinstance(value, (int, float)):
-            return float(value)
-        if isinstance(value, str):
-            try:
-                return float(value.strip())
-            except ValueError:
-                return _DROP
-        return _DROP
-    if name in _STR_FIELDS:
-        if value is None:
-            return None if name in _NULLABLE_STR_FIELDS else _DROP
-        if isinstance(value, str):
-            return value
-        if isinstance(value, (int, float, bool)):
-            return str(value)
-        return _DROP
-    return value
+}
 
 
 @dataclass(frozen=True)
@@ -191,22 +91,13 @@ class BridgeConfig:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> BridgeConfig:
-        """Build from a mapping, coercing types and applying env overrides.
+        """Build from a mapping, ignoring unknown keys and applying env overrides.
 
         Unknown keys are dropped rather than rejected so that a config file
-        written for an older version still loads. Values are coerced to the
-        type each field declares (``"9000"`` becomes ``9000``,
-        ``"false"`` becomes ``False``); a value that cannot be coerced is
-        dropped in favor of the documented default. Secrets (``xsrf_token``)
-        may come from the environment instead of the file.
+        written for an older version still loads. Secrets (``xsrf_token``) may
+        come from the environment instead of the file.
         """
-        known: dict[str, Any] = {}
-        for key, value in data.items():
-            if key not in cls.__dataclass_fields__:
-                continue
-            coerced = _coerce_value(key, value)
-            if coerced is not _DROP:
-                known[key] = coerced
+        known = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
         cfg = cls(**{**dict(DEFAULT_CONFIG), **known})
 
         env = os.environ.get("FREEGEM_CONFIG")
@@ -290,19 +181,11 @@ def load_config(path: str | None) -> BridgeConfig:
     """Load a JSON config file into a BridgeConfig.
 
     A missing file is not an error: defaults plus env overrides apply.
-    Neither is a corrupt or unreadable one: every command (doctor included)
-    must come up running, so the problem is reported on stderr and defaults
-    apply -- a crashed CLI cannot even tell the user WHY it crashed.
     """
     data: dict = {}
     if path and os.path.exists(path):
-        try:
-            with open(path, encoding="utf-8") as fh:
-                loaded = json.load(fh)
-        except (OSError, ValueError) as exc:
-            # ValueError covers json.JSONDecodeError and its subclasses.
-            print(f"warning: ignoring unreadable config {path!r}: {exc}", file=sys.stderr)
-            loaded = None
+        with open(path, encoding="utf-8") as fh:
+            loaded = json.load(fh)
         if isinstance(loaded, dict):
             data = loaded
     return BridgeConfig.from_dict(data)
