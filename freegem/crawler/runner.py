@@ -421,7 +421,10 @@ def _keep_going(
         return False
     if budget.exhausted:
         return False
-    return time.monotonic() - started <= spec.limits.max_runtime_sec
+    # Strict ``<``: max_runtime_sec=0.0 means "no crawl time at all", and on
+    # Windows monotonic ticks are coarse (~15.6ms) -- ``0.0 <= 0.0`` read
+    # True for several iterations there, letting pages through a zero cap.
+    return time.monotonic() - started < spec.limits.max_runtime_sec
 
 
 def _wait_for_due(
@@ -442,7 +445,7 @@ def _wait_for_due(
         time.monotonic() < deadline
         and not cancel.is_set()
         and not budget.exhausted
-        and time.monotonic() - started <= spec.limits.max_runtime_sec
+        and time.monotonic() - started < spec.limits.max_runtime_sec
     ):
         time.sleep(0.1)
     return True
