@@ -259,39 +259,57 @@ class DurableStoreTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "jobs.sqlite3"
-            mgr = JobManager(artifact_dir=ART_DIR, store=SqliteJobStore(db))
-            job = mgr.create_job("scrape", {"url": "https://example.com/"})
-            mgr.update_job_status(job.id, "processing")
-            mgr.update_job_status(job.id, "completed", result={"text": "hi"})
+            # Windows cannot delete an open SQLite file: every store must be
+            # closed before the TemporaryDirectory context exits.
+            store1 = SqliteJobStore(db)
+            try:
+                mgr = JobManager(artifact_dir=ART_DIR, store=store1)
+                job = mgr.create_job("scrape", {"url": "https://example.com/"})
+                mgr.update_job_status(job.id, "processing")
+                mgr.update_job_status(job.id, "completed", result={"text": "hi"})
+            finally:
+                store1.close()
 
-            reopened = JobManager(artifact_dir=ART_DIR, store=SqliteJobStore(db))
-            fetched = reopened.get_job(job.id)
-            assert fetched is not None
-            self.assertEqual(fetched.status, "completed")
-            assert fetched.result is not None
-            self.assertEqual(fetched.result["text"], "hi")
+            store2 = SqliteJobStore(db)
+            try:
+                reopened = JobManager(artifact_dir=ART_DIR, store=store2)
+                fetched = reopened.get_job(job.id)
+                assert fetched is not None
+                self.assertEqual(fetched.status, "completed")
+                assert fetched.result is not None
+                self.assertEqual(fetched.result["text"], "hi")
+            finally:
+                store2.close()
 
     def test_restart_recovers_interrupted(self) -> None:
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "jobs.sqlite3"
-            mgr = JobManager(artifact_dir=ART_DIR, store=SqliteJobStore(db))
-            queued = mgr.create_job("scrape", {})
-            running = mgr.create_job("scrape", {})
-            mgr.update_job_status(running.id, "processing")
-            done = mgr.create_job("scrape", {})
-            mgr.update_job_status(done.id, "completed")
+            store1 = SqliteJobStore(db)
+            try:
+                mgr = JobManager(artifact_dir=ART_DIR, store=store1)
+                queued = mgr.create_job("scrape", {})
+                running = mgr.create_job("scrape", {})
+                mgr.update_job_status(running.id, "processing")
+                done = mgr.create_job("scrape", {})
+                mgr.update_job_status(done.id, "completed")
+            finally:
+                store1.close()
 
-            reopened = JobManager(artifact_dir=ART_DIR, store=SqliteJobStore(db))
-            q = reopened.get_job(queued.id)
-            r = reopened.get_job(running.id)
-            d = reopened.get_job(done.id)
-            assert q is not None and r is not None and d is not None
-            self.assertEqual(q.status, "interrupted")
-            self.assertEqual(r.status, "interrupted")
-            self.assertIn("restarted", q.error or "")
-            self.assertEqual(d.status, "completed")  # terminal rows untouched
+            store2 = SqliteJobStore(db)
+            try:
+                reopened = JobManager(artifact_dir=ART_DIR, store=store2)
+                q = reopened.get_job(queued.id)
+                r = reopened.get_job(running.id)
+                d = reopened.get_job(done.id)
+                assert q is not None and r is not None and d is not None
+                self.assertEqual(q.status, "interrupted")
+                self.assertEqual(r.status, "interrupted")
+                self.assertIn("restarted", q.error or "")
+                self.assertEqual(d.status, "completed")  # terminal rows untouched
+            finally:
+                store2.close()
 
     def test_memory_store_is_a_noop(self) -> None:
         store = MemoryJobStore()
@@ -308,16 +326,19 @@ class DurableStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "jobs.sqlite3"
             store = SqliteJobStore(db)
-            mgr = JobManager(artifact_dir=ART_DIR, store=store)
-            for _ in range(3):
-                job = mgr.create_job("scrape", {})
-                mgr.update_job_status(job.id, "completed")
-            self.assertEqual(len(store.load_all()), 3)
-            self.assertEqual(mgr.enforce_retention(0), 0)  # keep<=0 is a no-op
-            self.assertEqual(mgr.enforce_retention(1), 2)  # evict to one
-            self.assertEqual(mgr.enforce_retention(1), 0)  # already within
-            self.assertEqual(len(store.load_all()), 1)
-            self.assertEqual(len(mgr.jobs), 1)
+            try:
+                mgr = JobManager(artifact_dir=ART_DIR, store=store)
+                for _ in range(3):
+                    job = mgr.create_job("scrape", {})
+                    mgr.update_job_status(job.id, "completed")
+                self.assertEqual(len(store.load_all()), 3)
+                self.assertEqual(mgr.enforce_retention(0), 0)  # keep<=0 is a no-op
+                self.assertEqual(mgr.enforce_retention(1), 2)  # evict to one
+                self.assertEqual(mgr.enforce_retention(1), 0)  # already within
+                self.assertEqual(len(store.load_all()), 1)
+                self.assertEqual(len(mgr.jobs), 1)
+            finally:
+                store.close()
 
 
 class ExternalQueueTests(unittest.TestCase):
@@ -365,7 +386,14 @@ class ExternalQueueTests(unittest.TestCase):
             self.assertEqual(current.status, "completed")
             # The dispatcher consumed + acked the durable payload.
             probe = SqliteQueue(f"sqlite://{qpath}")
-            self.assertEqual(probe.depth(), 0)
+            try:
+                self.assertEqual(probe.depth(), 0)
+            finally:
+                probe.close()
+                # Windows: release the file before the tempdir is removed.
+                ext: Any = runner._external
+                ext.close()
+                runner._external = None
 
 
 if __name__ == "__main__":
