@@ -28,6 +28,7 @@ from .jobs import GLOBAL_JOB_MANAGER, Job
 from .metrics import ServerMetrics, new_request_id, record_audit_event
 from .models import MODELS, resolve_model
 from .multimodal import detect_image_mime, fetch_image_bytes, upload_image
+from .non_goals import NON_GOALS
 from .tools import (
     ImageRef,
     google_contents_to_prompt,
@@ -625,6 +626,30 @@ class GeminiHandler(BaseHTTPRequestHandler):
                         "version": __version__,
                         "models": list(MODELS),
                         "session": "cookie" if self.cfg.has_session_cookie() else "anonymous",
+                        "non_guarantees": [goal.label for goal in NON_GOALS],
+                    }
+                )
+            elif path == "/v1/about":
+                # Scope boundaries, stated by the service itself: every
+                # client that probes the server also learns what it does
+                # NOT promise. Static data; no session or config leakage.
+                self.send_json(
+                    {
+                        "version": __version__,
+                        "non_goals": [
+                            {
+                                "label": goal.label,
+                                "assumption": goal.assumption,
+                                "reality": goal.reality,
+                            }
+                            for goal in NON_GOALS
+                        ],
+                        "stance": (
+                            "FreeGem is a best-effort local reader of the "
+                            "live web. It fetches politely and reports "
+                            "failures honestly; the items above are "
+                            "deliberate scope boundaries, not bugs."
+                        ),
                     }
                 )
             elif path == "/v1/models":

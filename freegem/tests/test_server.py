@@ -16,8 +16,10 @@ import unittest
 from typing import Any, ClassVar
 from unittest import mock
 
+from freegem import __version__
 from freegem.config import BridgeConfig
 from freegem.gemini import BridgeError
+from freegem.non_goals import NON_GOALS
 from freegem.server import GeminiHandler, ThreadedServer, estimate_tokens
 
 TOOLS = [
@@ -108,6 +110,29 @@ class DiscoveryEndpointTests(EndpointTestCase):
         payload = json.loads(raw)
         self.assertEqual(payload["status"], "ok")
         self.assertIn("models", payload)
+        # The health probe carries the short non-guarantee labels so every
+        # client sees the scope boundaries, not just the happy path.
+        self.assertIn("non_guarantees", payload)
+        self.assertIn("No guaranteed scraping SLA", payload["non_guarantees"])
+        self.assertEqual(len(payload["non_guarantees"]), len(NON_GOALS))
+
+    def test_about_non_goals(self) -> None:
+        status, _, raw = self.get("/v1/about")
+        self.assertEqual(status, 200)
+        payload = json.loads(raw)
+        self.assertEqual(payload["version"], __version__)
+        goals = payload["non_goals"]
+        self.assertEqual(len(goals), len(NON_GOALS))
+        for goal in goals:
+            for key in ("label", "assumption", "reality"):
+                self.assertTrue(goal[key].strip())
+        labels = [goal["label"] for goal in goals]
+        self.assertIn("No CAPTCHA solving, anti-bot bypass, stealth, or fingerprint evasion", labels)
+        self.assertIn(
+            "No hosted queues, databases, dashboards, proxies, or billing-free infrastructure",
+            labels,
+        )
+        self.assertIn("best-effort", payload["stance"])
 
     def test_root_matches_health(self) -> None:
         status, _, _ = self.get("/")

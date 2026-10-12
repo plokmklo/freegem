@@ -875,10 +875,43 @@ heavy use can get the session blocked.
 tool calls, so the full answer is generated, parsed, then replayed as one
 chunk. Plain text streams token-by-token.
 
-- **The scraper fetches raw HTML.** `web_scrape` / `freegem scrape` render no
-JavaScript: SPA sites return whatever the server sends before hydration,
-which is often almost empty. That needs a headless browser and is
-deliberately out of scope.
+- **The plain scraper fetches raw HTML.** `web_scrape` / `freegem scrape`
+render no JavaScript: SPA sites return whatever the server sends before
+hydration, which is often almost empty. For JS-heavy pages use the
+dynamic-pages job API (`playwright` / `selenium` fetchers), which is
+best-effort and not universal.
+
+### What the scraper does not guarantee
+
+The scraping side is honest best-effort. In plain terms, it does **not**
+promise:
+
+- **Guaranteed scraping, availability, completeness, freshness, or accuracy
+on arbitrary sites.** Sites fail, move, truncate, and change without
+notice; jobs report what they actually got, failures included.
+- **CAPTCHA solving, anti-bot bypass, stealth success, or fingerprint
+evasion.** FreeGem fetches politely, like a normal client, and stops
+there — a design stance, not a missing feature.
+- **A free proxy pool or managed browser fleet.** Requests come from your
+machine and your IPs; proxies are yours to choose, configure, and pay for.
+- **A proprietary web index or built-in SERP service.** The crawler, simhash
+dedup, and search-index sinks are provided so you can implement one — the
+engine itself is not bundled.
+- **Unlimited crawling or unlimited autoscaling.** Bounded parallelism,
+body caps, and per-host politeness delays are configurable guardrails, not
+removable ones.
+- **Universal JavaScript, login, WebSocket, CAPTCHA, PDF, DOCX, or media
+support.** The adapters cover common cases, not all of them.
+- **Deterministic or always-correct LLM extraction.** Schema constraints,
+validation with repair, and retries help; a probabilistic system stays
+probabilistic.
+- **Hosted queues, databases, dashboards, proxies, or billing-free
+infrastructure.** Redis/RabbitMQ, PostgreSQL, and object storage are
+adapters to infrastructure you run; FreeGem ships none.
+
+The server states these boundaries itself: `GET /health` carries the short
+`non_guarantees` labels, `GET /v1/about` returns the full
+assumption/reality detail, and `docs/NON_GOALS.md` is the long-form writeup.
 
 ---
 

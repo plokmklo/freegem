@@ -5,6 +5,26 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.1] — 2026-10-12
+
+Honest scope boundaries: the service now states what it does NOT promise.
+
+- **`GET /v1/about`** (new): returns the full non-goals list — label,
+  common assumption, and reality for each of the eight boundaries — plus
+  the project stance (best-effort, polite, honest failures).
+- **`GET /health`** now carries `non_guarantees`: the short labels, so
+  every client that probes the server also learns the scope boundaries.
+- **`freegem/non_goals.py`**: canonical `NON_GOALS` data — no scraping SLA,
+  no CAPTCHA solving / anti-bot bypass / stealth / fingerprint evasion,
+  no free proxy pool or managed browser fleet, no proprietary web index or
+  built-in SERP, no unlimited crawling or autoscaling, no universal
+  JS/login/WebSocket/PDF/DOCX/media support, no deterministic LLM
+  extraction, no hosted queues/databases/dashboards/proxies/infrastructure.
+- **`docs/NON_GOALS.md`** (new): long-form writeup of each boundary.
+- **README**: new "What the scraper does not guarantee" subsection under
+  Limitations; the plain-scraper bullet no longer claims JS rendering is
+  "deliberately out of scope" — it points at the dynamic-pages fetchers.
+
 ## [2.8.0] — 2026-10-12
 
 Practical dynamic pages and a service boundary (P1), production-scale
