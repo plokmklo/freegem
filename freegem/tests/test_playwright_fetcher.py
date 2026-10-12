@@ -48,9 +48,7 @@ class TestPlaywrightFetcher(unittest.TestCase):
 
     @patch("freegem.playwright_fetcher.is_playwright_available", return_value=True)
     @patch("freegem.playwright_fetcher.browser_request_allowed")
-    def test_fetch_with_playwright_ssrf_refusal(
-        self, mock_allowed: Any, mock_avail: Any
-    ) -> None:
+    def test_fetch_with_playwright_ssrf_refusal(self, mock_allowed: Any, mock_avail: Any) -> None:
         from freegem.ssrf import SSRFRefused
 
         # The browser fetcher validates the FULL policy (strict resolve-and-
@@ -68,7 +66,9 @@ class TestPlaywrightFetcher(unittest.TestCase):
         # policy, and refusal must happen BEFORE any browser import/launch
         # (this sandbox has no playwright installed, so a launch would raise
         # RuntimeError -- refusal returning a clean result proves ordering).
-        res = fetch_with_playwright(PlaywrightOptions(url="http://169.254.169.254/latest/meta-data/"))
+        res = fetch_with_playwright(
+            PlaywrightOptions(url="http://169.254.169.254/latest/meta-data/")
+        )
         self.assertFalse(res.ok)
         assert res.error is not None
         self.assertIn("SSRF refused", res.error)
