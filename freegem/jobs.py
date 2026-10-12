@@ -133,8 +133,15 @@ class SqliteJobStore:
     def __init__(self, path: str | Path) -> None:
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(target), check_same_thread=False)
-        self._conn.execute(
+        self.path = str(target)
+        self._write_lock = threading.Lock()
+        self._conn = self._open(self.path)
+        self.mark_interrupted()
+
+    @staticmethod
+    def _open(path: str) -> sqlite3.Connection:
+        conn = sqlite3.connect(path, check_same_thread=False)
+        conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS jobs (
                 id TEXT PRIMARY KEY,
@@ -152,10 +159,34 @@ class SqliteJobStore:
             )
             """
         )
-        self._conn.commit()
-        self.mark_interrupted()
+        conn.commit()
+        return conn
+
+    def _reconnect(self) -> None:
+        """Replace a connection that ended up unusable (Windows file locks)."""
+
+        with contextlib.suppress(Exception):
+            self._conn.close()
+        self._conn = self._open(self.path)
 
     def upsert(self, job: Job) -> None:
+        """Write-through mirror. Persistence NEVER blocks job execution:
+        a connection that goes bad (Windows file-lock state, mid-write
+        damage) gets one reconnect+retry; if that fails too, the write is
+        dropped -- the in-memory manager remains the source of truth.
+        """
+        try:
+            with self._write_lock:
+                self._upsert_now(job)
+        except sqlite3.Error:
+            try:
+                with self._write_lock:
+                    self._reconnect()
+                    self._upsert_now(job)
+            except sqlite3.Error:
+                pass
+
+    def _upsert_now(self, job: Job) -> None:
         self._conn.execute(
             """
             INSERT INTO jobs (id, type, status, params, result, error, artifacts,
@@ -185,10 +216,13 @@ class SqliteJobStore:
         self._conn.commit()
 
     def load_all(self) -> list[Job]:
-        rows = self._conn.execute(
-            "SELECT id, type, status, params, result, error, artifacts, created_at,"
-            " started_at, completed_at, attempts, retry_traces FROM jobs"
-        ).fetchall()
+        try:
+            rows = self._conn.execute(
+                "SELECT id, type, status, params, result, error, artifacts, created_at,"
+                " started_at, completed_at, attempts, retry_traces FROM jobs"
+            ).fetchall()
+        except sqlite3.Error:
+            return []  # unreadable store: in-memory history still works
         jobs: list[Job] = []
         for row in rows:
             try:
@@ -213,19 +247,27 @@ class SqliteJobStore:
         return jobs
 
     def delete(self, job_id: str) -> None:
-        self._conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
-        self._conn.commit()
+        try:
+            with self._write_lock:
+                self._conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+                self._conn.commit()
+        except sqlite3.Error:
+            pass
 
     def mark_interrupted(self) -> int:
-        cur = self._conn.execute(
-            "UPDATE jobs SET status = 'interrupted',"
-            " error = 'interrupted: the server restarted before this job finished',"
-            " completed_at = ?"
-            " WHERE status IN ('queued', 'processing')",
-            (time.time(),),
-        )
-        self._conn.commit()
-        return cur.rowcount
+        try:
+            with self._write_lock:
+                cur = self._conn.execute(
+                    "UPDATE jobs SET status = 'interrupted',"
+                    " error = 'interrupted: the server restarted before this job finished',"
+                    " completed_at = ?"
+                    " WHERE status IN ('queued', 'processing')",
+                    (time.time(),),
+                )
+                self._conn.commit()
+                return cur.rowcount
+        except sqlite3.Error:
+            return 0
 
     def close(self) -> None:
         with_id = getattr(self._conn, "close", None)
