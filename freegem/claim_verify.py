@@ -209,6 +209,15 @@ class VerifyResult:
         return sum(1 for s in self.sources if not s.ok and not s.skipped)
 
     @property
+    def skipped_pages(self) -> int:
+        """URLs recorded but never fetched because a budget would be blown.
+
+        Distinct from ``failed_pages`` so a JSON consumer can reconcile:
+        ok + failed + skipped == len(sources). Mirrors the research-side fix.
+        """
+        return sum(1 for s in self.sources if not s.ok and s.skipped)
+
+    @property
     def cache_hits(self) -> int:
         return sum(1 for s in self.sources if s.from_cache)
 
@@ -1025,6 +1034,8 @@ def _meta_line(result: VerifyResult) -> str:
     )
     parts = [f"{len(result.claims)} claims ({summary})"]
     parts.append(f"{result.ok_pages}/{len(result.sources)} pages")
+    if result.skipped_pages:
+        parts.append(f"{result.skipped_pages} skipped")
     if result.failed_pages:
         parts.append(f"{result.failed_pages} failed")
     if result.cache_hits:
@@ -1162,6 +1173,7 @@ def render_json(result: VerifyResult, *, raw_material: Any = _UNSET) -> str:
         "urls_requested": len(result.sources),
         "pages_ok": result.ok_pages,
         "pages_failed": result.failed_pages,
+        "pages_skipped": result.skipped_pages,
         "cache_hits": result.cache_hits,
         "chars_fetched": sum(s.chars for s in result.sources),
         "gemini_used": result.gemini_used,
