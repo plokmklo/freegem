@@ -237,6 +237,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
         encoding = (self.headers.get("Transfer-Encoding") or "").lower()
         if "chunked" in encoding:
             chunks: list[bytes] = []
+            accumulated = 0
             while True:
                 size_line = self.rfile.readline()
                 if not size_line:
@@ -250,6 +251,13 @@ class GeminiHandler(BaseHTTPRequestHandler):
                     raise ValueError("negative chunk size")
                 if size > MAX_BODY_BYTES:
                     raise _BodyTooLarge(f"chunk of {size} bytes exceeds the limit")
+                if accumulated + size > MAX_BODY_BYTES:
+                    # Per-chunk caps are not enough: a stream of under-cap
+                    # chunks accumulates unbounded RAM before the post-join
+                    # check ever runs. Refuse the moment the total would.
+                    raise _BodyTooLarge(
+                        f"chunked body exceeds the {MAX_BODY_BYTES}-byte limit"
+                    )
                 if size == 0:
                     while True:
                         trailer = self.rfile.readline()
@@ -257,6 +265,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
                             break
                     break
                 chunks.append(self.rfile.read(size))
+                accumulated += size
                 self.rfile.read(2)  # trailing CRLF
             body = b"".join(chunks)
             if len(body) > MAX_BODY_BYTES:

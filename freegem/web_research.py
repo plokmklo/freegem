@@ -49,6 +49,7 @@ from typing import Any
 
 from .config import BridgeConfig
 from .gemini import BridgeError, log
+from .metrics import RunMetrics
 
 __all__ = [
     "DEFAULT_CACHE_TTL",
@@ -259,6 +260,9 @@ class ResearchResult:
     #: the model supplied its evidence block). Empty is honest: it means
     #: none was offered, not that none exists.
     citations: list[Citation] = field(default_factory=list)
+    #: Per-stage timings and counters for THIS call (request id travels in
+    #: the snapshot). verify() carried one; research's JSON face now does too.
+    metrics: RunMetrics = field(default_factory=RunMetrics)
 
     @property
     def ok_pages(self) -> int:
@@ -267,6 +271,17 @@ class ResearchResult:
     @property
     def failed_pages(self) -> int:
         return sum(1 for s in self.sources if not s.ok and not s.skipped)
+
+    @property
+    def skipped_pages(self) -> int:
+        """URLs recorded but never fetched because a budget would be blown.
+
+        Distinct from ``failed_pages`` so a JSON consumer can reconcile:
+        ok + failed + skipped == len(sources). Before this existed, a
+        budget-skipped page (ok=False, skipped="max_pages") fell into
+        neither bucket and the totals silently did not add up.
+        """
+        return sum(1 for s in self.sources if not s.ok and s.skipped)
 
     @property
     def cache_hits(self) -> int:
@@ -496,14 +511,25 @@ def _typed(sources: list[ResearchSource | None]) -> list[ResearchSource]:
 
 
 def _source_header(index: int, source: ResearchSource) -> str:
-    title = source.title or "(no title)"
+    from .web_scraper import _defuse_untrusted_markers
+
+    # The title is page-controlled and this line sits OUTSIDE the untrusted
+    # wrapper, so a title carrying marker text would inject outside the
+    # trust boundary. Defuse it like the wrapped body.
+    title = _defuse_untrusted_markers(source.title or "(no title)")
     return f"[S{index}] url: {source.url}\n[S{index}] title: {title}"
 
 
 def _wrap_untrusted(label: int, text: str) -> str:
-    from .web_scraper import _UNTRUSTED_CLOSE, _UNTRUSTED_OPEN
+    from .web_scraper import _UNTRUSTED_CLOSE, _UNTRUSTED_OPEN, _defuse_untrusted_markers
 
-    return f"{_UNTRUSTED_OPEN}\n[source marker: S{label}]\n{text}\n{_UNTRUSTED_CLOSE}"
+    # The payload is attacker-controlled: without defusing, a page carrying
+    # the literal close marker closes the wrapper early and injects the rest
+    # of its text as if it were prompt-level instruction.
+    return (
+        f"{_UNTRUSTED_OPEN}\n[source marker: S{label}]\n"
+        f"{_defuse_untrusted_markers(text)}\n{_UNTRUSTED_CLOSE}"
+    )
 
 
 _INJECTION_RULES = (
@@ -540,6 +566,40 @@ _EVIDENCE_MAX_ENTRIES = 8
 _EVIDENCE_MAX_QUOTES = 4
 _EVIDENCE_MAX_QUOTE_CHARS = 400
 
+# Map/reduce evidence: the reduce pass only ever sees paraphrased notes, so
+# demanding verbatim quotes from it silently degraded to 0 verified at
+# exactly the scale map/reduce exists for (> _SINGLE_PASS_BUDGET chars).
+# Instead the MAP pass -- the only stage that still sees raw page text --
+# nominates quote candidates, which are verified here, deterministically,
+# against the chunk they came from; the reduce pass may then quote the
+# pre-verified pool. Anything the pool cannot supply still verifies honestly
+# (and fails honestly) downstream.
+_MAP_QUOTE_INSTRUCTION = (
+    "\n\nThen append exactly one fenced quote block, formatted as:\n"
+    "```quotes\n"
+    '["<verbatim quote>"]\n'
+    "```\n"
+    "It must be a JSON array of 0 to 3 short passages (at most 30 words "
+    "each) COPIED EXACTLY, character for character, from the chunk above, "
+    "each directly supporting one of your bullets. Nothing else goes "
+    "inside the block.\n"
+)
+_MAP_QUOTES_RE = re.compile(r"```quotes\s*\n(.*?)\n```", re.DOTALL)
+_MAP_MAX_QUOTES_PER_SOURCE = 3
+_MAP_MAX_POOL_CHARS = 4_000
+
+_EVIDENCE_CONTRACT_POOL = (
+    "After the three sections, append exactly one fenced evidence block, "
+    "formatted as:\n"
+    "```evidence\n"
+    '[{"source": 1, "quotes": ["<verbatim quote>"]}]\n'
+    "```\n"
+    "One entry per source you cited, in ascending order of source number. "
+    "Each quote must be copied EXACTLY from that source's VERIFIED VERBATIM "
+    "QUOTES below -- quotes that are not in the pool will not verify. "
+    "Nothing else goes inside the block.\n\n"
+)
+
 
 def _single_pass_prompt(question: str, blocks: list[str], *, evidence: bool = False) -> str:
     return (
@@ -557,8 +617,15 @@ def _single_pass_prompt(question: str, blocks: list[str], *, evidence: bool = Fa
     )
 
 
-def _map_prompt(question: str, index: int, source: ResearchSource, chunk: str) -> str:
-    return (
+def _map_prompt(
+    question: str,
+    index: int,
+    source: ResearchSource,
+    chunk: str,
+    *,
+    collect_quotes: bool = False,
+) -> str:
+    body = (
         "Extract every point relevant to the question below from this single "
         "page chunk. Short bullet points, each ending with the citation "
         f"[S{index}]. At most 10 bullets. If nothing in the chunk is relevant, "
@@ -568,12 +635,31 @@ def _map_prompt(question: str, index: int, source: ResearchSource, chunk: str) -
         f"{_source_header(index, source)}\n"
         f"{_wrap_untrusted(index, chunk)}"
     )
+    if collect_quotes:
+        # Only the map pass sees raw page text, so only it can nominate
+        # honest verbatim quotes for the evidence pool.
+        body += _MAP_QUOTE_INSTRUCTION
+    return body
 
 
 _RELEVANCE_SKIP = "(no relevant content)"
 
 
-def _reduce_prompt(question: str, notes: list[str], *, evidence: bool = False) -> str:
+def _reduce_prompt(
+    question: str,
+    notes: list[str],
+    *,
+    evidence: bool = False,
+    quote_pool: dict[int, list[str]] | None = None,
+) -> str:
+    pool_block = ""
+    contract = _EVIDENCE_CONTRACT if evidence else ""
+    if evidence and quote_pool:
+        pool_block = "VERIFIED VERBATIM QUOTES -- passages already checked, word " \
+            "for word, against the source pages. When the evidence block needs " \
+            "a quote, copy it EXACTLY from this pool; do not paraphrase, do " \
+            "not invent:\n\n" + _quote_pool_block(quote_pool) + "\n\n"
+        contract = _EVIDENCE_CONTRACT_POOL
     return (
         "You are a research assistant. The notes below were extracted from "
         "several web pages, each labeled [S1], [S2], ... Write the final "
@@ -584,11 +670,61 @@ def _reduce_prompt(question: str, notes: list[str], *, evidence: bool = False) -
         "## Key points\nThe most important supporting facts, each cited.\n\n"
         "## Disagreements and gaps\nWhere sources conflict, and what the "
         "notes do not cover.\n\n"
-        + (_EVIDENCE_CONTRACT if evidence else "")
+        + pool_block
+        + contract
         + f"Question: {question}\n\n"
         + "Notes:\n"
         + "\n".join(notes)
     )
+
+
+def _quote_pool_block(pool: dict[int, list[str]]) -> str:
+    """Render the verified quote pool as [Sn]-labeled lines for the reduce prompt."""
+    lines: list[str] = []
+    for index in sorted(pool):
+        for quote in pool[index]:
+            lines.append(f'[S{index}] "{quote}"')
+    return "\n".join(lines)
+
+
+def _parse_map_quotes(reply: str) -> tuple[str, list[str]]:
+    """Split a map reply into its note text and claimed verbatim quotes.
+
+    Mirrors _parse_evidence: every ```quotes fence is stripped from the note
+    whatever it contains, and only well-formed JSON arrays of strings yield
+    quotes. An absent or malformed block is zero quotes, never a guess.
+    """
+    blocks = _MAP_QUOTES_RE.findall(reply)
+    cleaned = _MAP_QUOTES_RE.sub("", reply).strip()
+    quotes: list[str] = []
+    for block in blocks[:1]:
+        try:
+            data = json.loads(block.strip())
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(data, list):
+            continue
+        quotes = [q.strip() for q in data if isinstance(q, str) and q.strip()]
+    return cleaned, quotes
+
+
+def _verified_chunk_quotes(reply: str, chunk: str) -> tuple[str, list[str]]:
+    """Map-reply quotes that REALLY appear in the chunk they came from.
+
+    Matching uses the same normalization as _verify_citations
+    (whitespace/case-insensitive), so a quote kept here verifies again in
+    the final page-level check. Unverifiable candidates are dropped here --
+    the pool must only ever contain quotes that will hold up.
+    """
+    note, claimed = _parse_map_quotes(reply)
+    normalized_chunk = _normalize_for_match(chunk)
+    kept: list[str] = []
+    for quote in claimed:
+        if len(kept) >= _MAP_MAX_QUOTES_PER_SOURCE:
+            break
+        if _normalize_for_match(quote) in normalized_chunk and quote not in kept:
+            kept.append(quote)
+    return note, kept
 
 
 def _dedupe_boilerplate(pages: list[str]) -> list[str]:
@@ -645,24 +781,65 @@ def _material_blocks(question: str, material: list[tuple[ResearchSource, str]]) 
 
 
 def _mapped_notes(
-    cfg: BridgeConfig, question: str, material: list[tuple[ResearchSource, str]]
-) -> list[str]:
-    """Per-page (chunked) extraction notes, each chunk capped, all [S#]-labeled."""
+    cfg: BridgeConfig,
+    question: str,
+    material: list[tuple[ResearchSource, str]],
+    *,
+    collect_quotes: bool = False,
+) -> tuple[list[str], dict[int, list[str]]]:
+    """Per-page (chunked) extraction notes, each chunk capped, all [S#]-labeled.
+
+    With ``collect_quotes`` (evidence mode), each map reply is also parsed
+    for verbatim quote candidates that are verified against the raw chunk;
+    the survivors form the per-source pool the reduce pass may cite. This
+    is what keeps evidence verification possible at map/reduce scale: the
+    reduce pass alone only ever sees paraphrased notes, from which verbatim
+    verification can never pass.
+    """
     notes: list[str] = []
+    pool: dict[int, list[str]] = {}
     for index, (source, text) in enumerate(material, start=1):
         if not text:
             continue
         for start in range(0, len(text), _MAP_CHUNK_CHARS):
             chunk = text[start : start + _MAP_CHUNK_CHARS]
             try:
-                note = _gemini_complete(cfg, _map_prompt(question, index, source, chunk))
+                reply = _gemini_complete(
+                    cfg,
+                    _map_prompt(
+                        question, index, source, chunk, collect_quotes=collect_quotes
+                    ),
+                )
             except BridgeError:
                 continue  # one dead chunk must not kill the reduce pass
+            if collect_quotes:
+                note, verified = _verified_chunk_quotes(reply, chunk)
+                if verified:
+                    existing = pool.setdefault(index, [])
+                    for quote in verified:
+                        if quote not in existing:
+                            existing.append(quote)
+            else:
+                note = reply
             note = note.strip()
             if not note or note == _RELEVANCE_SKIP:
                 continue
             notes.append(f"[S{index}] " + note[:_MAP_NOTE_CAP])
-    return notes
+    # Bound the pool so the reduce prompt cannot blow up on a page that
+    # yielded many long quotes; per-source quota first, then chars.
+    for index in list(pool):
+        total = 0
+        kept: list[str] = []
+        for quote in pool[index]:
+            if total + len(quote) > _MAP_MAX_POOL_CHARS:
+                break
+            kept.append(quote)
+            total += len(quote)
+        if kept:
+            pool[index] = kept
+        else:
+            del pool[index]
+    return notes, pool
 
 
 def _ask(
@@ -672,14 +849,20 @@ def _ask(
     *,
     evidence: bool = False,
 ) -> str:
-    """Single-pass when the material fits one prompt; map/reduce above that."""
+    """Single-pass when the material fits one prompt; map/reduce above that.
+
+    In evidence mode the map/reduce path additionally builds a verified
+    quote pool (see _mapped_notes) so the reduce pass can quote passages
+    that actually exist in the sources -- without it, verbatim evidence
+    never verified once material crossed the single-pass budget.
+    """
     total = sum(len(text) for _, text in material)
     if total <= _SINGLE_PASS_BUDGET:
         return _gemini_complete(
             cfg,
             _single_pass_prompt(question, _material_blocks(question, material), evidence=evidence),
         )
-    notes = _mapped_notes(cfg, question, material)
+    notes, quote_pool = _mapped_notes(cfg, question, material, collect_quotes=evidence)
     if not notes:
         raise BridgeError("map pass produced no notes")
     reduce_input: list[str] = []
@@ -689,7 +872,10 @@ def _ask(
             break
         reduce_input.append(note)
         used += len(note)
-    return _gemini_complete(cfg, _reduce_prompt(question, reduce_input, evidence=evidence))
+    return _gemini_complete(
+        cfg,
+        _reduce_prompt(question, reduce_input, evidence=evidence, quote_pool=quote_pool),
+    )
 
 
 def _deterministic_answer(question: str, material: list[tuple[ResearchSource, str]]) -> str:
@@ -870,17 +1056,23 @@ def research(
     )
     total_budget = max(max_chars_per_page, int(total_budget))
 
+    metrics = RunMetrics()
     started = time.monotonic()
-    sources, material = _collect_sources(
-        cfg,
-        normalized,
-        max_pages=max_pages,
-        max_chars_per_page=max_chars_per_page,
-        total_budget=total_budget,
-        cache=cache,
-        refresh=refresh,
-        concurrency=cfg.research_concurrency if concurrency is None else concurrency,
-    )
+    with metrics.stage("fetch"):
+        sources, material = _collect_sources(
+            cfg,
+            normalized,
+            max_pages=max_pages,
+            max_chars_per_page=max_chars_per_page,
+            total_budget=total_budget,
+            cache=cache,
+            refresh=refresh,
+            concurrency=cfg.research_concurrency if concurrency is None else concurrency,
+        )
+    metrics.bump("pages_ok", sum(1 for s in sources if s.ok))
+    metrics.bump("pages_skipped", sum(1 for s in sources if not s.ok and s.skipped))
+    metrics.bump("pages_failed", sum(1 for s in sources if not s.ok and not s.skipped))
+    metrics.bump("cache_hits", sum(1 for s in sources if s.from_cache))
 
     answer = ""
     gemini_used = False
@@ -888,17 +1080,21 @@ def research(
     if material:
         deduped = _dedupe_boilerplate([text for _, text in material])
         material = [(source, text) for (source, _), text in zip(material, deduped, strict=True)]
-        try:
-            answer = _relabel_answer(
-                _ask(cfg, question, material, evidence=evidence).strip(), sources
-            )
-            gemini_used = True
-        except BridgeError as exc:
-            log(cfg, f"research falling back to raw extracts: {exc}")
-            answer = _deterministic_answer(question, material)
+        with metrics.stage("generate"):
+            try:
+                answer = _relabel_answer(
+                    _ask(cfg, question, material, evidence=evidence).strip(), sources
+                )
+                gemini_used = True
+            except BridgeError as exc:
+                log(cfg, f"research falling back to raw extracts: {exc}")
+                answer = _deterministic_answer(question, material)
         if gemini_used and evidence:
-            answer, entries = _parse_evidence(answer)
-            citations = _verify_citations(entries, material)
+            with metrics.stage("verify"):
+                answer, entries = _parse_evidence(answer)
+                citations = _verify_citations(entries, material)
+            metrics.bump("evidence_offered", sum(len(c.quotes) for c in citations))
+            metrics.bump("evidence_verified", sum(1 for c in citations for v in c.verified if v))
     else:
         answer = "No source could be fetched, so there is nothing to research."
 
@@ -911,6 +1107,7 @@ def research(
         chars_fetched=sum(s.chars for s in sources),
         elapsed_sec=elapsed,
         citations=citations,
+        metrics=metrics,
     )
 
 
@@ -1017,10 +1214,13 @@ def render_json(result: ResearchResult) -> str:
         "urls_requested": len(result.sources),
         "pages_ok": result.ok_pages,
         "pages_failed": result.failed_pages,
+        "pages_skipped": result.skipped_pages,
         "cache_hits": result.cache_hits,
         "chars_fetched": result.chars_fetched,
+        "gemini_used": result.gemini_used,
         "elapsed_sec": round(result.elapsed_sec, 3),
         "version": __version__,
+        "metrics": result.metrics.snapshot(),
     }
     if citations:
         offered = sum(len(c["quotes"]) for c in citations)
@@ -1041,8 +1241,10 @@ def render_json(result: ResearchResult) -> str:
 def _meta_line(result: ResearchResult) -> str:
     parts = [
         f"{result.ok_pages}/{len(result.sources)} pages",
-        f"{result.failed_pages} failed",
     ]
+    if result.skipped_pages:
+        parts.append(f"{result.skipped_pages} skipped")
+    parts.append(f"{result.failed_pages} failed")
     if result.cache_hits:
         parts.append(f"{result.cache_hits} cached")
     parts.append(f"{result.chars_fetched} chars")
