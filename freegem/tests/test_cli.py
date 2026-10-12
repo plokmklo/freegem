@@ -327,7 +327,7 @@ class McpBuildTests(unittest.TestCase):
             server = build_server(BridgeConfig())
             self.assertEqual(server._mcp_server.version, gb.__version__)
         except ImportError:
-            self.skipTest('mcp package not installed')
+            self.skipTest("mcp package not installed")
 
 
 class FlagPlacementTests(unittest.TestCase):

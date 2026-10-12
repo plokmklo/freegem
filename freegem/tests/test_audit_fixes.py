@@ -186,9 +186,7 @@ class ImageFetchCapTests(unittest.TestCase):
 
     def test_streaming_aborts_past_cap(self) -> None:
         # An endless body: every read returns another 1 MiB block.
-        response = _FakeResponse(
-            {}, reader=lambda n: b"\x00" * min(n, 1 << 20)
-        )
+        response = _FakeResponse({}, reader=lambda n: b"\x00" * min(n, 1 << 20))
         self.assertEqual(self._fetch(response), b"")
         # aborted AT the cap, not after gigabytes of it
         self.assertLessEqual(response.blocks_read, _MAX_IMAGE_BYTES // (1 << 20) + 2)
@@ -319,9 +317,7 @@ class SkippedAccountingTests(unittest.TestCase):
         return [
             ResearchSource(url="https://a.test/1", ok=True, chars=100, fetched_at=0.0),
             ResearchSource(url="https://a.test/2", ok=False, error="boom", fetched_at=0.0),
-            ResearchSource(
-                url="https://a.test/3", ok=False, skipped="max_pages", fetched_at=0.0
-            ),
+            ResearchSource(url="https://a.test/3", ok=False, skipped="max_pages", fetched_at=0.0),
         ]
 
     def test_research_result_reconciles(self) -> None:
@@ -379,12 +375,7 @@ class _FakeGemini:
     def __call__(self, cfg: Any, prompt: str) -> str:
         self.prompts.append(prompt)
         if prompt.startswith("Extract every point"):
-            return (
-                "- a fact [S1]\n"
-                "```quotes\n"
-                f'["{_QUOTE}"]\n'
-                "```\n"
-            )
+            return f'- a fact [S1]\n```quotes\n["{_QUOTE}"]\n```\n'
         return (
             "## Answer\nSomething true [S1].\n\n"
             "```evidence\n"
@@ -409,12 +400,7 @@ class MapReduceEvidenceTests(unittest.TestCase):
         self.assertNotIn("```quotes", note)
 
     def test_verified_chunk_quotes_dedupes(self) -> None:
-        reply = (
-            "- a fact\n"
-            "```quotes\n"
-            f'["{_QUOTE}", "{_QUOTE}"]\n'
-            "```\n"
-        )
+        reply = f'- a fact\n```quotes\n["{_QUOTE}", "{_QUOTE}"]\n```\n'
         _, kept = _verified_chunk_quotes(reply, _QUOTE)
         self.assertEqual(kept, [_QUOTE])
 

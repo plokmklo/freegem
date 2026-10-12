@@ -113,7 +113,9 @@ def test_open_queue_dispatch() -> None:
         open_queue("kafka://nope")
 
 
-def test_redis_queue_without_package_raises_queue_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_redis_queue_without_package_raises_queue_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import builtins
 
     real_import = builtins.__import__
@@ -128,7 +130,9 @@ def test_redis_queue_without_package_raises_queue_unavailable(monkeypatch: pytes
         open_queue("redis://localhost:6379/0")
 
 
-def test_rabbit_queue_without_package_raises_queue_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_rabbit_queue_without_package_raises_queue_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import builtins
 
     real_import = builtins.__import__

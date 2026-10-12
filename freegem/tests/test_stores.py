@@ -30,7 +30,9 @@ from freegem.stores import (
 
 def test_sqlite_store_upsert_get_roundtrip(tmp_path: Path) -> None:
     s = SqliteDocumentStore(str(tmp_path / "docs.db"))
-    doc_id = s.upsert({"url": "https://x/a", "title": "A", "text": "body a", "metadata": {"lang": "en"}})
+    doc_id = s.upsert(
+        {"url": "https://x/a", "title": "A", "text": "body a", "metadata": {"lang": "en"}}
+    )
     got = s.get(doc_id)
     assert got is not None
     assert got["url"] == "https://x/a"
@@ -60,8 +62,12 @@ def test_sqlite_store_get_by_url(tmp_path: Path) -> None:
 
 def test_sqlite_store_metadata_query(tmp_path: Path) -> None:
     s = SqliteDocumentStore(str(tmp_path / "docs.db"))
-    s.upsert({"url": "https://x/1", "title": "", "text": "", "metadata": {"host": "a.com", "depth": 1}})
-    s.upsert({"url": "https://x/2", "title": "", "text": "", "metadata": {"host": "b.com", "depth": 1}})
+    s.upsert(
+        {"url": "https://x/1", "title": "", "text": "", "metadata": {"host": "a.com", "depth": 1}}
+    )
+    s.upsert(
+        {"url": "https://x/2", "title": "", "text": "", "metadata": {"host": "b.com", "depth": 1}}
+    )
     hits = s.query(metadata={"host": "a.com"})
     assert len(hits) == 1 and hits[0]["url"] == "https://x/1"
     assert s.query(metadata={"host": "nope"}) == []
@@ -109,7 +115,9 @@ class FakeCursor:
             # tuples + a psycopg-style description (one .name per column)
             cols = ["doc_id", "url", "title", "text", "metadata", "updated_at"]
             self.description = [(type("C", (), {"name": c})) for c in cols]
-            self._rows = [tuple(r[c] for c in cols) for r in self.store.rows if self._matches(r, params)]
+            self._rows = [
+                tuple(r[c] for c in cols) for r in self.store.rows if self._matches(r, params)
+            ]
             self.rowcount = len(self._rows)
         elif "DELETE" in sql:
             self.rowcount = min(1, len(self.store.rows))
@@ -131,7 +139,9 @@ class FakeCursor:
         if not params:
             return True
         if len(params) == 2 and isinstance(params[0], str) and params[0].startswith("{"):
-            meta = json.loads(row["metadata"]) if isinstance(row["metadata"], str) else row["metadata"]
+            meta = (
+                json.loads(row["metadata"]) if isinstance(row["metadata"], str) else row["metadata"]
+            )
             want = json.loads(params[0])
             return all(meta.get(k) == v for k, v in want.items())
         # single id/url param

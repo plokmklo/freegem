@@ -47,7 +47,9 @@ def test_discover_skips_templates_anchors_and_relative() -> None:
 
 def test_discover_empty_and_protocol_relative() -> None:
     assert discover_js_endpoints("") == []
-    eps = discover_js_endpoints('<a href="//cdn.example.org/x.js">x</a>', base_url="https://example.org/")
+    eps = discover_js_endpoints(
+        '<a href="//cdn.example.org/x.js">x</a>', base_url="https://example.org/"
+    )
     assert "https://cdn.example.org/x.js" in eps
     # no base_url: relative candidates are dropped, absolute kept
     assert discover_js_endpoints('fetch("/a")') == []
@@ -55,9 +57,7 @@ def test_discover_empty_and_protocol_relative() -> None:
 
 
 def test_discover_dedupes() -> None:
-    eps = discover_js_endpoints(
-        'fetch("/a"); fetch("/a"); fetch("/a")', base_url="https://x.org/"
-    )
+    eps = discover_js_endpoints('fetch("/a"); fetch("/a"); fetch("/a")', base_url="https://x.org/")
     assert eps == ["https://x.org/a"]
 
 
@@ -107,7 +107,9 @@ def test_score_deterministic_and_never_negative() -> None:
     ]
     for u in urls:
         assert score_url(u, origin="https://x.org") >= 0.0
-    assert all(score_url(u, origin="https://x.org") == score_url(u, origin="https://x.org") for u in urls)
+    assert all(
+        score_url(u, origin="https://x.org") == score_url(u, origin="https://x.org") for u in urls
+    )
 
 
 def test_weights_change_ordering() -> None:
@@ -152,4 +154,8 @@ def test_prioritizer_tiebreak_deterministic() -> None:
     urls = ["https://x.org/b/doc", "https://x.org/a/doc"]
     first = p.prioritize(urls)
     second = p.prioritize(list(reversed(urls)))
-    assert [u for u, _ in first] == [u for u, _ in second] == ["https://x.org/a/doc", "https://x.org/b/doc"]
+    assert (
+        [u for u, _ in first]
+        == [u for u, _ in second]
+        == ["https://x.org/a/doc", "https://x.org/b/doc"]
+    )

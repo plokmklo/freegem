@@ -41,7 +41,18 @@ _ARTICLE_LD_TYPES = {
     "scholarlyarticle",
 }
 
-_SKIP_BODY_TAGS = {"script", "style", "nav", "aside", "form", "footer", "header", "noscript", "svg", "button"}
+_SKIP_BODY_TAGS = {
+    "script",
+    "style",
+    "nav",
+    "aside",
+    "form",
+    "footer",
+    "header",
+    "noscript",
+    "svg",
+    "button",
+}
 _MIN_PARA_CHARS = 60
 
 
@@ -138,9 +149,13 @@ def _ld_articles(dom: HtmlDom) -> list[dict[str, Any]]:
     out = []
     for block in _jsonld_blocks(dom):
         types = block.get("@type")
-        type_names = {types.lower()} if isinstance(types, str) else {
-            str(t).lower() for t in types
-        } if isinstance(types, list) else set()
+        type_names = (
+            {types.lower()}
+            if isinstance(types, str)
+            else {str(t).lower() for t in types}
+            if isinstance(types, list)
+            else set()
+        )
         if type_names & _ARTICLE_LD_TYPES:
             out.append(block)
     return out
@@ -191,7 +206,9 @@ def _ld_image(value: Any) -> str:
     return ""
 
 
-def _pick(field: str, value: str, source: str, chosen: dict[str, str], signals: dict[str, str]) -> None:
+def _pick(
+    field: str, value: str, source: str, chosen: dict[str, str], signals: dict[str, str]
+) -> None:
     """First source wins per field; later sources only fill still-empty fields."""
     if value and not chosen.get(field):
         chosen[field] = value
@@ -211,7 +228,13 @@ def _dom_published(dom: HtmlDom) -> str:
 
 
 def _dom_byline(dom: HtmlDom) -> str:
-    for selector in ("[rel='author']", "[itemprop='author']", ".byline", ".author", "[data-byline]"):
+    for selector in (
+        "[rel='author']",
+        "[itemprop='author']",
+        ".byline",
+        ".author",
+        "[data-byline]",
+    ):
         text = _first_text(dom, selector)
         if text:
             return text
@@ -306,8 +329,20 @@ def parse_article(html: str, url: str) -> ArticleResult:
     _pick("title", _content_of_meta(dom, prop="og:title"), "opengraph", chosen, signals)
     _pick("description", _content_of_meta(dom, prop="og:description"), "opengraph", chosen, signals)
     _pick("image", _content_of_meta(dom, prop="og:image"), "opengraph", chosen, signals)
-    _pick("published_time", _content_of_meta(dom, prop="article:published_time"), "opengraph", chosen, signals)
-    _pick("modified_time", _content_of_meta(dom, prop="article:modified_time"), "opengraph", chosen, signals)
+    _pick(
+        "published_time",
+        _content_of_meta(dom, prop="article:published_time"),
+        "opengraph",
+        chosen,
+        signals,
+    )
+    _pick(
+        "modified_time",
+        _content_of_meta(dom, prop="article:modified_time"),
+        "opengraph",
+        chosen,
+        signals,
+    )
     _pick("section", _content_of_meta(dom, prop="article:section"), "opengraph", chosen, signals)
     og_author = _content_of_meta(dom, prop="article:author")
     if og_author and not authors:

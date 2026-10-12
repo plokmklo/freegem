@@ -102,14 +102,16 @@ class ProfileManager:
                 with open(path, encoding="utf-8") as f:
                     data = json.load(f)
                 profile = SessionProfile.from_dict(data)
-                results.append({
-                    "name": profile.name,
-                    "created_at": profile.created_at,
-                    "expires_at": profile.expires_at,
-                    "is_expired": profile.is_expired(now),
-                    "description": profile.description,
-                    "cookie_count": len(profile.cookies),
-                })
+                results.append(
+                    {
+                        "name": profile.name,
+                        "created_at": profile.created_at,
+                        "expires_at": profile.expires_at,
+                        "is_expired": profile.is_expired(now),
+                        "description": profile.description,
+                        "cookie_count": len(profile.cookies),
+                    }
+                )
             except Exception:
                 continue
         return results

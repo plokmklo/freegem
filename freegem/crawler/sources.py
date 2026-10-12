@@ -50,7 +50,12 @@ class SourceItem:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return {"url": self.url, "title": self.title, "updated": self.updated, "metadata": self.metadata}
+        return {
+            "url": self.url,
+            "title": self.title,
+            "updated": self.updated,
+            "metadata": self.metadata,
+        }
 
 
 class SourceAdapter(Protocol):
@@ -86,7 +91,10 @@ class MediaWikiSource:
         origin = f"{urllib.parse.urlsplit(url).scheme}://{urllib.parse.urlsplit(url).netloc}"
         api = f"{origin}/w/api.php"
         items: list[SourceItem] = []
-        for mode, param in (("search", urllib.parse.quote(url.rsplit("/", 1)[-1] or "main page")), ("allpages", "")):
+        for mode, param in (
+            ("search", urllib.parse.quote(url.rsplit("/", 1)[-1] or "main page")),
+            ("allpages", ""),
+        ):
             if len(items) >= limit:
                 break
             if mode == "search":
@@ -100,10 +108,14 @@ class MediaWikiSource:
             except Exception:
                 continue
             query = data.get("query", {})
-            for page in query.get("pages", {}).values() if isinstance(query.get("pages"), dict) else []:
+            for page in (
+                query.get("pages", {}).values() if isinstance(query.get("pages"), dict) else []
+            ):
                 items.append(
                     SourceItem(
-                        url=normalize_url(f"{origin}/wiki/{urllib.parse.quote(str(page.get('title', '')).replace(' ', '_'))}"),
+                        url=normalize_url(
+                            f"{origin}/wiki/{urllib.parse.quote(str(page.get('title', '')).replace(' ', '_'))}"
+                        ),
                         title=str(page.get("title", "")),
                         metadata={"source": self.name, "pageid": page.get("pageid")},
                     )
@@ -111,9 +123,14 @@ class MediaWikiSource:
             for hit in query.get("search", []):
                 items.append(
                     SourceItem(
-                        url=normalize_url(f"{origin}/wiki/{urllib.parse.quote(str(hit.get('title', '')).replace(' ', '_'))}"),
+                        url=normalize_url(
+                            f"{origin}/wiki/{urllib.parse.quote(str(hit.get('title', '')).replace(' ', '_'))}"
+                        ),
                         title=str(hit.get("title", "")),
-                        metadata={"source": self.name, "snippet_len": len(str(hit.get("snippet", "")))},
+                        metadata={
+                            "source": self.name,
+                            "snippet_len": len(str(hit.get("snippet", ""))),
+                        },
                     )
                 )
         # dedupe, keep order
@@ -234,7 +251,14 @@ class FeedSource:
                     link = (item_el.findtext("link") or "").strip()
                     pub = (item_el.findtext("pubDate") or "").strip()
                     if link:
-                        items.append(SourceItem(url=normalize_url(link), title=title, updated=pub, metadata={"source": self.name}))
+                        items.append(
+                            SourceItem(
+                                url=normalize_url(link),
+                                title=title,
+                                updated=pub,
+                                metadata={"source": self.name},
+                            )
+                        )
                     if len(items) >= limit:
                         break
         elif tag.endswith("feed"):  # Atom
@@ -250,7 +274,14 @@ class FeedSource:
                 title = (entry.findtext("atom:title", "", self._ns_map) or "").strip()
                 updated = (entry.findtext("atom:updated", "", self._ns_map) or "").strip()
                 if link:
-                    items.append(SourceItem(url=normalize_url(link), title=title, updated=updated, metadata={"source": self.name}))
+                    items.append(
+                        SourceItem(
+                            url=normalize_url(link),
+                            title=title,
+                            updated=updated,
+                            metadata={"source": self.name},
+                        )
+                    )
                 if len(items) >= limit:
                     break
         return items
@@ -271,7 +302,9 @@ class DocsSource:
 
     def matches(self, url: str) -> bool:
         path = urllib.parse.urlsplit(url).path.lower()
-        return any(k in path for k in ("docs", "manual", "guide", "reference", "handbook")) or path in ("", "/")
+        return any(
+            k in path for k in ("docs", "manual", "guide", "reference", "handbook")
+        ) or path in ("", "/")
 
     def discover(self, url: str, *, limit: int = 500) -> list[SourceItem]:
         parts = urllib.parse.urlsplit(url)
@@ -293,7 +326,9 @@ class DocsSource:
                 if loc.tag.rsplit("}", 1)[-1] == "loc" and text and text.strip():
                     u = normalize_url(text.strip())
                     if u.startswith("http"):
-                        items.append(SourceItem(url=u, metadata={"source": self.name, "via": "sitemap"}))
+                        items.append(
+                            SourceItem(url=u, metadata={"source": self.name, "via": "sitemap"})
+                        )
                         if len(items) >= limit:
                             return items
             break
@@ -304,7 +339,12 @@ def detect_source(url: str) -> SourceAdapter | None:
     """Pick the first adapter that claims this URL. Order matters: feeds
     before docs (feed URLs often live under /docs-like paths), MediaWiki
     before generic (its api.php path would also 'match' docs keywords)."""
-    adapters: tuple[SourceAdapter, ...] = (MediaWikiSource(), ArxivSource(), FeedSource(), DocsSource())
+    adapters: tuple[SourceAdapter, ...] = (
+        MediaWikiSource(),
+        ArxivSource(),
+        FeedSource(),
+        DocsSource(),
+    )
     for a in adapters:
         try:
             if a.matches(url):

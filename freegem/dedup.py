@@ -120,9 +120,11 @@ class Deduper:
         for kept_id, kept_fp in self._kept.items():
             if fp.distance(kept_fp) > self.threshold:
                 continue
-            if self.jaccard_verify and jaccard(
-                shingles(text, self.shingle_k), self._shingles_by_id[kept_id]
-            ) < self.jaccard_floor:
+            if (
+                self.jaccard_verify
+                and jaccard(shingles(text, self.shingle_k), self._shingles_by_id[kept_id])
+                < self.jaccard_floor
+            ):
                 continue  # fingerprint collision, not a real duplicate
             self._original_of[doc_id] = kept_id
             return False

@@ -73,7 +73,12 @@ class TestSessionProfiles(unittest.TestCase):
         prof = SessionProfile(
             name="export-test",
             cookies=[{"name": "session", "value": "xyz", "domain": ".example.com", "path": "/"}],
-            origins=[{"origin": "https://example.com", "localStorage": [{"name": "theme", "value": "dark"}]}],
+            origins=[
+                {
+                    "origin": "https://example.com",
+                    "localStorage": [{"name": "theme", "value": "dark"}],
+                }
+            ],
         )
         self.mgr.save_profile(prof)
 

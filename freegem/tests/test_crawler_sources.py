@@ -170,9 +170,13 @@ def test_feed_atom_items(stub_net: dict[str, str]) -> None:
 
 
 def test_feed_limit_is_honored(stub_net: dict[str, str]) -> None:
-    many = "<rss version='2.0'><channel>" + "".join(
-        f"<item><title>t{i}</title><link>https://b.org/{i}</link></item>" for i in range(50)
-    ) + "</channel></rss>"
+    many = (
+        "<rss version='2.0'><channel>"
+        + "".join(
+            f"<item><title>t{i}</title><link>https://b.org/{i}</link></item>" for i in range(50)
+        )
+        + "</channel></rss>"
+    )
     stub_net["https://b.org/feed"] = many
     assert len(FeedSource().discover("https://b.org/feed", limit=7)) == 7
 

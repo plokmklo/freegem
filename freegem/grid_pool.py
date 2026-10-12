@@ -72,7 +72,9 @@ class GridLease:
 class GridPool:
     """Thread-safe least-loaded dispatcher over a fixed set of Grid nodes."""
 
-    def __init__(self, nodes: list[GridNode] | None = None, *, checkout_timeout_sec: float = 30.0) -> None:
+    def __init__(
+        self, nodes: list[GridNode] | None = None, *, checkout_timeout_sec: float = 30.0
+    ) -> None:
         self._cond = threading.Condition()
         self._nodes: dict[str, GridNode] = {}
         self._in_flight: dict[str, int] = {}
@@ -103,7 +105,9 @@ class GridPool:
             if name not in self._nodes:
                 return False
             if self._in_flight.get(name, 0) > 0:
-                raise ValueError(f"node {name!r} still holds {self._in_flight[name]} lease(s); drain first")
+                raise ValueError(
+                    f"node {name!r} still holds {self._in_flight[name]} lease(s); drain first"
+                )
             del self._nodes[name]
             del self._in_flight[name]
             self._order.remove(name)
@@ -138,7 +142,9 @@ class GridPool:
 
     def checkout(self, timeout_sec: float | None = None) -> GridLease:
         """Claim a session on the least-loaded active node."""
-        deadline = time.monotonic() + (self._checkout_timeout_sec if timeout_sec is None else timeout_sec)
+        deadline = time.monotonic() + (
+            self._checkout_timeout_sec if timeout_sec is None else timeout_sec
+        )
         with self._cond:
             while True:
                 node = self._pick_node()
@@ -195,7 +201,9 @@ class GridPool:
             }
 
 
-def fetch_with_grid(pool: GridPool, opts: SeleniumOptions, *, timeout_sec: float | None = None) -> SeleniumResult:
+def fetch_with_grid(
+    pool: GridPool, opts: SeleniumOptions, *, timeout_sec: float | None = None
+) -> SeleniumResult:
     """Render one URL through the pool: lease -> render -> release."""
     started = time.monotonic()
     try:

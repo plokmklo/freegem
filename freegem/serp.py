@@ -110,9 +110,7 @@ def _parse_ddg(html: str, max_results: int) -> list[SearchHit]:
     anchors = re.findall(
         r"<a[^>]+class=\"result__a\"[^>]*href=\"([^\"]+)\"[^>]*>(.*?)</a>", html, re.DOTALL
     )
-    snippets = re.findall(
-        r"<a[^>]+class=\"result__snippet\"[^>]*>(.*?)</a>", html, re.DOTALL
-    )
+    snippets = re.findall(r"<a[^>]+class=\"result__snippet\"[^>]*>(.*?)</a>", html, re.DOTALL)
     for pos, (href, title) in enumerate(anchors[: max_results or 10], 1):
         url = _ddg_real_url(href)
         if not url:
@@ -152,13 +150,15 @@ class BraveSearchProvider(SearchProvider):
     def search(self, query: str, max_results: int = 10) -> list[SearchHit]:
         if not self.api_key:
             raise ProviderNotConfigured(
-                "brave search needs an API token: put it in config.json as \"brave_api_key\" "
+                'brave search needs an API token: put it in config.json as "brave_api_key" '
                 "(https://api-dashboard.search.brave.com) -- the provider refuses to run half-configured"
             )
         if not query.strip():
             return []
         url = f"{_BRAVE_ENDPOINT}?{urlencode({'q': query, 'count': min(max_results or 10, 20)})}"
-        request = urllib.request.Request(url, headers={"User-Agent": _UA, "X-Subscription-Token": self.api_key})
+        request = urllib.request.Request(
+            url, headers={"User-Agent": _UA, "X-Subscription-Token": self.api_key}
+        )
         with _opener(self.cfg).open(request, timeout=20) as response:
             data = json.loads(response.read(2 << 20).decode("utf-8"))
         return _parse_brave(data, max_results)

@@ -34,8 +34,16 @@ DDG_HTML = """
 BRAVE_JSON = {
     "web": {
         "results": [
-            {"title": "Brave One", "url": "https://one.example.com/", "description": "First brave hit."},
-            {"title": "Brave Two", "url": "https://two.example.com/", "description": "Second hit\nwith newline."},
+            {
+                "title": "Brave One",
+                "url": "https://one.example.com/",
+                "description": "First brave hit.",
+            },
+            {
+                "title": "Brave Two",
+                "url": "https://two.example.com/",
+                "description": "Second hit\nwith newline.",
+            },
             {"title": "No URL", "url": "", "description": "dropped"},
         ]
     }

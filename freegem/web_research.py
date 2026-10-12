@@ -655,10 +655,12 @@ def _reduce_prompt(
     pool_block = ""
     contract = _EVIDENCE_CONTRACT if evidence else ""
     if evidence and quote_pool:
-        pool_block = "VERIFIED VERBATIM QUOTES -- passages already checked, word " \
-            "for word, against the source pages. When the evidence block needs " \
-            "a quote, copy it EXACTLY from this pool; do not paraphrase, do " \
+        pool_block = (
+            "VERIFIED VERBATIM QUOTES -- passages already checked, word "
+            "for word, against the source pages. When the evidence block needs "
+            "a quote, copy it EXACTLY from this pool; do not paraphrase, do "
             "not invent:\n\n" + _quote_pool_block(quote_pool) + "\n\n"
+        )
         contract = _EVIDENCE_CONTRACT_POOL
     return (
         "You are a research assistant. The notes below were extracted from "
@@ -806,9 +808,7 @@ def _mapped_notes(
             try:
                 reply = _gemini_complete(
                     cfg,
-                    _map_prompt(
-                        question, index, source, chunk, collect_quotes=collect_quotes
-                    ),
+                    _map_prompt(question, index, source, chunk, collect_quotes=collect_quotes),
                 )
             except BridgeError:
                 continue  # one dead chunk must not kill the reduce pass

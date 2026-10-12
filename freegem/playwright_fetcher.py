@@ -62,6 +62,7 @@ def is_playwright_available() -> bool:
     """Check if Playwright is installed in the current environment."""
     try:
         import playwright.sync_api  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -73,7 +74,9 @@ def fetch_with_playwright(opts: PlaywrightOptions) -> PlaywrightResult:
     Raises RuntimeError if Playwright is not installed.
     """
     if not is_playwright_available():
-        raise RuntimeError("Playwright package is not installed. Install with `pip install playwright`.")
+        raise RuntimeError(
+            "Playwright package is not installed. Install with `pip install playwright`."
+        )
 
     started = time.monotonic()
 
@@ -93,7 +96,9 @@ def fetch_with_playwright(opts: PlaywrightOptions) -> PlaywrightResult:
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as exc:
-        raise RuntimeError("Playwright package is not installed. Install with `pip install playwright`.") from exc
+        raise RuntimeError(
+            "Playwright package is not installed. Install with `pip install playwright`."
+        ) from exc
 
     screenshot_file: str | None = opts.screenshot_path
     pdf_file: str | None = opts.pdf_path
@@ -118,7 +123,9 @@ def fetch_with_playwright(opts: PlaywrightOptions) -> PlaywrightResult:
                     context.tracing.start(screenshots=True, snapshots=True, sources=True)
 
                 page = context.new_page()
-                response = page.goto(target_url, wait_until=opts.wait_until, timeout=opts.wait_timeout_ms)
+                response = page.goto(
+                    target_url, wait_until=opts.wait_until, timeout=opts.wait_timeout_ms
+                )
 
                 status = response.status if response else 200
                 final_url = page.url
@@ -164,7 +171,9 @@ def fetch_with_playwright(opts: PlaywrightOptions) -> PlaywrightResult:
             browser.close()
 
 
-def should_fallback_to_browser(outcome: FetchOutcome | None, text_content: str | None = None) -> bool:
+def should_fallback_to_browser(
+    outcome: FetchOutcome | None, text_content: str | None = None
+) -> bool:
     """Determine if an HTTP fetch outcome requires Playwright browser fallback."""
     if outcome is None:
         return True

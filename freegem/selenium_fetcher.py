@@ -87,6 +87,7 @@ class SeleniumResult:
 def is_selenium_available() -> bool:
     try:
         import selenium  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -155,7 +156,14 @@ def fetch_with_selenium(opts: SeleniumOptions) -> SeleniumResult:
     try:
         target_url = url_allowed(opts.url)
     except SSRFRefused as exc:
-        return SeleniumResult(url=opts.url, final_url=opts.url, status=0, ok=False, error=f"SSRF refused: {exc}", elapsed_ms=_elapsed())
+        return SeleniumResult(
+            url=opts.url,
+            final_url=opts.url,
+            status=0,
+            ok=False,
+            error=f"SSRF refused: {exc}",
+            elapsed_ms=_elapsed(),
+        )
 
     driver = None
     try:
@@ -213,14 +221,23 @@ def fetch_with_selenium(opts: SeleniumOptions) -> SeleniumResult:
     except SeleniumError:
         raise
     except Exception as exc:
-        return SeleniumResult(url=opts.url, final_url=opts.url, status=0, ok=False, error=f"{type(exc).__name__}: {exc}", elapsed_ms=_elapsed())
+        return SeleniumResult(
+            url=opts.url,
+            final_url=opts.url,
+            status=0,
+            ok=False,
+            error=f"{type(exc).__name__}: {exc}",
+            elapsed_ms=_elapsed(),
+        )
     finally:
         if driver is not None:
             with contextlib.suppress(Exception):
                 driver.quit()
 
 
-def should_fallback_to_selenium(outcome: FetchOutcome | None, text_content: str | None = None) -> bool:
+def should_fallback_to_selenium(
+    outcome: FetchOutcome | None, text_content: str | None = None
+) -> bool:
     """Same heuristic as the Playwright fallback: dead/empty/JS-shell pages
     need a browser. Shared shape, separate function, so each adapter stays
     independently importable and testable."""
@@ -231,7 +248,9 @@ def should_fallback_to_selenium(outcome: FetchOutcome | None, text_content: str 
     text_content = text_content if text_content is not None else outcome.text()
     stripped = (text_content or "").strip()
     low = (text_content or "").lower()
-    return len(stripped) < 200 and ("<script" in low or "enable javascript" in low or "app-root" in low)
+    return len(stripped) < 200 and (
+        "<script" in low or "enable javascript" in low or "app-root" in low
+    )
 
 
 def fetch_http_first_selenium(

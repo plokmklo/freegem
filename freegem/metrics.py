@@ -233,7 +233,9 @@ def memory_rss_kb() -> int | None:
 _AUDIT_LOGS: list[dict[str, Any]] = []
 
 
-def record_audit_event(action: str, client_ip: str, request_id: str, details: dict[str, Any] | None = None) -> None:
+def record_audit_event(
+    action: str, client_ip: str, request_id: str, details: dict[str, Any] | None = None
+) -> None:
     """Record a structured security and operational audit log event."""
     event = {
         "timestamp": time.time(),

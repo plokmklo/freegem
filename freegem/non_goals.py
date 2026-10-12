@@ -38,8 +38,7 @@ NON_GOALS: tuple[NonGoal, ...] = (
     NonGoal(
         label="No guaranteed scraping SLA",
         assumption=(
-            "Every URL succeeds with complete, fresh, accurate content, on "
-            "any site, every time."
+            "Every URL succeeds with complete, fresh, accurate content, on any site, every time."
         ),
         reality=(
             "Scraping success, availability, completeness, freshness, and "

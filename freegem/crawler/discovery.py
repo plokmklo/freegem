@@ -45,29 +45,85 @@ _FETCH_RE = re.compile(
     re.VERBOSE,
 )
 _OPEN_RE = re.compile(
-    r"""\bopen\s*\(\s*["'](GET|POST|PUT|DELETE|HEAD)["']\s*,\s*["'`]("""
-    + _URL_BODY
-    + r""")["'`]"""
+    r"""\bopen\s*\(\s*["'](GET|POST|PUT|DELETE|HEAD)["']\s*,\s*["'`](""" + _URL_BODY + r""")["'`]"""
 )
 _SRCDOC_HREF_RE = re.compile(r"""(?:href|action|src)\s*=\s*["']([^"']+)["']""", re.IGNORECASE)
 
 #: Path segments that usually mean "the good stuff". Kept lowercase.
 _POSITIVE_SEGMENTS = (
-    "docs", "documentation", "api", "reference", "guide", "guides", "tutorial",
-    "manual", "blog", "article", "articles", "post", "research", "paper",
-    "whitepaper", "spec", "specs", "faq", "help", "kb", "release", "changelog",
+    "docs",
+    "documentation",
+    "api",
+    "reference",
+    "guide",
+    "guides",
+    "tutorial",
+    "manual",
+    "blog",
+    "article",
+    "articles",
+    "post",
+    "research",
+    "paper",
+    "whitepaper",
+    "spec",
+    "specs",
+    "faq",
+    "help",
+    "kb",
+    "release",
+    "changelog",
 )
 #: Segments that almost never help a reading crawl.
 _NEGATIVE_SEGMENTS = (
-    "login", "signin", "signup", "register", "logout", "cart", "checkout",
-    "wp-admin", "admin", "account", "search", "tag", "tags", "category",
-    "print", "reply", "share", "trackback", "calendar", "feed", "attachment",
+    "login",
+    "signin",
+    "signup",
+    "register",
+    "logout",
+    "cart",
+    "checkout",
+    "wp-admin",
+    "admin",
+    "account",
+    "search",
+    "tag",
+    "tags",
+    "category",
+    "print",
+    "reply",
+    "share",
+    "trackback",
+    "calendar",
+    "feed",
+    "attachment",
 )
 #: File extensions not worth fetching as documents.
 _SKIP_EXTENSIONS = (
-    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".ico", ".css", ".js",
-    ".zip", ".tar", ".gz", ".rar", ".7z", ".exe", ".dmg", ".mp4", ".mp3",
-    ".avi", ".mov", ".woff", ".woff2", ".ttf", ".eot",
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".gif",
+    ".webp",
+    ".svg",
+    ".ico",
+    ".css",
+    ".js",
+    ".zip",
+    ".tar",
+    ".gz",
+    ".rar",
+    ".7z",
+    ".exe",
+    ".dmg",
+    ".mp4",
+    ".mp3",
+    ".avi",
+    ".mov",
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".eot",
 )
 
 

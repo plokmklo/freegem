@@ -66,7 +66,10 @@ def test_deduper_keeps_unique_rejects_duplicate() -> None:
         "board raised the dividend for the second year in a row "
     ) * 3
     assert d.add("a", t) is True
-    assert d.add("b", t + " executives said the outlook remains cautious given currency headwinds") is False
+    assert (
+        d.add("b", t + " executives said the outlook remains cautious given currency headwinds")
+        is False
+    )
     assert d.original_of("b") == "a"
     assert d.stats()["kept"] == 1
 
@@ -104,13 +107,22 @@ def test_deduper_is_duplicate_does_not_mutate() -> None:
 
 def test_sqlite_fts_sink_upsert_search_replace() -> None:
     sink = SqliteFtsSink(":memory:")
-    sink.upsert("1", url="https://x/1", title="Gemini bridge guide", text="how to run the local bridge server")
-    sink.upsert("2", url="https://x/2", title="Crawler manual", text="the crawler honors politeness delays")
+    sink.upsert(
+        "1",
+        url="https://x/1",
+        title="Gemini bridge guide",
+        text="how to run the local bridge server",
+    )
+    sink.upsert(
+        "2", url="https://x/2", title="Crawler manual", text="the crawler honors politeness delays"
+    )
     assert sink.count() == 2
     hits = sink.search("bridge")
     assert hits and hits[0]["doc_id"] == "1"
     # re-upsert replaces, never duplicates
-    sink.upsert("1", url="https://x/1v2", title="Gemini bridge guide v2", text="updated bridge instructions")
+    sink.upsert(
+        "1", url="https://x/1v2", title="Gemini bridge guide v2", text="updated bridge instructions"
+    )
     assert sink.count() == 2
     assert sink.search("bridge")[0]["title"] == "Gemini bridge guide v2"
     assert sink.search("nonexistenttermmatch") == []
@@ -119,7 +131,13 @@ def test_sqlite_fts_sink_upsert_search_replace() -> None:
 
 def test_sqlite_sink_metadata_roundtrip() -> None:
     sink = SqliteFtsSink(":memory:")
-    sink.upsert("m1", url="https://x/m", title="t", text="body words here", metadata={"lang": "en", "depth": 2})
+    sink.upsert(
+        "m1",
+        url="https://x/m",
+        title="t",
+        text="body words here",
+        metadata={"lang": "en", "depth": 2},
+    )
     hit = sink.search("body")[0]
     assert hit["metadata"] == {"lang": "en", "depth": 2}
     sink.close()
@@ -128,7 +146,9 @@ def test_sqlite_sink_metadata_roundtrip() -> None:
 def test_jsonl_sink_persists_and_searches(tmp_path: Path) -> None:
     path = tmp_path / "index.jsonl"
     s1 = JsonlSink(path)
-    s1.upsert("a", url="https://x/a", title="Arxiv digests", text="papers about diffusion models weekly")
+    s1.upsert(
+        "a", url="https://x/a", title="Arxiv digests", text="papers about diffusion models weekly"
+    )
     s1.upsert("b", url="https://x/b", title="Cooking blog", text="sourdough starter maintenance")
     s1.close()
 

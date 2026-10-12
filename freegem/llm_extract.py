@@ -104,9 +104,17 @@ class ExtractionSchema:
         required: list[str] = []
         for f in self.fields:
             if f.type == "enum":
-                props[f.name] = {"type": "string", "enum": list(f.enum), "description": f.description}
+                props[f.name] = {
+                    "type": "string",
+                    "enum": list(f.enum),
+                    "description": f.description,
+                }
             elif f.type == "array":
-                props[f.name] = {"type": "array", "items": {"type": f.items_type}, "description": f.description}
+                props[f.name] = {
+                    "type": "array",
+                    "items": {"type": f.items_type},
+                    "description": f.description,
+                }
             else:
                 props[f.name] = {"type": f.type, "description": f.description}
             if f.required:
@@ -132,7 +140,7 @@ class ExtractionSchema:
             req = "required" if f.required else "optional"
             desc = f" — {f.description}" if f.description else ""
             lines.append(f'- "{f.name}" ({spec}, {req}){desc}')
-        lines.append('Respond with ONLY the JSON object, no prose, no code fences.')
+        lines.append("Respond with ONLY the JSON object, no prose, no code fences.")
         return "\n".join(lines)
 
 
@@ -153,7 +161,11 @@ def _coerce_scalar(value: Any, ftype: str) -> tuple[Any, bool]:
             return value, True
         if isinstance(value, str):
             try:
-                return (int(value.strip()), True) if ftype == "integer" else (float(value.strip()), True)
+                return (
+                    (int(value.strip()), True)
+                    if ftype == "integer"
+                    else (float(value.strip()), True)
+                )
             except ValueError:
                 return value, False
         return value, False
@@ -257,7 +269,9 @@ class BridgeProvider:
     OpenAI-compatible provider and ignored (the bridge has one model).
     """
 
-    def __init__(self, cfg: BridgeConfig, *, model: str | None = None, model_id: int = 0, think_mode: int = 0) -> None:
+    def __init__(
+        self, cfg: BridgeConfig, *, model: str | None = None, model_id: int = 0, think_mode: int = 0
+    ) -> None:
         self.cfg = cfg
         self.model = model  # accepted, unused: the bridge routes one session
         self.model_id = model_id
@@ -275,7 +289,9 @@ class OpenAICompatProvider:
     caller's business: pass the api_key you negotiated.
     """
 
-    def __init__(self, base_url: str, api_key: str | None = None, model: str = "gpt-4o-mini") -> None:
+    def __init__(
+        self, base_url: str, api_key: str | None = None, model: str = "gpt-4o-mini"
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model

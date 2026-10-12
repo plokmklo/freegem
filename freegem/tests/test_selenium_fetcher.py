@@ -171,7 +171,9 @@ def test_fetch_with_selenium_happy_path(fake_selenium: type[FakeDriver]) -> None
     assert [c for c, _ in driver.cdp] == ["Page.printToPDF"]
 
 
-def test_fetch_with_selenium_seeds_cookies_from_storage_state(fake_selenium: type[FakeDriver]) -> None:
+def test_fetch_with_selenium_seeds_cookies_from_storage_state(
+    fake_selenium: type[FakeDriver],
+) -> None:
     state = {"cookies": [{"name": "sid", "value": "xyz", "domain": ".example.org", "path": "/"}]}
     res = fetch_with_selenium(SeleniumOptions(url="https://example.org/", storage_state=state))
     assert res.ok
@@ -179,13 +181,17 @@ def test_fetch_with_selenium_seeds_cookies_from_storage_state(fake_selenium: typ
     assert fake_selenium.instances[0].cookies[0]["domain"] == ".example.org"
 
 
-def test_fetch_with_selenium_bad_cookie_does_not_kill_fetch(fake_selenium: type[FakeDriver]) -> None:
+def test_fetch_with_selenium_bad_cookie_does_not_kill_fetch(
+    fake_selenium: type[FakeDriver],
+) -> None:
     state = {"cookies": [{"name": "bad", "value": "v"}]}  # no domain: driver may reject
     res = fetch_with_selenium(SeleniumOptions(url="https://example.org/", storage_state=state))
     assert res.ok is True
 
 
-def test_fetch_with_selenium_quits_on_driver_crash(fake_selenium: type[FakeDriver], monkeypatch: pytest.MonkeyPatch) -> None:
+def test_fetch_with_selenium_quits_on_driver_crash(
+    fake_selenium: type[FakeDriver], monkeypatch: pytest.MonkeyPatch
+) -> None:
     def exploding_get(self: FakeDriver, url: str) -> None:
         if url.startswith("http"):
             raise RuntimeError("renderer died")
@@ -207,21 +213,27 @@ def test_fetch_with_selenium_ssrf_refused(fake_selenium: type[FakeDriver]) -> No
 
 
 def test_grid_url_uses_remote(fake_selenium: type[FakeDriver]) -> None:
-    res = fetch_with_selenium(SeleniumOptions(url="https://example.org/", grid_url="http://grid:4444/wd/hub"))
+    res = fetch_with_selenium(
+        SeleniumOptions(url="https://example.org/", grid_url="http://grid:4444/wd/hub")
+    )
     assert res.ok is True
 
 
 def test_should_fallback_heuristics() -> None:
     ok = FetchOutcome(url="u", kind="ok", status=200, body=b"<html>" + b"x" * 400)
     assert should_fallback_to_selenium(ok) is False
-    shell = FetchOutcome(url="u", kind="ok", status=200, body=b"<html><script>app-root</script></html>")
+    shell = FetchOutcome(
+        url="u", kind="ok", status=200, body=b"<html><script>app-root</script></html>"
+    )
     assert should_fallback_to_selenium(shell) is True
     assert should_fallback_to_selenium(None) is True
     err = FetchOutcome(url="u", kind="http_error", status=503, body=b"")
     assert should_fallback_to_selenium(err) is True
 
 
-def test_fetch_http_first_no_browser_when_http_ok(fake_selenium: type[FakeDriver], monkeypatch: pytest.MonkeyPatch) -> None:
+def test_fetch_http_first_no_browser_when_http_ok(
+    fake_selenium: type[FakeDriver], monkeypatch: pytest.MonkeyPatch
+) -> None:
     good = FetchOutcome(url="u", kind="ok", status=200, body=b"<html>" + b"y" * 500 + b"</html>")
     monkeypatch.setattr("freegem.selenium_fetcher.crawl_fetch", lambda url, cfg: good)
     from freegem.config import BridgeConfig

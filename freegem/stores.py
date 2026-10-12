@@ -66,7 +66,9 @@ class DocumentStore(Protocol):
     def upsert(self, doc: dict[str, Any]) -> str: ...
     def get(self, doc_id: str) -> dict[str, Any] | None: ...
     def get_by_url(self, url: str) -> dict[str, Any] | None: ...
-    def query(self, *, metadata: dict[str, Any] | None = None, limit: int = 50) -> list[dict[str, Any]]: ...
+    def query(
+        self, *, metadata: dict[str, Any] | None = None, limit: int = 50
+    ) -> list[dict[str, Any]]: ...
     def delete(self, doc_id: str) -> bool: ...
     def count(self) -> int: ...
     def close(self) -> None: ...
@@ -121,7 +123,9 @@ class SqliteDocumentStore:
 
     def get(self, doc_id: str) -> dict[str, Any] | None:
         with self._lock:
-            row = self._conn.execute("SELECT * FROM documents WHERE doc_id = ?", (doc_id,)).fetchone()
+            row = self._conn.execute(
+                "SELECT * FROM documents WHERE doc_id = ?", (doc_id,)
+            ).fetchone()
         return self._row_to_doc(row) if row else None
 
     def get_by_url(self, url: str) -> dict[str, Any] | None:
@@ -129,7 +133,9 @@ class SqliteDocumentStore:
             row = self._conn.execute("SELECT * FROM documents WHERE url = ?", (url,)).fetchone()
         return self._row_to_doc(row) if row else None
 
-    def query(self, *, metadata: dict[str, Any] | None = None, limit: int = 50) -> list[dict[str, Any]]:
+    def query(
+        self, *, metadata: dict[str, Any] | None = None, limit: int = 50
+    ) -> list[dict[str, Any]]:
         """Metadata containment query: every key/value must appear in the doc's
         metadata. Client-side filtering over an indexed scan -- honest about
         scale, and identical semantics to the Postgres JSONB @> version."""
@@ -180,7 +186,9 @@ class PostgresDocumentStore:
             try:
                 import psycopg2 as psycopg
             except ImportError as exc:
-                raise PostgresUnavailable("pip install psycopg[binary]  (or psycopg2-binary)") from exc
+                raise PostgresUnavailable(
+                    "pip install psycopg[binary]  (or psycopg2-binary)"
+                ) from exc
             self._psycopg = psycopg
             self._v3 = False
         self._conn = self._psycopg.connect(dsn)
@@ -257,7 +265,9 @@ class PostgresDocumentStore:
             rows = self._rows(cur)
         return _normalize_pg(rows[0]) if rows else None
 
-    def query(self, *, metadata: dict[str, Any] | None = None, limit: int = 50) -> list[dict[str, Any]]:
+    def query(
+        self, *, metadata: dict[str, Any] | None = None, limit: int = 50
+    ) -> list[dict[str, Any]]:
         with self._conn.cursor() as cur:
             if metadata:
                 cur.execute(
@@ -268,7 +278,9 @@ class PostgresDocumentStore:
                     (json.dumps(metadata), limit),
                 )
             else:
-                cur.execute(self._q("SELECT * FROM __TABLE__ ORDER BY updated_at DESC LIMIT %s"), (limit,))
+                cur.execute(
+                    self._q("SELECT * FROM __TABLE__ ORDER BY updated_at DESC LIMIT %s"), (limit,)
+                )
             rows = self._rows(cur)
         return [_normalize_pg(r) for r in rows]
 

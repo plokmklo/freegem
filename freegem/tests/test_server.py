@@ -127,7 +127,9 @@ class DiscoveryEndpointTests(EndpointTestCase):
             for key in ("label", "assumption", "reality"):
                 self.assertTrue(goal[key].strip())
         labels = [goal["label"] for goal in goals]
-        self.assertIn("No CAPTCHA solving, anti-bot bypass, stealth, or fingerprint evasion", labels)
+        self.assertIn(
+            "No CAPTCHA solving, anti-bot bypass, stealth, or fingerprint evasion", labels
+        )
         self.assertIn(
             "No hosted queues, databases, dashboards, proxies, or billing-free infrastructure",
             labels,

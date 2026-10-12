@@ -151,7 +151,13 @@ class SqliteFtsSink:
                     (match, limit),
                 ).fetchall()
                 return [
-                    {"doc_id": r[0], "url": r[1], "title": r[2], "metadata": json.loads(r[3] or "{}"), "score": -r[4]}
+                    {
+                        "doc_id": r[0],
+                        "url": r[1],
+                        "title": r[2],
+                        "metadata": json.loads(r[3] or "{}"),
+                        "score": -r[4],
+                    }
                     for r in rows
                 ]
             # FTS5-less build: substring scan. Degraded ranking (recency
@@ -163,7 +169,13 @@ class SqliteFtsSink:
                 (pattern, pattern, limit),
             ).fetchall()
             return [
-                {"doc_id": r[0], "url": r[1], "title": r[2], "metadata": json.loads(r[3] or "{}"), "score": 1.0}
+                {
+                    "doc_id": r[0],
+                    "url": r[1],
+                    "title": r[2],
+                    "metadata": json.loads(r[3] or "{}"),
+                    "score": 1.0,
+                }
                 for r in rows
             ]
 
@@ -235,7 +247,11 @@ class JsonlSink:
                 for t in q:
                     tf = toks.count(t)
                     if tf:
-                        df = sum(1 for d in self._docs.values() if t in _tokens(d["title"] + " " + d["text"]))
+                        df = sum(
+                            1
+                            for d in self._docs.values()
+                            if t in _tokens(d["title"] + " " + d["text"])
+                        )
                         score += tf * (math.log(n_docs / df) + 1.0)
                 if score > 0:
                     results.append(

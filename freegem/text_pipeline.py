@@ -105,7 +105,9 @@ def chunk_text(
             if cut > start + max_chars // 3:
                 end = cut
             # back off from a mid-word cut
-            while end < len(text) and end > start and text[end - 1].isalnum() and text[end].isalnum():
+            while (
+                end < len(text) and end > start and text[end - 1].isalnum() and text[end].isalnum()
+            ):
                 end -= 1
         piece = text[start:end].strip()
         if piece:
@@ -269,5 +271,7 @@ class CostQualityTelemetry:
                 "summaries_made": self.summaries_made,
                 "tokens_in_est": self.chars_in // 4,
                 "tokens_out_est": self.chars_out // 4,
-                "reduction_ratio": round(self.chars_out / self.chars_in, 4) if self.chars_in else 0.0,
+                "reduction_ratio": round(self.chars_out / self.chars_in, 4)
+                if self.chars_in
+                else 0.0,
             }

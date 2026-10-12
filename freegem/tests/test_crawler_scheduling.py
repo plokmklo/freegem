@@ -72,7 +72,9 @@ def test_count_changes_collapses_consecutive_identical_hashes() -> None:
     for i, h in enumerate(["a", "a", "a", "b", "b", "c"]):
         record_fetch(conn, "u", content_hash=h, observed_at=now - 600 + i * 100)
     assert count_changes(conn, "u", within_sec=10_000, now=now) == 2
-    assert count_changes(conn, "u", within_sec=150, now=now) == 0  # only the last two "b","c" -> wait
+    assert (
+        count_changes(conn, "u", within_sec=150, now=now) == 0
+    )  # only the last two "b","c" -> wait
     conn.close()
 
 

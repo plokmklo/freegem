@@ -47,9 +47,18 @@ NEWS_HTML = (
   <footer>Copyright Daily Signal</footer>
 </body>
 </html>
-""".replace("__PARA1__", "The market for parsing tools grew again this quarter, according to people familiar with the matter.")
-    .replace("__PARA2__", "Analysts said the change reflects a broader shift toward structured extraction over plain text dumps.")
-    .replace("__PARA3__", "Several publishers have already adopted the format, citing clearer provenance for every field.")
+""".replace(
+        "__PARA1__",
+        "The market for parsing tools grew again this quarter, according to people familiar with the matter.",
+    )
+    .replace(
+        "__PARA2__",
+        "Analysts said the change reflects a broader shift toward structured extraction over plain text dumps.",
+    )
+    .replace(
+        "__PARA3__",
+        "Several publishers have already adopted the format, citing clearer provenance for every field.",
+    )
 )
 
 
@@ -76,7 +85,11 @@ class ParseArticleTests(unittest.TestCase):
         self.assertGreater(res.word_count, 30)
 
     def test_opengraph_fills_when_no_jsonld(self) -> None:
-        html = NEWS_HTML.split('<script type="application/ld+json">')[0] + "</head>" + NEWS_HTML.split("</head>")[1]
+        html = (
+            NEWS_HTML.split('<script type="application/ld+json">')[0]
+            + "</head>"
+            + NEWS_HTML.split("</head>")[1]
+        )
         res = parse_article(html, "https://news.example.com/stories/one")
         self.assertEqual(res.title, "OG Headline")
         self.assertEqual(res.signals["title"], "opengraph")
@@ -105,10 +118,15 @@ class ParseArticleTests(unittest.TestCase):
         self.assertEqual(res.doc_type, "article")
 
     def test_ld_image_dict_and_string_forms(self) -> None:
-        for image in ("https://c.example/i.jpg", {"url": "https://c.example/i.jpg"},
-                      ["https://c.example/i.jpg"]):
-            html = NEWS_HTML.replace('"image": ["https://cdn.example.com/ld.jpg"]',
-                                     f'"image": {image!r}'.replace("'", '"'))
+        for image in (
+            "https://c.example/i.jpg",
+            {"url": "https://c.example/i.jpg"},
+            ["https://c.example/i.jpg"],
+        ):
+            html = NEWS_HTML.replace(
+                '"image": ["https://cdn.example.com/ld.jpg"]',
+                f'"image": {image!r}'.replace("'", '"'),
+            )
             res = parse_article(html, "https://news.example.com/one")
             self.assertEqual(res.image, "https://c.example/i.jpg", image)
 
@@ -131,9 +149,11 @@ class ParseArticleTests(unittest.TestCase):
         self.assertFalse(is_article(dom2))
 
     def test_malformed_jsonld_does_not_crash(self) -> None:
-        html = ('<script type="application/ld+json">{not json</script>'
-                "<article><h1>Still Works</h1>"
-                "<p>One paragraph long enough for body extraction to include it here.</p></article>")
+        html = (
+            '<script type="application/ld+json">{not json</script>'
+            "<article><h1>Still Works</h1>"
+            "<p>One paragraph long enough for body extraction to include it here.</p></article>"
+        )
         res = parse_article(html, "https://x.example.com/b")
         self.assertEqual(res.title, "Still Works")
         self.assertEqual(res.signals["title"], "dom")

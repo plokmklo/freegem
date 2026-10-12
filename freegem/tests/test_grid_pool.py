@@ -25,7 +25,7 @@ class CapacityTests(unittest.TestCase):
         )
         leases = [pool.checkout() for _ in range(3)]
         # ratios after each pick: a=0 -> b=0 (tie, first wins) -> then a=1/4 < b=1/2 -> a
-        self.assertEqual([l.node_name for l in leases], ["a", "b", "a"])
+        self.assertEqual([lease.node_name for lease in leases], ["a", "b", "a"])
         stats = pool.stats()
         self.assertEqual(stats["in_flight_total"], 3)
         self.assertEqual(stats["capacity"], 6)

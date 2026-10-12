@@ -26,10 +26,18 @@ class TestPlaywrightFetcher(unittest.TestCase):
         outcome_failed = FetchOutcome(url="https://example.com", kind="http_error", status=500)
         self.assertTrue(should_fallback_to_browser(outcome_failed))
 
-        outcome_spa = FetchOutcome(url="https://example.com", kind="ok", body=b"<html><script>app()</script>Please enable JavaScript</html>")
+        outcome_spa = FetchOutcome(
+            url="https://example.com",
+            kind="ok",
+            body=b"<html><script>app()</script>Please enable JavaScript</html>",
+        )
         self.assertTrue(should_fallback_to_browser(outcome_spa))
 
-        outcome_ok = FetchOutcome(url="https://example.com", kind="ok", body=b"<html><body>" + b"x" * 500 + b"</body></html>")
+        outcome_ok = FetchOutcome(
+            url="https://example.com",
+            kind="ok",
+            body=b"<html><body>" + b"x" * 500 + b"</body></html>",
+        )
         self.assertFalse(should_fallback_to_browser(outcome_ok))
 
     @patch("freegem.playwright_fetcher.is_playwright_available", return_value=False)
@@ -42,6 +50,7 @@ class TestPlaywrightFetcher(unittest.TestCase):
     @patch("freegem.playwright_fetcher.url_allowed")
     def test_fetch_with_playwright_ssrf_refusal(self, mock_allowed: Any, mock_avail: Any) -> None:
         from freegem.ssrf import SSRFRefused
+
         mock_allowed.side_effect = SSRFRefused("127.0.0.1 refused")
 
         opts = PlaywrightOptions(url="http://127.0.0.1")

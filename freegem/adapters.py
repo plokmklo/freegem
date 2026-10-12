@@ -38,6 +38,7 @@ def parse_pdf(data_or_path: bytes | str) -> DocumentResult:
     # Try pypdf / PyPDF2 if available
     try:
         import pypdf
+
         reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
         pages_text: list[str] = []
         for p in reader.pages:
@@ -102,6 +103,7 @@ def parse_docx(data_or_path: bytes | str) -> DocumentResult:
     # Try python-docx if available
     try:
         import docx
+
         doc = docx.Document(io.BytesIO(docx_bytes))
         paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
         full_text = "\n\n".join(paragraphs)
@@ -156,7 +158,11 @@ def parse_docx(data_or_path: bytes | str) -> DocumentResult:
             paragraphs = []
             for p in tree.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p"):
                 texts = [
-                    t.text for t in p.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t") if t.text
+                    t.text
+                    for t in p.iter(
+                        "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t"
+                    )
+                    if t.text
                 ]
                 p_text = "".join(texts).strip()
                 if p_text:

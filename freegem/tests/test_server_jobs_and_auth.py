@@ -92,7 +92,11 @@ class TestServerJobsAndAuth(unittest.TestCase):
                         {"name": "name", "type": "string"},
                         {"name": "price", "type": "number"},
                         {"name": "in_stock", "type": "boolean"},
-                        {"name": "category", "type": "enum", "enum": ["electronics", "books", "other"]},
+                        {
+                            "name": "category",
+                            "type": "enum",
+                            "enum": ["electronics", "books", "other"],
+                        },
                     ],
                 },
             )
@@ -120,11 +124,25 @@ class TestServerJobsAndAuth(unittest.TestCase):
         from freegem.selenium_fetcher import SeleniumOptions
 
         allowed = {
-            "url", "grid_url", "wait_selector", "implicit_wait_sec", "page_load_timeout_sec",
-            "viewport_width", "viewport_height", "user_agent", "storage_state",
-            "capture_screenshot", "screenshot_path", "capture_pdf", "pdf_path",
+            "url",
+            "grid_url",
+            "wait_selector",
+            "implicit_wait_sec",
+            "page_load_timeout_sec",
+            "viewport_width",
+            "viewport_height",
+            "user_agent",
+            "storage_state",
+            "capture_screenshot",
+            "screenshot_path",
+            "capture_pdf",
+            "pdf_path",
         }
-        params: dict[str, Any] = {"url": "https://example.org", "evil_param": "x", "capture_screenshot": True}
+        params: dict[str, Any] = {
+            "url": "https://example.org",
+            "evil_param": "x",
+            "capture_screenshot": True,
+        }
         filtered = {k: v for k, v in params.items() if k in allowed}
         opts = SeleniumOptions(**filtered)
         self.assertEqual(opts.url, "https://example.org")

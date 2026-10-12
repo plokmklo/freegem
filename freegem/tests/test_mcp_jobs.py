@@ -33,7 +33,11 @@ class TestMcpJobs(unittest.TestCase):
         submit_res = run_tool(
             cfg,
             "freegem_submit_job",
-            {"job_type": "scrape", "params": {"url": "https://example.com"}, "api_key": "secret-key"},
+            {
+                "job_type": "scrape",
+                "params": {"url": "https://example.com"},
+                "api_key": "secret-key",
+            },
         )
         job_data = json.loads(submit_res)
         self.assertIn("id", job_data)

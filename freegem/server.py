@@ -120,7 +120,6 @@ def upload_images(cfg: BridgeConfig, images: list[ImageRef]) -> list[str] | None
 
 
 class GeminiHandler(BaseHTTPRequestHandler):
-
     def _authenticate_request(self) -> bool:
         api_key = getattr(self.cfg, "api_key", None) or os.environ.get("FREEGEM_API_KEY")
         if not api_key:
@@ -164,7 +163,9 @@ class GeminiHandler(BaseHTTPRequestHandler):
 
         # GET /v1/jobs/{id}/results
         if len(parts) >= 4 and parts[3] == "results":
-            self.send_json({"id": job.id, "status": job.status, "result": job.result, "error": job.error})
+            self.send_json(
+                {"id": job.id, "status": job.status, "result": job.result, "error": job.error}
+            )
             return
 
         # GET /v1/jobs/{id}
@@ -220,56 +221,93 @@ class GeminiHandler(BaseHTTPRequestHandler):
             GLOBAL_JOB_MANAGER.update_job_status(job.id, "processing")
             client_ip = getattr(self, "client_address", ("127.0.0.1",))[0]
             req_id = getattr(self, "_request_id", "")
-            record_audit_event("job_started", client_ip, req_id, {"job_id": job.id, "type": job.type})
+            record_audit_event(
+                "job_started", client_ip, req_id, {"job_id": job.id, "type": job.type}
+            )
 
             try:
                 if job.type == "scrape":
                     from .web_scraper import scrape_page
+
                     url = str(job.params.get("url", ""))
                     scraped = scrape_page(cfg, url)
                     GLOBAL_JOB_MANAGER.update_job_status(
-                        job.id, "completed", result={"url": scraped.url, "title": scraped.title, "text": scraped.text, "links": scraped.links}
+                        job.id,
+                        "completed",
+                        result={
+                            "url": scraped.url,
+                            "title": scraped.title,
+                            "text": scraped.text,
+                            "links": scraped.links,
+                        },
                     )
                 elif job.type == "research":
                     import json as _json
 
                     from .web_research import render_json, research
+
                     topic = str(job.params.get("topic", ""))
                     urls = [str(u) for u in job.params.get("urls", [])]
                     if not topic and not urls:
-                        GLOBAL_JOB_MANAGER.update_job_status(job.id, "failed", error="topic or urls is required")
+                        GLOBAL_JOB_MANAGER.update_job_status(
+                            job.id, "failed", error="topic or urls is required"
+                        )
                         return
                     researched = research(cfg, topic or urls[0], urls)
                     payload = _json.loads(render_json(researched))
                     GLOBAL_JOB_MANAGER.update_job_status(job.id, "completed", result=payload)
                 elif job.type == "playwright":
                     from .playwright_fetcher import PlaywrightOptions, fetch_with_playwright
+
                     opts = PlaywrightOptions(**job.params)
                     pw_res = fetch_with_playwright(opts)
                     art_ids = []
                     if pw_res.screenshot_path and os.path.exists(pw_res.screenshot_path):
-                        art = GLOBAL_JOB_MANAGER.save_artifact(job.id, "screenshot.png", "image/png", pw_res.screenshot_path)
+                        art = GLOBAL_JOB_MANAGER.save_artifact(
+                            job.id, "screenshot.png", "image/png", pw_res.screenshot_path
+                        )
                         art_ids.append(art.id)
                     if pw_res.pdf_path and os.path.exists(pw_res.pdf_path):
-                        art = GLOBAL_JOB_MANAGER.save_artifact(job.id, "document.pdf", "application/pdf", pw_res.pdf_path)
+                        art = GLOBAL_JOB_MANAGER.save_artifact(
+                            job.id, "document.pdf", "application/pdf", pw_res.pdf_path
+                        )
                         art_ids.append(art.id)
                     if pw_res.trace_path and os.path.exists(pw_res.trace_path):
-                        art = GLOBAL_JOB_MANAGER.save_artifact(job.id, "trace.zip", "application/zip", pw_res.trace_path)
+                        art = GLOBAL_JOB_MANAGER.save_artifact(
+                            job.id, "trace.zip", "application/zip", pw_res.trace_path
+                        )
                         art_ids.append(art.id)
 
                     GLOBAL_JOB_MANAGER.update_job_status(
                         job.id,
                         "completed" if pw_res.ok else "failed",
-                        result={"url": pw_res.url, "final_url": pw_res.final_url, "title": pw_res.title, "text": pw_res.text, "status": pw_res.status},
+                        result={
+                            "url": pw_res.url,
+                            "final_url": pw_res.final_url,
+                            "title": pw_res.title,
+                            "text": pw_res.text,
+                            "status": pw_res.status,
+                        },
                         error=pw_res.error,
                     )
                 elif job.type == "document":
                     from .adapters import parse_document
-                    doc_data = job.params.get("data", "").encode("utf-8") if isinstance(job.params.get("data"), str) else job.params.get("data", b"")
+
+                    doc_data = (
+                        job.params.get("data", "").encode("utf-8")
+                        if isinstance(job.params.get("data"), str)
+                        else job.params.get("data", b"")
+                    )
                     filename = job.params.get("filename", "")
                     doc_res = parse_document(doc_data, filename)
                     GLOBAL_JOB_MANAGER.update_job_status(
-                        job.id, "completed", result={"text": doc_res.text, "markdown": doc_res.markdown, "metadata": doc_res.metadata}
+                        job.id,
+                        "completed",
+                        result={
+                            "text": doc_res.text,
+                            "markdown": doc_res.markdown,
+                            "metadata": doc_res.metadata,
+                        },
                     )
                 elif job.type == "extract":
                     # Schema-constrained LLM extraction (2.8.0): optional
@@ -294,9 +332,13 @@ class GeminiHandler(BaseHTTPRequestHandler):
                             )
                         )
                     if not specs:
-                        GLOBAL_JOB_MANAGER.update_job_status(job.id, "failed", error="fields[] is required")
+                        GLOBAL_JOB_MANAGER.update_job_status(
+                            job.id, "failed", error="fields[] is required"
+                        )
                         return
-                    schema = ExtractionSchema(name=str(job.params.get("schema_name", "extraction")), fields=tuple(specs))
+                    schema = ExtractionSchema(
+                        name=str(job.params.get("schema_name", "extraction")), fields=tuple(specs)
+                    )
                     text = str(job.params.get("text", ""))
                     chunk_query = str(job.params.get("select_query", "") or "")
                     if chunk_query and len(text) > 50_000:
@@ -306,7 +348,10 @@ class GeminiHandler(BaseHTTPRequestHandler):
                         picked = select_relevant(chunks, chunk_query, k=4)
                         text = "\n\n".join(c.text for c in picked) if picked else text[:50_000]
                     clean, problems = extract_structured(
-                        schema, text, BridgeProvider(cfg), max_repairs=int(job.params.get("max_repairs", 1))
+                        schema,
+                        text,
+                        BridgeProvider(cfg),
+                        max_repairs=int(job.params.get("max_repairs", 1)),
                     )
                     GLOBAL_JOB_MANAGER.update_job_status(
                         job.id, "completed", result={"data": clean, "problems": problems}
@@ -315,37 +360,67 @@ class GeminiHandler(BaseHTTPRequestHandler):
                     from .selenium_fetcher import SeleniumOptions, fetch_with_selenium
 
                     allowed = {
-                        "url", "grid_url", "wait_selector", "implicit_wait_sec", "page_load_timeout_sec",
-                        "viewport_width", "viewport_height", "user_agent", "storage_state",
-                        "capture_screenshot", "screenshot_path", "capture_pdf", "pdf_path",
+                        "url",
+                        "grid_url",
+                        "wait_selector",
+                        "implicit_wait_sec",
+                        "page_load_timeout_sec",
+                        "viewport_width",
+                        "viewport_height",
+                        "user_agent",
+                        "storage_state",
+                        "capture_screenshot",
+                        "screenshot_path",
+                        "capture_pdf",
+                        "pdf_path",
                     }
-                    sel_opts = SeleniumOptions(**{k: v for k, v in job.params.items() if k in allowed})
+                    sel_opts = SeleniumOptions(
+                        **{k: v for k, v in job.params.items() if k in allowed}
+                    )
                     sel_res = fetch_with_selenium(sel_opts)
                     art_ids = []
                     if sel_res.screenshot_path and os.path.exists(sel_res.screenshot_path):
-                        art = GLOBAL_JOB_MANAGER.save_artifact(job.id, "screenshot.png", "image/png", sel_res.screenshot_path)
+                        art = GLOBAL_JOB_MANAGER.save_artifact(
+                            job.id, "screenshot.png", "image/png", sel_res.screenshot_path
+                        )
                         art_ids.append(art.id)
                     if sel_res.pdf_path and os.path.exists(sel_res.pdf_path):
-                        art = GLOBAL_JOB_MANAGER.save_artifact(job.id, "document.pdf", "application/pdf", sel_res.pdf_path)
+                        art = GLOBAL_JOB_MANAGER.save_artifact(
+                            job.id, "document.pdf", "application/pdf", sel_res.pdf_path
+                        )
                         art_ids.append(art.id)
                     GLOBAL_JOB_MANAGER.update_job_status(
                         job.id,
                         "completed" if sel_res.ok else "failed",
-                        result={"url": sel_res.url, "final_url": sel_res.final_url, "title": sel_res.title,
-                                "text": sel_res.text, "artifact_ids": art_ids},
+                        result={
+                            "url": sel_res.url,
+                            "final_url": sel_res.final_url,
+                            "title": sel_res.title,
+                            "text": sel_res.text,
+                            "artifact_ids": art_ids,
+                        },
                         error=sel_res.error,
                     )
                 else:
-                    GLOBAL_JOB_MANAGER.update_job_status(job.id, "failed", error=f"Unknown job type {job.type!r}")
+                    GLOBAL_JOB_MANAGER.update_job_status(
+                        job.id, "failed", error=f"Unknown job type {job.type!r}"
+                    )
 
-                record_audit_event("job_finished", client_ip, req_id, {"job_id": job.id, "status": job.status})
+                record_audit_event(
+                    "job_finished", client_ip, req_id, {"job_id": job.id, "status": job.status}
+                )
             except Exception as exc:
                 trace = {"timestamp": time.time(), "error": str(exc)}
-                GLOBAL_JOB_MANAGER.update_job_status(job.id, "failed", error=str(exc), retry_trace=trace)
-                record_audit_event("job_failed", client_ip, req_id, {"job_id": job.id, "error": str(exc)})
+                GLOBAL_JOB_MANAGER.update_job_status(
+                    job.id, "failed", error=str(exc), retry_trace=trace
+                )
+                record_audit_event(
+                    "job_failed", client_ip, req_id, {"job_id": job.id, "error": str(exc)}
+                )
 
         t = threading.Thread(target=_worker, daemon=True)
         t.start()
+
     """Serves all protocol faces from one handler.
 
     ``server.config`` is set by :class:`ThreadedServer`; every request reads it
@@ -484,9 +559,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
                     # Per-chunk caps are not enough: a stream of under-cap
                     # chunks accumulates unbounded RAM before the post-join
                     # check ever runs. Refuse the moment the total would.
-                    raise _BodyTooLarge(
-                        f"chunked body exceeds the {MAX_BODY_BYTES}-byte limit"
-                    )
+                    raise _BodyTooLarge(f"chunked body exceeds the {MAX_BODY_BYTES}-byte limit")
                 if size == 0:
                     while True:
                         trailer = self.rfile.readline()

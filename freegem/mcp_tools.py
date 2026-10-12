@@ -268,7 +268,15 @@ def run_tool(cfg: BridgeConfig, name: str, arguments: dict[str, Any]) -> str:
         art = GLOBAL_JOB_MANAGER.get_artifact(art_id)
         if not art:
             return json.dumps({"error": "Artifact not found"})
-        return json.dumps({"id": art.id, "job_id": art.job_id, "filename": art.filename, "file_path": art.file_path}, indent=2)
+        return json.dumps(
+            {
+                "id": art.id,
+                "job_id": art.job_id,
+                "filename": art.filename,
+                "file_path": art.file_path,
+            },
+            indent=2,
+        )
 
     if name == "freegem_manage_profile":
         _check_mcp_auth(cfg, arguments.get("api_key"))
@@ -545,9 +553,15 @@ def build_server(cfg: BridgeConfig, name: str = "freegem") -> Any:
         )
 
     @server.tool()
-    def freegem_submit_job(job_type: str, params: dict | None = None, api_key: str | None = None) -> str:
+    def freegem_submit_job(
+        job_type: str, params: dict | None = None, api_key: str | None = None
+    ) -> str:
         """Submit a background processing job (scrape, research, playwright, document)."""
-        return run_tool(cfg, "freegem_submit_job", {"job_type": job_type, "params": params or {}, "api_key": api_key})
+        return run_tool(
+            cfg,
+            "freegem_submit_job",
+            {"job_type": job_type, "params": params or {}, "api_key": api_key},
+        )
 
     @server.tool()
     def freegem_get_job(job_id: str, api_key: str | None = None) -> str:
@@ -557,12 +571,18 @@ def build_server(cfg: BridgeConfig, name: str = "freegem") -> Any:
     @server.tool()
     def freegem_get_artifact(artifact_id: str, api_key: str | None = None) -> str:
         """Retrieve artifact metadata and file path."""
-        return run_tool(cfg, "freegem_get_artifact", {"artifact_id": artifact_id, "api_key": api_key})
+        return run_tool(
+            cfg, "freegem_get_artifact", {"artifact_id": artifact_id, "api_key": api_key}
+        )
 
     @server.tool()
-    def freegem_manage_profile(action: str = "list", name: str | None = None, api_key: str | None = None) -> str:
+    def freegem_manage_profile(
+        action: str = "list", name: str | None = None, api_key: str | None = None
+    ) -> str:
         """Manage session authentication profiles (list, get, delete)."""
-        return run_tool(cfg, "freegem_manage_profile", {"action": action, "name": name, "api_key": api_key})
+        return run_tool(
+            cfg, "freegem_manage_profile", {"action": action, "name": name, "api_key": api_key}
+        )
 
     return server
 
@@ -581,6 +601,7 @@ def model_help(cfg: BridgeConfig) -> str:
         f"  build tag: {cfg.gemini_bl}",
     ]
     return "\n".join(lines)
+
 
 def _check_mcp_auth(cfg: BridgeConfig, api_key: str | None = None) -> None:
     expected_key = getattr(cfg, "api_key", None) or os.environ.get("FREEGEM_API_KEY")

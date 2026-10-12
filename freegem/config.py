@@ -31,45 +31,47 @@ __all__ = ["DEFAULT_CONFIG", "BridgeConfig", "find_config", "load_config"]
 # comment always claimed: a plain dict annotated ``Mapping`` was still one
 # assignment away from being mutated by any importer. Use
 # BridgeConfig.replace() to derive variants.
-DEFAULT_CONFIG: Mapping[str, Any] = MappingProxyType({
-    "port": 8081,
-    "host": "127.0.0.1",  # loopback by default: do not expose your session
-    "retry_attempts": 3,
-    "retry_delay_sec": 2,
-    "request_timeout_sec": 180,
-    "gemini_bl": "boq_assistant-bard-web-server_20260716.08_p0",
-    "auth_user": None,
-    "xsrf_token": None,
-    "default_model": "gemini-3.6-flash",
-    "cookie_file": None,
-    "proxy": None,
-    "temporary_chats": False,
-    "log_requests": True,
-    # Concurrent fetches per research() call (bounded pool, per-host locks).
-    "research_concurrency": 3,
-    # robots.txt cache lifetime per origin; entries revalidate conditionally
-    # (ETag / Last-Modified) after this many seconds.
-    "robots_cache_ttl_sec": 600,
-    # Ask the research answer to append an evidence block quoting the
-    # passages that back its claims; every quote is verified against the
-    # text actually fetched and the result carries per-quote flags.
-    "research_evidence": True,
-    # > 0 enables the server's short admission queue: requests beyond the
-    # concurrency cap wait up to this many seconds for a slot instead of
-    # getting an immediate 503. 0 keeps today's refuse-fast behavior.
-    "request_queue_wait_sec": 0.0,
-    # Claim verification's optional URL discovery searches this wiki through
-    # the Wikimedia API portal (or the site's own OpenSearch API for
-    # non-Wikimedia MediaWiki hosts). robots.txt is honored either way.
-    "discover_wiki": "en.wikipedia.org",
-    # Optional bearer key for the server's own job/result/artifact REST API
-    # and the MCP adapter. None keeps the loopback-only, unauthenticated
-    # behavior; a non-None value makes those endpoints demand
-    # ``Authorization: Bearer <key>``. The Gemini session (cookies/xsrf) is
-    # separate: this key gates OUR api, it never authenticates to Google.
-    "api_key": None,
-    "brave_api_key": "",
-})
+DEFAULT_CONFIG: Mapping[str, Any] = MappingProxyType(
+    {
+        "port": 8081,
+        "host": "127.0.0.1",  # loopback by default: do not expose your session
+        "retry_attempts": 3,
+        "retry_delay_sec": 2,
+        "request_timeout_sec": 180,
+        "gemini_bl": "boq_assistant-bard-web-server_20260716.08_p0",
+        "auth_user": None,
+        "xsrf_token": None,
+        "default_model": "gemini-3.6-flash",
+        "cookie_file": None,
+        "proxy": None,
+        "temporary_chats": False,
+        "log_requests": True,
+        # Concurrent fetches per research() call (bounded pool, per-host locks).
+        "research_concurrency": 3,
+        # robots.txt cache lifetime per origin; entries revalidate conditionally
+        # (ETag / Last-Modified) after this many seconds.
+        "robots_cache_ttl_sec": 600,
+        # Ask the research answer to append an evidence block quoting the
+        # passages that back its claims; every quote is verified against the
+        # text actually fetched and the result carries per-quote flags.
+        "research_evidence": True,
+        # > 0 enables the server's short admission queue: requests beyond the
+        # concurrency cap wait up to this many seconds for a slot instead of
+        # getting an immediate 503. 0 keeps today's refuse-fast behavior.
+        "request_queue_wait_sec": 0.0,
+        # Claim verification's optional URL discovery searches this wiki through
+        # the Wikimedia API portal (or the site's own OpenSearch API for
+        # non-Wikimedia MediaWiki hosts). robots.txt is honored either way.
+        "discover_wiki": "en.wikipedia.org",
+        # Optional bearer key for the server's own job/result/artifact REST API
+        # and the MCP adapter. None keeps the loopback-only, unauthenticated
+        # behavior; a non-None value makes those endpoints demand
+        # ``Authorization: Bearer <key>``. The Gemini session (cookies/xsrf) is
+        # separate: this key gates OUR api, it never authenticates to Google.
+        "api_key": None,
+        "brave_api_key": "",
+    }
+)
 
 
 # ─── value coercion ──────────────────────────────────────────────────────────

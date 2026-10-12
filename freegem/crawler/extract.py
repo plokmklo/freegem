@@ -615,6 +615,7 @@ def extract_metadata(dom: HtmlDom, *, base_url: str = "") -> dict[str, Any]:
                 if script_text:
                     try:
                         import json
+
                         data = json.loads(script_text)
                         meta_info["json_ld"].append(data)
                     except Exception:
@@ -670,7 +671,11 @@ def html_to_markdown(dom_or_html: HtmlDom | str, *, base_url: str = "") -> str:
             href = node.attrs.get("href", "")
             if href:
                 full_href = urllib.parse.urljoin(base_url, href)
-                return f" [{inner or full_href}]({full_href}) " if inner else f" [{full_href}]({full_href}) "
+                return (
+                    f" [{inner or full_href}]({full_href}) "
+                    if inner
+                    else f" [{full_href}]({full_href}) "
+                )
             return inner
         elif tag == "li":
             return f"\n- {inner}" if inner else ""

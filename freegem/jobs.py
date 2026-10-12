@@ -117,7 +117,9 @@ class JobManager:
             if retry_trace is not None:
                 job.retry_traces.append(retry_trace)
 
-    def save_artifact(self, job_id: str, filename: str, content_type: str, file_path_or_bytes: str | bytes) -> Artifact:
+    def save_artifact(
+        self, job_id: str, filename: str, content_type: str, file_path_or_bytes: str | bytes
+    ) -> Artifact:
         """Save an artifact file and associate it with a job."""
         art_id = f"art-{uuid.uuid4().hex[:12]}"
         dest_path = self.artifact_dir / f"{art_id}_{filename}"
@@ -128,6 +130,7 @@ class JobManager:
         else:
             # Move or copy file
             import shutil
+
             shutil.copyfile(file_path_or_bytes, dest_path)
 
         art = Artifact(

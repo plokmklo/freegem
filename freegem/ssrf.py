@@ -218,9 +218,7 @@ class SafeRedirect(urllib.request.HTTPRedirectHandler):
         if parsed.username or parsed.password:
             # The first URL is refused for embedded credentials (url_allowed);
             # a redirect must not become the loophole that reintroduces them.
-            raise urllib.error.URLError(
-                "redirect refused: target URL carries embedded credentials"
-            )
+            raise urllib.error.URLError("redirect refused: target URL carries embedded credentials")
         try:
             pick_public_ip(parsed.hostname or "")
         except SSRFRefused as exc:

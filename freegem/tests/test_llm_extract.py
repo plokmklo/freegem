@@ -67,7 +67,7 @@ def test_to_json_schema_shape() -> None:
 def test_to_prompt_block_names_types_and_required() -> None:
     p = PRODUCT_SCHEMA.to_prompt_block()
     assert '"price" (number, required)' in p
-    assert '"category" (one of [\'electronics\', \'books\', \'other\'], required)' in p
+    assert "\"category\" (one of ['electronics', 'books', 'other'], required)" in p
     assert '"tags" (array of string, optional)' in p
     assert "ONLY the JSON object" in p
 
@@ -96,7 +96,8 @@ def test_validate_coerces_stringified_scalars() -> None:
 
 def test_validate_drops_unknown_fields_and_reports() -> None:
     clean, problems = validate_extraction(
-        PRODUCT_SCHEMA, {"name": "W", "price": 1, "in_stock": True, "category": "other", "smuggled": "x"}
+        PRODUCT_SCHEMA,
+        {"name": "W", "price": 1, "in_stock": True, "category": "other", "smuggled": "x"},
     )
     assert "smuggled" not in clean
     assert any("unknown field 'smuggled'" in p for p in problems)
@@ -138,7 +139,9 @@ def test_validate_non_object_input() -> None:
 
 
 def test_extract_structured_clean_first_pass() -> None:
-    prov = ScriptedProvider([json.dumps({"name": "Widget", "price": 5, "in_stock": True, "category": "other"})])
+    prov = ScriptedProvider(
+        [json.dumps({"name": "Widget", "price": 5, "in_stock": True, "category": "other"})]
+    )
     clean, problems = extract_structured(PRODUCT_SCHEMA, "doc", prov)
     assert clean["price"] == 5
     assert problems == []
@@ -146,7 +149,9 @@ def test_extract_structured_clean_first_pass() -> None:
 
 
 def test_extract_structured_repair_round_feeds_problems_back() -> None:
-    bad = json.dumps({"name": "Widget", "price": "5", "in_stock": "true", "category": "other", "extra": 1})
+    bad = json.dumps(
+        {"name": "Widget", "price": "5", "in_stock": "true", "category": "other", "extra": 1}
+    )
     good = json.dumps({"name": "Widget", "price": 5, "in_stock": True, "category": "other"})
     prov = ScriptedProvider([bad, good])
     clean, problems = extract_structured(PRODUCT_SCHEMA, "doc", prov)
@@ -171,7 +176,9 @@ def test_extract_structured_unparseable_json_raises() -> None:
 
 
 def test_extract_structured_failed_repair_keeps_first_attempt() -> None:
-    first = json.dumps({"name": "Widget", "price": 5, "in_stock": True, "category": "other", "junk": 1})
+    first = json.dumps(
+        {"name": "Widget", "price": 5, "in_stock": True, "category": "other", "junk": 1}
+    )
     prov = ScriptedProvider([first, "boom"])  # repair errors: first attempt must survive
     clean, problems = extract_structured(PRODUCT_SCHEMA, "doc", prov)
     assert clean["name"] == "Widget"
@@ -212,7 +219,17 @@ def test_openai_compat_provider_posts_and_parses(monkeypatch: pytest.MonkeyPatch
 
         def read(self) -> bytes:
             return json.dumps(
-                {"choices": [{"message": {"content": json.dumps({"name": "W", "price": 7, "in_stock": True, "category": "books"})}}]}
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {"name": "W", "price": 7, "in_stock": True, "category": "books"}
+                                )
+                            }
+                        }
+                    ]
+                }
             ).encode()
 
     def fake_urlopen(req: Any, timeout: float = 0) -> Any:

@@ -90,7 +90,14 @@ def record_fetch(
     conn.execute(
         "INSERT INTO content_history(url, observed_at, content_hash, etag, last_modified, http_status)"
         " VALUES(?,?,?,?,?,?)",
-        (url, observed_at if observed_at is not None else time.time(), content_hash, etag, last_modified, http_status),
+        (
+            url,
+            observed_at if observed_at is not None else time.time(),
+            content_hash,
+            etag,
+            last_modified,
+            http_status,
+        ),
     )
     conn.commit()
 
