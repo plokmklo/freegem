@@ -562,6 +562,10 @@ class GeminiHandler(BaseHTTPRequestHandler):
                 if runner is not None:
                     snapshot["jobs"] = runner.stats()
                 self.send_json(snapshot)
+            elif path == "/v1/jobs" or path.startswith("/v1/jobs/"):
+                self._handle_jobs_get(path)
+            elif path.startswith("/v1/artifacts/"):
+                self._handle_artifacts_get(path)
             elif path == "/v1beta/models":
                 self.send_json(
                     {
@@ -642,6 +646,10 @@ class GeminiHandler(BaseHTTPRequestHandler):
                 self._handle_chat()
             elif path == "/v1/responses":
                 self._handle_responses()
+            elif path == "/v1/jobs":
+                # Must precede the /v1/ catch-all: the catch-all treats any
+                # unknown /v1/ path as chat and 400s it ("no prompt content").
+                self._handle_jobs_post()
             elif ":streamGenerateContent" in path:
                 self._handle_google(stream=True)
             elif ":generateContent" in path:

@@ -154,3 +154,108 @@ class TestServerJobsAndAuth(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class JobsRestHttpTests(unittest.TestCase):
+    """The jobs REST surface must actually be ROUTED over real HTTP.
+
+    Regression: POST /v1/jobs fell into the /v1/ chat catch-all (400
+    "no prompt content") and the GET jobs/artifact handlers were never
+    wired into do_GET at all. These tests speak real sockets so routing
+    cannot rot silently again.
+    """
+
+    def setUp(self) -> None:
+        import threading
+
+        from freegem.jobs import reset_job_runner_for_tests
+        from freegem.server import ThreadedServer
+
+        reset_job_runner_for_tests()
+        self.cfg = BridgeConfig(log_requests=False, api_key="jobs-rest-key", job_db="memory")
+        self.server = ThreadedServer(("127.0.0.1", 0), self.cfg, max_concurrent_requests=8)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.addCleanup(self._teardown)
+
+    def _teardown(self) -> None:
+        from freegem.jobs import reset_job_runner_for_tests
+
+        self.server.shutdown()
+        reset_job_runner_for_tests()
+
+    def _req(self, method: str, path: str, body: Any = None) -> tuple[int, Any]:
+        import http.client
+        import json
+
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=15)
+        try:
+            conn.request(
+                method,
+                path,
+                body=json.dumps(body) if body is not None else None,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": "Bearer jobs-rest-key",
+                },
+            )
+            resp = conn.getresponse()
+            raw = resp.read().decode("utf-8", errors="replace")
+            try:
+                return resp.status, json.loads(raw)
+            except ValueError:
+                return resp.status, raw
+        finally:
+            conn.close()
+
+    def test_post_jobs_is_routed(self) -> None:
+        # An unknown type keeps this hermetic: the runner accepts it, the
+        # body fails cleanly, and no network is touched.
+        status, payload = self._req("POST", "/v1/jobs", {"type": "no-such-type", "params": {}})
+        self.assertEqual(status, 202)
+        self.assertTrue(str(payload.get("id", "")).startswith("job-"))
+
+    def test_get_jobs_list_and_single(self) -> None:
+        status, created = self._req("POST", "/v1/jobs", {"type": "no-such-type", "params": {}})
+        self.assertEqual(status, 202)
+        job_id = created["id"]
+        status, listing = self._req("GET", "/v1/jobs")
+        self.assertEqual(status, 200)
+        ids = [j["id"] for j in listing.get("data", [])]
+        self.assertIn(job_id, ids)
+        status, one = self._req("GET", f"/v1/jobs/{job_id}")
+        self.assertEqual(status, 200)
+        self.assertEqual(one["id"], job_id)
+        status, results = self._req("GET", f"/v1/jobs/{job_id}/results")
+        self.assertEqual(status, 200)
+        self.assertEqual(results["id"], job_id)
+
+    def test_delete_unknown_job_404(self) -> None:
+        status, _ = self._req("DELETE", "/v1/jobs/job-does-not-exist")
+        self.assertEqual(status, 404)
+
+    def test_get_artifact_is_routed(self) -> None:
+        job = GLOBAL_JOB_MANAGER.create_job("scrape", {})
+        art = GLOBAL_JOB_MANAGER.save_artifact(job.id, "hello.txt", "text/plain", b"hello artifact")
+        status, raw = self._req("GET", f"/v1/artifacts/{art.id}")
+        self.assertEqual(status, 200)
+        self.assertIn("hello artifact", raw)
+
+    def test_unauthenticated_post_401(self) -> None:
+        import http.client
+        import json
+
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=15)
+        try:
+            conn.request(
+                "POST",
+                "/v1/jobs",
+                body=json.dumps({"type": "scrape", "params": {}}),
+                headers={"Content-Type": "application/json"},
+            )
+            resp = conn.getresponse()
+            self.assertEqual(resp.status, 401)
+            resp.read()
+        finally:
+            conn.close()
