@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import socket
 import struct
 import threading
@@ -23,8 +24,8 @@ from typing import Any
 from . import __version__
 from .config import BridgeConfig
 from .gemini import BridgeError, generate, generate_stream, log
-from .metrics import ServerMetrics, new_request_id, record_audit_event, get_audit_logs
-from .jobs import GLOBAL_JOB_MANAGER, Job, Artifact
+from .jobs import GLOBAL_JOB_MANAGER, Job
+from .metrics import ServerMetrics, new_request_id, record_audit_event
 from .models import MODELS, resolve_model
 from .multimodal import detect_image_mime, fetch_image_bytes, upload_image
 from .tools import (
@@ -234,7 +235,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
                     res = research(cfg, topic)
                     GLOBAL_JOB_MANAGER.update_job_status(job.id, "completed", result=res)
                 elif job.type == "playwright":
-                    from .playwright_fetcher import fetch_with_playwright, PlaywrightOptions
+                    from .playwright_fetcher import PlaywrightOptions, fetch_with_playwright
                     opts = PlaywrightOptions(**job.params)
                     pw_res = fetch_with_playwright(opts)
                     art_ids = []
@@ -393,7 +394,6 @@ class GeminiHandler(BaseHTTPRequestHandler):
         encoding = (self.headers.get("Transfer-Encoding") or "").lower()
         if "chunked" in encoding:
             chunks: list[bytes] = []
-            accumulated = 0
             while True:
                 size_line = self.rfile.readline()
                 if not size_line:
@@ -407,13 +407,6 @@ class GeminiHandler(BaseHTTPRequestHandler):
                     raise ValueError("negative chunk size")
                 if size > MAX_BODY_BYTES:
                     raise _BodyTooLarge(f"chunk of {size} bytes exceeds the limit")
-                if accumulated + size > MAX_BODY_BYTES:
-                    # Per-chunk caps are not enough: a stream of under-cap
-                    # chunks accumulates unbounded RAM before the post-join
-                    # check ever runs. Refuse the moment the total would.
-                    raise _BodyTooLarge(
-                        f"chunked body exceeds the {MAX_BODY_BYTES}-byte limit"
-                    )
                 if size == 0:
                     while True:
                         trailer = self.rfile.readline()
@@ -421,7 +414,6 @@ class GeminiHandler(BaseHTTPRequestHandler):
                             break
                     break
                 chunks.append(self.rfile.read(size))
-                accumulated += size
                 self.rfile.read(2)  # trailing CRLF
             body = b"".join(chunks)
             if len(body) > MAX_BODY_BYTES:

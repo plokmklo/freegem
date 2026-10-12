@@ -1,13 +1,12 @@
 """Tests for optional Playwright HTTP-first / browser-fallback fetcher."""
 
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from freegem.config import BridgeConfig
 from freegem.crawler.fetch import FetchOutcome
 from freegem.playwright_fetcher import (
     PlaywrightOptions,
-    PlaywrightResult,
     fetch_http_first,
     fetch_with_playwright,
     is_playwright_available,

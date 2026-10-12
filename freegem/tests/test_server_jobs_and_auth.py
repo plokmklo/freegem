@@ -1,14 +1,12 @@
 """Tests for REST jobs, artifacts, health, audit logs, and authentication."""
 
-import json
 import os
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from freegem.config import BridgeConfig
-from freegem.jobs import GLOBAL_JOB_MANAGER, JobManager
+from freegem.jobs import JobManager
 from freegem.metrics import get_audit_logs, record_audit_event
-from freegem.server import GeminiHandler
 
 
 class MockServer:

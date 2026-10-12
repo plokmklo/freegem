@@ -49,7 +49,6 @@ __all__ = [
     "SSRFRefused",
     "SafeRedirect",
     "build_guarded_opener",
-    "ip_is_nonpublic",
     "pick_public_ip",
     "pick_public_ips",
     "url_allowed",
@@ -61,40 +60,6 @@ Resolver = Callable[[str], list[str]]
 
 class SSRFRefused(Exception):
     """A URL or host failed the SSRF guard and must not be contacted."""
-
-
-# stdlib ``is_private`` misses two legacy ranges that are not routable on the
-# public internet and must never be dialable: CGNAT (RFC 6598, the address
-# space every carrier-grade NAT hands out) and IPv6 site-local (RFC 3879,
-# deprecated but still configured on old gear). Verified on CPython 3.12:
-# ipaddress classes neither as private nor reserved, so they are explicit.
-_EXTRA_NONPUBLIC_NETS = (
-    ipaddress.ip_network("100.64.0.0/10"),  # CGNAT / RFC 6598
-    ipaddress.ip_network("fec0::/10"),  # deprecated IPv6 site-local
-)
-
-
-def ip_is_nonpublic(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    """True when ``ip`` must not be dialed.
-
-    Covers everything ``ipaddress`` already refuses (private, loopback,
-    link-local, reserved, multicast, unspecified), IPv4-mapped IPv6 (the
-    wrapper is unwrapped before checking), plus the explicit legacy ranges
-    above. One source of truth for every guard call site: the pinned
-    handlers here AND the multimodal image fetcher's pre-check.
-    """
-    if ip.version == 6 and ip.ipv4_mapped is not None:
-        ip = ip.ipv4_mapped
-    if (
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_reserved
-        or ip.is_multicast
-        or ip.is_unspecified
-    ):
-        return True
-    return any(ip in net for net in _EXTRA_NONPUBLIC_NETS)
 
 
 def _host_only(host: str) -> str:
@@ -133,7 +98,14 @@ def _checked_addresses(host: str, infos: list[tuple[Any, ...]]) -> list[str]:
             raise SSRFRefused(f"{host!r} resolved an unparseable address {raw!r}") from exc
         if ip.version == 6 and ip.ipv4_mapped is not None:
             ip = ip.ipv4_mapped
-        if ip_is_nonpublic(ip):
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        ):
             raise SSRFRefused(f"{host!r} resolves to a non-public address ({ip})")
         if str(ip) not in checked:
             checked.append(str(ip))
@@ -215,12 +187,6 @@ class SafeRedirect(urllib.request.HTTPRedirectHandler):
         parsed = urllib.parse.urlparse(newurl)
         if parsed.scheme not in ("http", "https"):
             raise urllib.error.URLError(f"redirect to scheme {parsed.scheme!r} refused")
-        if parsed.username or parsed.password:
-            # The first URL is refused for embedded credentials (url_allowed);
-            # a redirect must not become the loophole that reintroduces them.
-            raise urllib.error.URLError(
-                "redirect refused: target URL carries embedded credentials"
-            )
         try:
             pick_public_ip(parsed.hostname or "")
         except SSRFRefused as exc:

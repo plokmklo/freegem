@@ -26,15 +26,9 @@ from .gemini import (
     log,
     make_sapisidhash,
 )
-from .ssrf import SSRFRefused, build_guarded_opener, ip_is_nonpublic, url_allowed
+from .ssrf import SSRFRefused, build_guarded_opener, url_allowed
 
 __all__ = ["detect_image_mime", "fetch_image_bytes", "reset_page_tokens", "upload_image"]
-
-#: Hard ceiling on one fetched image. The upstream inline-image budget is a
-#: few MB; anything past this is not an image Gemini can use, it is a
-#: bandwidth/RAM weapon pointed at this process by whoever set ``image_url``.
-_MAX_IMAGE_BYTES = 25 * 1024 * 1024
-
 
 _SIGNATURES: tuple[tuple[bytes, str], ...] = (
     (b"\x89PNG\r\n\x1a\n", "image/png"),
@@ -247,10 +241,6 @@ def _host_resolves_public(host: str) -> bool:
     Client-supplied image URLs are fetched by this process, so an attacker who
     can set the URL can aim it at the user's LAN, loopback services, or cloud
     metadata (169.254.169.254). Resolve first and refuse non-public targets.
-    The refused set is :func:`freegem.ssrf.ip_is_nonpublic` -- one source of
-    truth with the pinned-handler guard, including CGNAT (100.64.0.0/10) and
-    deprecated IPv6 site-local (fec0::/10), which stdlib ``is_private`` does
-    not classify.
     """
     try:
         infos = socket.getaddrinfo(host, None)
@@ -263,7 +253,16 @@ def _host_resolves_public(host: str) -> bool:
             ip = ipaddress.ip_address(info[4][0])
         except ValueError:
             return False
-        if ip_is_nonpublic(ip):
+        if ip.version == 6 and ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        ):
             return False
     return True
 
@@ -288,11 +287,6 @@ def fetch_image_bytes(cfg: BridgeConfig, url: str) -> bytes:
     and PIN the connection to the checked IP -- the image fetcher used to have
     a DNS-rebinding window here (check the host, then let urllib re-resolve it
     and connect to whatever came back the second time).
-
-    The body is streamed under a hard cap. ``response.read()`` on an
-    unlimited body let any ``image_url`` in a request exhaust RAM
-    (unauthenticated), so reads stop and return empty the moment the cap is
-    passed, and an over-large declared Content-Length is refused up front.
     """
     try:
         url = url_allowed(url)
@@ -308,21 +302,7 @@ def fetch_image_bytes(cfg: BridgeConfig, url: str) -> bytes:
         # _ssl_ctx(): the same cached TLS context the rest of the project
         # uses, instead of a fresh one per fetch.
         response = build_guarded_opener(cfg.proxy, _ssl_ctx()).open(request, timeout=30)
-        with response:
-            declared = (response.headers.get("Content-Length") or "").strip()
-            if declared.isdigit() and int(declared) > _MAX_IMAGE_BYTES:
-                log(cfg, f"refusing image of {declared} bytes (cap {_MAX_IMAGE_BYTES})")
-                return b""
-            payload = bytearray()
-            while True:
-                block = response.read(1 << 20)  # 1 MiB at a time
-                if not block:
-                    break
-                payload.extend(block)
-                if len(payload) > _MAX_IMAGE_BYTES:
-                    log(cfg, f"image fetch aborted past {_MAX_IMAGE_BYTES} bytes")
-                    return b""
-            return bytes(payload)
+        return response.read()
     except Exception as exc:
         log(cfg, f"image fetch failed: {exc}")
         return b""

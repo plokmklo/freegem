@@ -31,6 +31,7 @@ ImageRef = tuple[Any, str]
 
 TOOL_CALL_FENCE = "```tool_call"
 FUNCTION_CALL_FENCE = "```function_call"
+MAX_INLINE_IMAGE_B64 = 50_000
 
 
 def _as_text(value: Any) -> str:

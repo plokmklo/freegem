@@ -2,6 +2,7 @@
 
 import json
 import unittest
+
 from freegem.config import BridgeConfig
 from freegem.mcp_tools import run_tool
 

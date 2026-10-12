@@ -1,6 +1,7 @@
 """Tests for PDF/DOCX adapters, rich metadata extraction, and Markdown conversion."""
 
 import unittest
+
 from freegem.adapters import parse_docx, parse_pdf
 from freegem.crawler.extract import extract_metadata, html_to_markdown
 from freegem.crawler.hardening import HtmlDom

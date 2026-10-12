@@ -22,8 +22,8 @@ from typing import Any
 from . import __version__
 from .config import BridgeConfig, redact_proxy
 from .gemini import BridgeError, generate
-from .models import MODELS, resolve_model
 from .jobs import GLOBAL_JOB_MANAGER
+from .models import MODELS, resolve_model
 from .session_profiles import ProfileManager
 
 __all__ = ["TOOL_SPECS", "build_server", "run_tool"]
