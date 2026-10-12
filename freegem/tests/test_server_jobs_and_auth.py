@@ -100,8 +100,9 @@ class TestServerJobsAndAuth(unittest.TestCase):
                     ],
                 },
             )
-            handler = _stub_handler(BridgeConfig(log_requests=False), "req-extract-1")
-            handler._run_job_background(job, handler.cfg)
+            from freegem.jobs import execute_job
+
+            execute_job(job, BridgeConfig(log_requests=False))
 
         done = _await_job(job.id)
         self.assertEqual(done.status, "completed")
@@ -112,8 +113,9 @@ class TestServerJobsAndAuth(unittest.TestCase):
 
     def test_extract_job_without_fields_fails_cleanly(self) -> None:
         job = GLOBAL_JOB_MANAGER.create_job("extract", {"text": "hello"})
-        handler = _stub_handler(BridgeConfig(log_requests=False), "req-extract-2")
-        handler._run_job_background(job, handler.cfg)
+        from freegem.jobs import execute_job
+
+        execute_job(job, BridgeConfig(log_requests=False))
         done = _await_job(job.id)
         self.assertEqual(done.status, "failed")
         assert done.error is not None

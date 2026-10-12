@@ -39,5 +39,13 @@
   "robots_cache_ttl_sec": 600,
   "request_queue_wait_sec": 0.0,
   "research_evidence": true,
-  "discover_wiki": "en.wikipedia.org"
+  "discover_wiki": "en.wikipedia.org",
+
+  "_comment_jobs": "Bounded background-job execution (the /v1/jobs API and MCP job tools). job_max_workers = fixed worker pool size. job_max_pending = bounded queue; beyond it submissions get HTTP 429 instead of unbounded memory. job_timeout_sec = per-job watchdog timeout (a job can override via params.timeout_sec, clamped 1-3600). job_retention = terminal jobs kept before the oldest are evicted. job_db = durable SQLite status file (null = ~/.config/freegem/jobs.sqlite3; \"memory\" disables persistence; jobs queued/processing at restart come back 'interrupted'). job_queue_url = optional external execution queue: memory://, sqlite:///path/q.sqlite3, redis://host:6379/0, amqp://...",
+  "job_max_workers": 4,
+  "job_max_pending": 100,
+  "job_timeout_sec": 600,
+  "job_retention": 500,
+  "job_db": null,
+  "job_queue_url": null
 }

@@ -251,7 +251,15 @@ def run_tool(cfg: BridgeConfig, name: str, arguments: dict[str, Any]) -> str:
         _check_mcp_auth(cfg, arguments.get("api_key"))
         job_type = arguments.get("job_type", "")
         params = arguments.get("params", {})
-        job = GLOBAL_JOB_MANAGER.create_job(job_type, params)
+        from .jobs import JobQueueFull, configure_job_runner, job_runner
+
+        # The runner executes MCP-submitted jobs too (before 2.9, MCP jobs
+        # were created and then silently never ran).
+        runner = job_runner() or configure_job_runner(cfg)
+        try:
+            job = runner.submit(job_type, params)
+        except JobQueueFull:
+            return json.dumps({"error": "job queue is full; retry later"})
         return json.dumps(job.to_dict(), indent=2)
 
     if name == "freegem_get_job":

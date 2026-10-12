@@ -24,7 +24,12 @@ from typing import Any
 from . import __version__
 from .config import BridgeConfig
 from .gemini import BridgeError, generate, generate_stream, log
-from .jobs import GLOBAL_JOB_MANAGER, Job
+from .jobs import (
+    GLOBAL_JOB_MANAGER,
+    JobQueueFull,
+    configure_job_runner,
+    job_runner,
+)
 from .metrics import ServerMetrics, new_request_id, record_audit_event
 from .models import MODELS, resolve_model
 from .multimodal import detect_image_mime, fetch_image_bytes, upload_image
@@ -212,214 +217,21 @@ class GeminiHandler(BaseHTTPRequestHandler):
             self.send_error_json("job type is required", 400)
             return
 
-        job = GLOBAL_JOB_MANAGER.create_job(job_type, params)
-        self._run_job_background(job, self.cfg)
-        self.send_json(job.to_dict(), 202)
-
-    def _run_job_background(self, job: Job, cfg: BridgeConfig) -> None:
-        def _worker() -> None:
-            GLOBAL_JOB_MANAGER.update_job_status(job.id, "processing")
-            client_ip = getattr(self, "client_address", ("127.0.0.1",))[0]
-            req_id = getattr(self, "_request_id", "")
-            record_audit_event(
-                "job_started", client_ip, req_id, {"job_id": job.id, "type": job.type}
+        runner = job_runner() or configure_job_runner(self.cfg)
+        try:
+            job = runner.submit(job_type, params)
+        except JobQueueFull:
+            # Bounded backlog: saturation is a visible 429, not silent growth.
+            self.send_json(
+                {
+                    "error": "job queue is full",
+                    "code": "queue_full",
+                    "hint": "retry later; the backlog is bounded by design",
+                },
+                429,
             )
-
-            try:
-                if job.type == "scrape":
-                    from .web_scraper import scrape_page
-
-                    url = str(job.params.get("url", ""))
-                    scraped = scrape_page(cfg, url)
-                    GLOBAL_JOB_MANAGER.update_job_status(
-                        job.id,
-                        "completed",
-                        result={
-                            "url": scraped.url,
-                            "title": scraped.title,
-                            "text": scraped.text,
-                            "links": scraped.links,
-                        },
-                    )
-                elif job.type == "research":
-                    import json as _json
-
-                    from .web_research import render_json, research
-
-                    topic = str(job.params.get("topic", ""))
-                    urls = [str(u) for u in job.params.get("urls", [])]
-                    if not topic and not urls:
-                        GLOBAL_JOB_MANAGER.update_job_status(
-                            job.id, "failed", error="topic or urls is required"
-                        )
-                        return
-                    researched = research(cfg, topic or urls[0], urls)
-                    payload = _json.loads(render_json(researched))
-                    GLOBAL_JOB_MANAGER.update_job_status(job.id, "completed", result=payload)
-                elif job.type == "playwright":
-                    from .playwright_fetcher import PlaywrightOptions, fetch_with_playwright
-
-                    opts = PlaywrightOptions(**job.params)
-                    pw_res = fetch_with_playwright(opts)
-                    art_ids = []
-                    if pw_res.screenshot_path and os.path.exists(pw_res.screenshot_path):
-                        art = GLOBAL_JOB_MANAGER.save_artifact(
-                            job.id, "screenshot.png", "image/png", pw_res.screenshot_path
-                        )
-                        art_ids.append(art.id)
-                    if pw_res.pdf_path and os.path.exists(pw_res.pdf_path):
-                        art = GLOBAL_JOB_MANAGER.save_artifact(
-                            job.id, "document.pdf", "application/pdf", pw_res.pdf_path
-                        )
-                        art_ids.append(art.id)
-                    if pw_res.trace_path and os.path.exists(pw_res.trace_path):
-                        art = GLOBAL_JOB_MANAGER.save_artifact(
-                            job.id, "trace.zip", "application/zip", pw_res.trace_path
-                        )
-                        art_ids.append(art.id)
-
-                    GLOBAL_JOB_MANAGER.update_job_status(
-                        job.id,
-                        "completed" if pw_res.ok else "failed",
-                        result={
-                            "url": pw_res.url,
-                            "final_url": pw_res.final_url,
-                            "title": pw_res.title,
-                            "text": pw_res.text,
-                            "status": pw_res.status,
-                        },
-                        error=pw_res.error,
-                    )
-                elif job.type == "document":
-                    from .adapters import parse_document
-
-                    doc_data = (
-                        job.params.get("data", "").encode("utf-8")
-                        if isinstance(job.params.get("data"), str)
-                        else job.params.get("data", b"")
-                    )
-                    filename = job.params.get("filename", "")
-                    doc_res = parse_document(doc_data, filename)
-                    GLOBAL_JOB_MANAGER.update_job_status(
-                        job.id,
-                        "completed",
-                        result={
-                            "text": doc_res.text,
-                            "markdown": doc_res.markdown,
-                            "metadata": doc_res.metadata,
-                        },
-                    )
-                elif job.type == "extract":
-                    # Schema-constrained LLM extraction (2.8.0): optional
-                    # text_pipeline pre-selection keeps the prompt small.
-                    from .llm_extract import (
-                        BridgeProvider,
-                        ExtractionSchema,
-                        FieldSpec,
-                        extract_structured,
-                    )
-
-                    specs = []
-                    for f in job.params.get("fields", []):
-                        specs.append(
-                            FieldSpec(
-                                name=str(f.get("name", "")),
-                                type=str(f.get("type", "string")),
-                                description=str(f.get("description", "")),
-                                required=bool(f.get("required", True)),
-                                enum=tuple(str(x) for x in f.get("enum", ())),
-                                items_type=str(f.get("items_type", "string")),
-                            )
-                        )
-                    if not specs:
-                        GLOBAL_JOB_MANAGER.update_job_status(
-                            job.id, "failed", error="fields[] is required"
-                        )
-                        return
-                    schema = ExtractionSchema(
-                        name=str(job.params.get("schema_name", "extraction")), fields=tuple(specs)
-                    )
-                    text = str(job.params.get("text", ""))
-                    chunk_query = str(job.params.get("select_query", "") or "")
-                    if chunk_query and len(text) > 50_000:
-                        from .text_pipeline import chunk_text, select_relevant
-
-                        chunks = chunk_text(text, max_chars=8_000)
-                        picked = select_relevant(chunks, chunk_query, k=4)
-                        text = "\n\n".join(c.text for c in picked) if picked else text[:50_000]
-                    clean, problems = extract_structured(
-                        schema,
-                        text,
-                        BridgeProvider(cfg),
-                        max_repairs=int(job.params.get("max_repairs", 1)),
-                    )
-                    GLOBAL_JOB_MANAGER.update_job_status(
-                        job.id, "completed", result={"data": clean, "problems": problems}
-                    )
-                elif job.type == "selenium":
-                    from .selenium_fetcher import SeleniumOptions, fetch_with_selenium
-
-                    allowed = {
-                        "url",
-                        "grid_url",
-                        "wait_selector",
-                        "implicit_wait_sec",
-                        "page_load_timeout_sec",
-                        "viewport_width",
-                        "viewport_height",
-                        "user_agent",
-                        "storage_state",
-                        "capture_screenshot",
-                        "screenshot_path",
-                        "capture_pdf",
-                        "pdf_path",
-                    }
-                    sel_opts = SeleniumOptions(
-                        **{k: v for k, v in job.params.items() if k in allowed}
-                    )
-                    sel_res = fetch_with_selenium(sel_opts)
-                    art_ids = []
-                    if sel_res.screenshot_path and os.path.exists(sel_res.screenshot_path):
-                        art = GLOBAL_JOB_MANAGER.save_artifact(
-                            job.id, "screenshot.png", "image/png", sel_res.screenshot_path
-                        )
-                        art_ids.append(art.id)
-                    if sel_res.pdf_path and os.path.exists(sel_res.pdf_path):
-                        art = GLOBAL_JOB_MANAGER.save_artifact(
-                            job.id, "document.pdf", "application/pdf", sel_res.pdf_path
-                        )
-                        art_ids.append(art.id)
-                    GLOBAL_JOB_MANAGER.update_job_status(
-                        job.id,
-                        "completed" if sel_res.ok else "failed",
-                        result={
-                            "url": sel_res.url,
-                            "final_url": sel_res.final_url,
-                            "title": sel_res.title,
-                            "text": sel_res.text,
-                            "artifact_ids": art_ids,
-                        },
-                        error=sel_res.error,
-                    )
-                else:
-                    GLOBAL_JOB_MANAGER.update_job_status(
-                        job.id, "failed", error=f"Unknown job type {job.type!r}"
-                    )
-
-                record_audit_event(
-                    "job_finished", client_ip, req_id, {"job_id": job.id, "status": job.status}
-                )
-            except Exception as exc:
-                trace = {"timestamp": time.time(), "error": str(exc)}
-                GLOBAL_JOB_MANAGER.update_job_status(
-                    job.id, "failed", error=str(exc), retry_trace=trace
-                )
-                record_audit_event(
-                    "job_failed", client_ip, req_id, {"job_id": job.id, "error": str(exc)}
-                )
-
-        t = threading.Thread(target=_worker, daemon=True)
-        t.start()
+            return
+        self.send_json(job.to_dict(), 202)
 
     """Serves all protocol faces from one handler.
 
@@ -745,7 +557,11 @@ class GeminiHandler(BaseHTTPRequestHandler):
                 # Operational read: counts, latency percentiles, retries,
                 # memory. Aggregates only -- no request bodies, no session
                 # data, nothing secret; the server is loopback-bound anyway.
-                self.send_json(self._metrics.snapshot())
+                snapshot = self._metrics.snapshot()
+                runner = job_runner()
+                if runner is not None:
+                    snapshot["jobs"] = runner.stats()
+                self.send_json(snapshot)
             elif path == "/v1beta/models":
                 self.send_json(
                     {
@@ -779,6 +595,41 @@ class GeminiHandler(BaseHTTPRequestHandler):
             self._do_post()
         finally:
             self._metrics.latency.record(time.monotonic() - started)
+
+    def do_DELETE(self) -> None:
+        """Cancel a job: DELETE /v1/jobs/{id}.
+
+        Queued jobs are cancelled immediately; running ones cooperatively --
+        the cancel flag is set and the runner drops the result when the
+        worker surfaces (threads cannot be killed in Python; the honest
+        contract is "result not delivered", not "thread assassinated").
+        """
+        self._request_id = new_request_id()
+        if not self._client_may_speak():
+            return
+        if not self._authenticate_request():
+            return
+        parts = [p for p in self.path.split("?", 1)[0].split("/") if p]
+        if len(parts) < 3 or parts[1] != "jobs":
+            self.send_error_json("expected DELETE /v1/jobs/{id}", 400)
+            return
+        runner = job_runner()
+        if runner is None:
+            self.send_error_json("job runner not configured", 503)
+            return
+        job_id = parts[2]
+        if not runner.cancel(job_id):
+            self.send_error_json("job not found or already terminal", 404)
+            return
+        job = GLOBAL_JOB_MANAGER.get_job(job_id)
+        self.send_json(
+            {
+                "id": job_id,
+                "status": job.status if job else "cancelled",
+                "cancelled": True,
+                "cooperative": job is not None and job.status == "processing",
+            }
+        )
 
     def _do_post(self) -> None:
         if not self._client_may_speak():
@@ -1424,6 +1275,9 @@ class ThreadedServer(ThreadingMixIn, HTTPServer):
     ):
         super().__init__(address, GeminiHandler)
         self.config = config  # read-only for handlers
+        # Bounded background-job execution (Phase 2): fixed pool, bounded
+        # queue, durable SQLite status, timeouts, retries, retention.
+        configure_job_runner(config)
         self._max_concurrent = (
             self.max_concurrent_requests
             if max_concurrent_requests is None

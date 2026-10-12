@@ -624,6 +624,27 @@ tools (`freegem_submit_job`, `freegem_get_job`, `freegem_get_artifact`,
 `freegem_manage_profile`); the api key may also come from the `api_key`
 config field (see [Authentication](#authentication)).
 
+**Bounded execution.** Jobs run on a fixed worker pool pulling from a
+bounded queue — a burst of submissions cannot spawn unbounded threads or
+buffer an unbounded backlog. When the queue is full, submission answers
+**HTTP 429** (`code: "queue_full"`) instead of growing silently; poll
+later. Every job has an execution **timeout** (config `job_timeout_sec`,
+per-job `params.timeout_sec` clamped 1–3600) enforced by a watchdog:
+exceeded jobs are marked `timed_out` and their results are never
+delivered — Python threads cannot be killed, so the underlying call may
+drain, but nothing trusts it afterwards. **Cancellation** is
+`DELETE /v1/jobs/{id}`: queued jobs are cancelled outright, running ones
+cooperatively (result dropped, status `cancelled`). Failures retry with
+exponential backoff up to a cap (`params.max_retries`, clamped 0–5;
+default 2); `timed_out` and `cancelled` jobs never retry. Terminal jobs
+beyond the retention window (config `job_retention`) are evicted oldest-
+first. Status is **durable** by default (`~/.config/freegem/jobs.sqlite3`,
+config `job_db`; `"memory"` disables it): a restart relabels jobs that
+were queued/processing as `interrupted` — nothing silently lost, nothing
+stale re-run. For multi-process setups, `job_queue_url` routes
+submissions through an external queue (`memory://`, `sqlite://`,
+`redis://`, `amqp://`) that other producers can also feed.
+
 ## Adapters and pipelines
 
 Everything below is stdlib-first: the optional heavy dependencies

@@ -70,6 +70,20 @@ DEFAULT_CONFIG: Mapping[str, Any] = MappingProxyType(
         # separate: this key gates OUR api, it never authenticates to Google.
         "api_key": None,
         "brave_api_key": "",
+        # Bounded background-job execution (2.9): fixed worker pool, bounded
+        # pending queue (saturation answers HTTP 429), per-job execution
+        # timeout with a watchdog, capped retries, retention window.
+        "job_max_workers": 4,
+        "job_max_pending": 100,
+        "job_timeout_sec": 600,
+        "job_retention": 500,
+        # Durable job status: SQLite by default ("memory" disables); the
+        # special path keeps queued/processing jobs honest across restarts
+        # (they come back "interrupted", never silently lost).
+        "job_db": None,
+        # Optional external execution queue (memory://, sqlite:///path,
+        # redis://, amqp://). None keeps execution in-process.
+        "job_queue_url": None,
     }
 )
 
@@ -89,6 +103,10 @@ _INT_FIELDS = frozenset(
         "request_timeout_sec",
         "research_concurrency",
         "robots_cache_ttl_sec",
+        "job_max_workers",
+        "job_max_pending",
+        "job_timeout_sec",
+        "job_retention",
     }
 )
 _FLOAT_FIELDS = frozenset({"request_queue_wait_sec"})
@@ -105,9 +123,13 @@ _STR_FIELDS = frozenset(
         "xsrf_token",
         "brave_api_key",
         "api_key",
+        "job_db",
+        "job_queue_url",
     }
 )
-_NULLABLE_STR_FIELDS = frozenset({"cookie_file", "proxy", "auth_user", "xsrf_token", "api_key"})
+_NULLABLE_STR_FIELDS = frozenset(
+    {"cookie_file", "proxy", "auth_user", "xsrf_token", "api_key", "job_db", "job_queue_url"}
+)
 
 #: Sentinel returned by _coerce_value when the value cannot be salvaged and
 #: the documented default must apply instead.
@@ -201,6 +223,12 @@ class BridgeConfig:
     discover_wiki: str = DEFAULT_CONFIG["discover_wiki"]
     api_key: str | None = DEFAULT_CONFIG["api_key"]
     brave_api_key: str = DEFAULT_CONFIG["brave_api_key"]
+    job_max_workers: int = DEFAULT_CONFIG["job_max_workers"]
+    job_max_pending: int = DEFAULT_CONFIG["job_max_pending"]
+    job_timeout_sec: int = DEFAULT_CONFIG["job_timeout_sec"]
+    job_retention: int = DEFAULT_CONFIG["job_retention"]
+    job_db: str | None = DEFAULT_CONFIG["job_db"]
+    job_queue_url: str | None = DEFAULT_CONFIG["job_queue_url"]
 
     # ---- construction -------------------------------------------------------
 

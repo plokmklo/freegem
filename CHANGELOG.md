@@ -5,6 +5,56 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.9.0] — 2026-10-12
+
+Release gate, browser/proxy security, and bounded background jobs.
+
+### Release gate
+
+- Fixed Ruff E741 (ambiguous `l`) in `test_grid_pool.py`; the package is
+  now fully `ruff format`-clean (41 files reformatted) so CI's format
+  gate passes.
+- Fixed the Windows-only runtime-cap bug: `max_runtime_sec=0.0` let pages
+  through on coarse monotonic ticks (`<=` → `<`).
+
+### Security first (browser + proxy)
+
+- **`freegem/browser_guard.py`** — per-request SSRF policy for real
+  browsers. Playwright: a context-wide route guard validates EVERY
+  request (redirects, JS navigation, all subresources); blocked
+  navigations fail the fetch, blocked subresources are dropped. Selenium:
+  a CDP `Network.setBlockedURLs` blocklist (special-use IPv4/IPv6 ranges,
+  localhost/metadata names, http/https/ws/wss), `--host-resolver-rules`
+  killing metadata/special-name resolution at the browser's resolver, and
+  final-URL re-validation BEFORE content is returned.
+- **`ssrf.py`**: strict `host_public_strict` (browsers) vs lenient-
+  where-required `host_public_or_unresolvable` (proxy split-horizon);
+  metadata/special-use hostname policy (localhost, `.internal`, `.local`,
+  `.localhost`, `.home.arpa`, cloud metadata names); IPv4-mapped IPv6 and
+  CGNAT already covered. **`PreflightedProxyHandler`** adds proxy-mode
+  initial-URL validation at the single choke point all guarded callers
+  share; redirects stay strict (`SafeRedirect`).
+- Accurate three-way security model documented in the README (direct /
+  proxy / browser), residuals included.
+
+### Bounded background jobs (required before agent)
+
+- **`freegem/jobs.py` rewritten**: the unbounded thread-per-job model is
+  replaced by a `JobRunner` — fixed worker pool, bounded queue
+  (saturation → HTTP 429 `queue_full`), per-job timeouts with a watchdog
+  (`timed_out`, results never delivered), cooperative cancellation
+  (`DELETE /v1/jobs/{id}`), capped retries with exponential backoff and
+  traces, retention eviction, and optional external-queue execution
+  (`memory://`, `sqlite://`, `redis://`, `amqp://`).
+- **Durable SQLite status** (`SqliteJobStore`, on by default at
+  `~/.config/freegem/jobs.sqlite3`; config `job_db`): restart recovery
+  relabels queued/processing jobs `interrupted` — nothing silently lost.
+- The MCP `freegem_submit_job` tool now actually EXECUTES jobs (they were
+  created and never run before); job bodies are shared between the REST
+  and MCP faces (`execute_job`).
+- Config: `job_max_workers`, `job_max_pending`, `job_timeout_sec`,
+  `job_retention`, `job_db`, `job_queue_url`.
+
 ## [2.8.1] — 2026-10-12
 
 Honest scope boundaries: the service now states what it does NOT promise.
