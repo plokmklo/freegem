@@ -77,6 +77,7 @@ class ControlPlaneTests(unittest.TestCase):
         queue.enqueue({"n": 1})
         worker = cp.join("crawler")
         handle, _ = cp.claim(worker, timeout_sec=1.0)
+        assert handle is not None  # narrow for mypy
         cp.reap(now=time.time() + 999.0)  # lease gone
         with self.assertRaises(ControlPlaneError):
             cp.renew(worker, handle)
@@ -95,6 +96,7 @@ class ControlPlaneTests(unittest.TestCase):
         w2 = cp.join("crawler")
         h1, _ = cp.claim(w1, timeout_sec=1.0)
         h2, _ = cp.claim(w2, timeout_sec=1.0)
+        assert h1 is not None and h2 is not None  # narrow for mypy
         self.assertNotEqual(h1, h2)  # no double-claim across workers
         cp.complete(w1, h1, ok=True)
         cp.complete(w2, h2, ok=False)  # nack -> redeliverable
