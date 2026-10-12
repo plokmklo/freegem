@@ -278,10 +278,9 @@ def test_open_blob_store_dispatch(tmp_path: Path) -> None:
 def test_s3_unavailable_without_boto3(monkeypatch: pytest.MonkeyPatch) -> None:
     import sys
 
-    saved = sys.modules.pop("boto3", None)
-    try:
-        with pytest.raises(S3Unavailable, match="pip install boto3"):
-            open_blob_store("s3://mybucket/crawl")
-    finally:
-        if saved is not None:
-            sys.modules["boto3"] = saved
+    # Setting the slot to None makes `import boto3` raise ImportError even
+    # when boto3 IS installed in the environment (pop() alone would just
+    # trigger a fresh import from site-packages).
+    monkeypatch.setitem(sys.modules, "boto3", None)
+    with pytest.raises(S3Unavailable, match="pip install boto3"):
+        open_blob_store("s3://mybucket/crawl")
