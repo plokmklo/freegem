@@ -70,11 +70,7 @@ def run_once(
                 "SELECT url, next_attempt_at FROM frontier WHERE status = 'fetched'"
             ).fetchall()
         )
-        candidates = [
-            c
-            for c in planned
-            if due_rows.get(c.url, 0.0) <= now_ts
-        ][:limit]
+        candidates = [c for c in planned if due_rows.get(c.url, 0.0) <= now_ts][:limit]
         outcomes: dict[str, bool] = {}
         if runner is not None and candidates:
             outcomes = runner(candidates) or {}
