@@ -256,7 +256,12 @@ def _body_text(dom: HtmlDom) -> str:
     walk(container)
     # dedupe repeated boilerplate paragraphs (cookie banners etc.)
     seen: set[str] = set()
-    unique = [p for p in paras if not (p in seen or seen.add(p))]
+    unique: list[str] = []
+    for para in paras:
+        if para in seen:
+            continue
+        seen.add(para)
+        unique.append(para)
     return "\n\n".join(unique)
 
 
