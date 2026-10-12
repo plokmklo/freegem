@@ -149,7 +149,9 @@ class ControlPlane:
 
     # -- work lifecycle ----------------------------------------------------------
 
-    def claim(self, worker_id: str, timeout_sec: float = 0.0) -> tuple[str | None, dict[str, Any] | None]:
+    def claim(
+        self, worker_id: str, timeout_sec: float = 0.0
+    ) -> tuple[str | None, dict[str, Any] | None]:
         """Reserve one task from the queue and lease it to this worker."""
         handle, payload = self.queue.reserve(timeout_sec=timeout_sec)
         if handle is None:
@@ -178,7 +180,9 @@ class ControlPlane:
 
     def complete(self, worker_id: str, task_id: str, *, ok: bool = True) -> None:
         with self._lock:
-            self._conn.execute("DELETE FROM leases WHERE task_id = ? AND worker_id = ?", (task_id, worker_id))
+            self._conn.execute(
+                "DELETE FROM leases WHERE task_id = ? AND worker_id = ?", (task_id, worker_id)
+            )
         if ok:
             self.queue.ack(task_id)
         else:

@@ -22,6 +22,7 @@ class ControlPlaneTests(unittest.TestCase):
         task_id = queue.enqueue({"url": "https://example.com/"})
         worker = cp.join("crawler", {"host": "box-1"})
         handle, payload = cp.claim(worker, timeout_sec=1.0)
+        assert handle is not None  # narrow for mypy
         self.assertIsNotNone(handle)
         self.assertEqual(payload, {"url": "https://example.com/"})
         cp.heartbeat(worker)
@@ -41,6 +42,7 @@ class ControlPlaneTests(unittest.TestCase):
         queue.enqueue({"url": "https://example.com/x"})
         ghost = cp.join("crawler")
         handle, _payload = cp.claim(ghost, timeout_sec=1.0)
+        assert handle is not None  # narrow for mypy
         self.assertIsNotNone(handle)
         # ghost dies: no heartbeat, ttl passes
         report = cp.reap(now=time.time() + 40.0)
@@ -62,7 +64,9 @@ class ControlPlaneTests(unittest.TestCase):
         handle, _ = cp.claim(worker, timeout_sec=1.0)
         # simulate a renewal 3s into a 5s lease
         with cp._lock:
-            cp._conn.execute("UPDATE leases SET renewed_at = ? WHERE task_id = ?", (time.time() - 3.0, handle))
+            cp._conn.execute(
+                "UPDATE leases SET renewed_at = ? WHERE task_id = ?", (time.time() - 3.0, handle)
+            )
         report = cp.reap(now=time.time())
         self.assertEqual(report["requeued_tasks"], [])  # renewed lease survives
         cp.complete(worker, handle, ok=True)
