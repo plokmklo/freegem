@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 import time
 import unittest
+from typing import Any
 
 from freegem.crawler.scheduling import ChangePolicy, ensure_history_schema, record_fetch
 from freegem.scheduler import SchedulerLoop, run_once
@@ -46,12 +47,15 @@ class RunOnceTests(unittest.TestCase):
         _state_db("/tmp/p3_sched_a.sqlite", {"https://a/1": 10_000.0, "https://a/2": 1.0})
         # a/2 was recently planned: not due for another 500s
         conn = sqlite3.connect("/tmp/p3_sched_a.sqlite")
-        conn.execute("UPDATE frontier SET next_attempt_at = ? WHERE url = 'https://a/2'", (time.time() + 500.0,))
+        conn.execute(
+            "UPDATE frontier SET next_attempt_at = ? WHERE url = 'https://a/2'",
+            (time.time() + 500.0,),
+        )
         conn.commit()
         conn.close()
         attempts: list[str] = []
 
-        def runner(candidates) -> dict[str, bool]:
+        def runner(candidates: list[Any]) -> dict[str, bool]:
             attempts.extend(c.url for c in candidates)
             return {c.url: True for c in candidates}
 
@@ -75,7 +79,7 @@ class RunOnceTests(unittest.TestCase):
     def test_runner_failure_does_not_hot_loop(self) -> None:
         _state_db("/tmp/p3_sched_c.sqlite", {"https://c/1": 10_000.0})
 
-        def failing_runner(_candidates) -> dict[str, bool]:
+        def failing_runner(_candidates: list[Any]) -> dict[str, bool]:
             return {}  # runner failed wholesale
 
         summary = run_once("/tmp/p3_sched_c.sqlite", failing_runner, policy=POLICY)
@@ -106,6 +110,7 @@ class SchedulerLoopTests(unittest.TestCase):
         loop.stop()
         self.assertGreaterEqual(loop.ticks, 1)
         self.assertIsNotNone(loop.last_summary)
+        assert loop.last_summary is not None
         self.assertEqual(loop.last_summary["applied"], 1)
         self.assertLessEqual(loop.ticks, 12)  # no runaway hot loop
 
@@ -119,10 +124,12 @@ class SchedulerLoopTests(unittest.TestCase):
     def test_survives_runner_exception(self) -> None:
         _state_db("/tmp/p3_sched_f.sqlite", {"https://f/1": 10_000.0})
 
-        def exploding_runner(_c):
+        def exploding_runner(_c: list[Any]) -> dict[str, bool]:
             raise RuntimeError("boom")
 
-        loop = SchedulerLoop("/tmp/p3_sched_f.sqlite", exploding_runner, every_sec=0.3, policy=POLICY)
+        loop = SchedulerLoop(
+            "/tmp/p3_sched_f.sqlite", exploding_runner, every_sec=0.3, policy=POLICY
+        )
         loop.start()
         deadline = time.time() + 5
         while loop.ticks < 1 and time.time() < deadline:
