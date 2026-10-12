@@ -226,3 +226,27 @@ def memory_rss_kb() -> int | None:
     if sys.platform == "darwin":
         rss = rss // 1024  # macOS reports bytes
     return rss
+
+
+# ─── Audit Logging & Additional Metrics ───────────────────────────────────────
+
+_AUDIT_LOGS: list[dict[str, Any]] = []
+
+
+def record_audit_event(action: str, client_ip: str, request_id: str, details: dict[str, Any] | None = None) -> None:
+    """Record a structured security and operational audit log event."""
+    event = {
+        "timestamp": time.time(),
+        "action": action,
+        "client_ip": client_ip,
+        "request_id": request_id,
+        "details": details or {},
+    }
+    _AUDIT_LOGS.append(event)
+    if len(_AUDIT_LOGS) > 1000:
+        _AUDIT_LOGS.pop(0)
+
+
+def get_audit_logs(limit: int = 100) -> list[dict[str, Any]]:
+    """Retrieve recent audit logs."""
+    return list(_AUDIT_LOGS[-limit:])

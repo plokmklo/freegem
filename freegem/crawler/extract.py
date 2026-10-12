@@ -558,3 +558,140 @@ def _finish_raw(raw: str, f: Field, base_url: str) -> tuple[bool, Any]:
     if f.pattern and not re.search(f.pattern, text):
         return False, None
     return _cast(text, f.type, base_url)
+
+
+# ─── Rich Metadata & Markdown Extraction ──────────────────────────────────────
+
+
+def extract_metadata(dom: HtmlDom, *, base_url: str = "") -> dict[str, Any]:
+    """Extract rich metadata (OpenGraph, Twitter cards, JSON-LD, canonical URL, language, author, publish date)."""
+    meta_info: dict[str, Any] = {
+        "title": "",
+        "description": "",
+        "canonical_url": "",
+        "language": "",
+        "author": "",
+        "published_date": "",
+        "site_name": "",
+        "opengraph": {},
+        "twitter_cards": {},
+        "json_ld": [],
+    }
+
+    # Handled inside _walk when tag == "html"
+
+    def _walk(node: Node) -> None:
+        tag = node.tag.lower()
+        if tag == "html" and node.attrs.get("lang"):
+            meta_info["language"] = node.attrs["lang"].strip()
+        if tag == "title" and not meta_info["title"]:
+            meta_info["title"] = _text_of(node)
+        elif tag == "link":
+            rel = (node.attrs.get("rel") or "").lower()
+            href = node.attrs.get("href") or ""
+            if "canonical" in rel and href:
+                meta_info["canonical_url"] = urllib.parse.urljoin(base_url, href)
+        elif tag == "meta":
+            name = (node.attrs.get("name") or node.attrs.get("property") or "").lower()
+            content = node.attrs.get("content") or ""
+
+            if name == "description":
+                meta_info["description"] = content
+            elif name in ("author", "article:author"):
+                meta_info["author"] = content
+            elif name in ("article:published_time", "date", "pubdate"):
+                meta_info["published_date"] = content
+            elif name == "og:site_name":
+                meta_info["site_name"] = content
+
+            if name.startswith("og:"):
+                meta_info["opengraph"][name[3:]] = content
+            elif name.startswith("twitter:"):
+                meta_info["twitter_cards"][name[8:]] = content
+        elif tag == "script":
+            stype = (node.attrs.get("type") or "").lower()
+            if "json" in stype and "ld" in stype:
+                script_text = _text_of(node)
+                if script_text:
+                    try:
+                        import json
+                        data = json.loads(script_text)
+                        meta_info["json_ld"].append(data)
+                    except Exception:
+                        pass
+
+        for child in node.children:
+            _walk(child)
+
+    if dom.root:
+        _walk(dom.root)
+
+    # Fallbacks from OpenGraph
+    if not meta_info["title"] and meta_info["opengraph"].get("title"):
+        meta_info["title"] = meta_info["opengraph"]["title"]
+    if not meta_info["description"] and meta_info["opengraph"].get("description"):
+        meta_info["description"] = meta_info["opengraph"]["description"]
+
+    return meta_info
+
+
+def html_to_markdown(dom_or_html: HtmlDom | str, *, base_url: str = "") -> str:
+    """Convert HTML DOM or raw HTML into clean structured Markdown."""
+    if isinstance(dom_or_html, str):
+        dom = HtmlDom(); dom.feed(dom_or_html)
+    else:
+        dom = dom_or_html
+
+    if not dom or not dom.root:
+        return ""
+
+    lines: list[str] = []
+
+    def _render(node: Node) -> str:
+        tag = node.tag.lower()
+        if tag in ("script", "style", "noscript", "svg"):
+            return ""
+
+        children_texts = [_render(c) for c in node.children]
+        inner = "".join(children_texts)
+
+        # Append direct text if any
+        if node.text_parts:
+            direct_text = "".join(node.text_parts)
+            inner = direct_text + inner
+
+        inner = inner.strip()
+
+        if tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
+            level = int(tag[1])
+            return f"\n\n{'#' * level} {inner}\n\n"
+        elif tag == "p":
+            return f"\n\n{inner}\n\n" if inner else ""
+        elif tag == "a":
+            href = node.attrs.get("href", "")
+            if href:
+                full_href = urllib.parse.urljoin(base_url, href)
+                return f" [{inner or full_href}]({full_href}) " if inner else f" [{full_href}]({full_href}) "
+            return inner
+        elif tag == "li":
+            return f"\n- {inner}" if inner else ""
+        elif tag in ("ul", "ol"):
+            return f"\n{inner}\n" if inner else ""
+        elif tag == "blockquote":
+            return f"\n\n> {inner}\n\n" if inner else ""
+        elif tag == "pre":
+            return f"\n\n```\n{inner}\n```\n\n" if inner else ""
+        elif tag == "code":
+            return f"`{inner}`" if inner else ""
+        elif tag in ("strong", "b"):
+            return f"**{inner}**" if inner else ""
+        elif tag in ("em", "i"):
+            return f"*{inner}*" if inner else ""
+
+        return inner if inner else ""
+
+    raw_md = _render(dom.root)
+
+    # Normalize excessive empty lines
+    cleaned = re.sub(r"\n{3,}", "\n\n", raw_md).strip()
+    return cleaned
