@@ -349,7 +349,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     crawl_sub = crawl.add_subparsers(dest="crawl_cmd", required=True)
 
-    crawl_common = argparse.ArgumentParser(add_help=False)
+    # parents=[common]: the global flags must also parse AFTER the nested
+    # subcommand (`freegem crawl run --model x`), not only before it --
+    # the top-level crawl parser never sees args that follow "run".
+    crawl_common = argparse.ArgumentParser(add_help=False, parents=[common])
     crawl_common.add_argument(
         "--seeds",
         nargs="+",

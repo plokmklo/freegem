@@ -374,6 +374,19 @@ class FlagPlacementTests(unittest.TestCase):
         args = self.parse(["ask", "--config", "x.json", "hi"])
         self.assertEqual(getattr(args, "config", None), "x.json")
 
+    def test_crawl_run_model_after_nested_subcommand(self) -> None:
+        # Residual gap: the crawl SUB-subparsers (plan/run) parsed from a
+        # parent that lacked the common flags, so the model flag failed only
+        # when placed after "run" -- the exact place users put it.
+        args = self.parse(
+            ["crawl", "run", "--model", "gemini-2.5-flash", "--seeds", "https://example.com"]
+        )
+        self.assertEqual(getattr(args, "model", None), "gemini-2.5-flash")
+
+    def test_crawl_plan_config_after_nested_subcommand(self) -> None:
+        args = self.parse(["crawl", "plan", "--config", "x.json", "--seeds", "https://e.com"])
+        self.assertEqual(getattr(args, "config", None), "x.json")
+
     def test_config_before_subcommand(self) -> None:
         args = self.parse(["--config", "x.json", "doctor"])
         self.assertEqual(getattr(args, "config", None), "x.json")

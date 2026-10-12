@@ -28,6 +28,7 @@ from .metrics import note_gemini_retry
 __all__ = [
     "HAS_HTTPX",
     "BridgeError",
+    "RateLimitError",
     "account_prefix",
     "clean_text",
     "generate",
@@ -59,6 +60,20 @@ class BridgeError(RuntimeError):
         self.code = code
 
 
+class RateLimitError(BridgeError):
+    """Gemini answered HTTP 200 but the body carried no answer text.
+
+    In practice an empty 200 is the anonymous-tier rate limit or a login
+    wall -- the two upstream states that serve a page without a
+    BardErrorInfo marker, indistinguishable from the body alone. Typed so
+    callers can treat "back off and try again later" differently from a
+    genuine upstream rejection. It stays retryable inside this module (a
+    short backoff usually clears the anonymous limit), and after the
+    retries run out it is re-raised as itself -- not wrapped in a generic
+    :class:`BridgeError` -- so ``except RateLimitError`` keeps working.
+    """
+
+
 _SSL_CTX: ssl.SSLContext | None = None
 # (abspath, mtime, size) -> (cookie_str, sapisid) cache so a hot loop does not
 # re-read the file. The path and size are part of the key: mtime alone let two
@@ -83,9 +98,12 @@ def _ssl_ctx() -> ssl.SSLContext:
     return _SSL_CTX
 
 
-# Backoff never waits longer than this, even when Retry-After asks for more:
-# a bridge retrying in the foreground should not silently hang for minutes.
-_RETRY_BACKOFF_CAP_SEC = 30.0
+# Backoff never waits longer than this, even when Retry-After asks for more.
+# The cap must sit ABOVE the Retry-After windows upstreams actually send:
+# truncating a server's explicit "come back in 90s" to the old 30s cap just
+# guaranteed another 429 on the next attempt. Two minutes still bounds a
+# foreground caller while letting the server's own hint be honored.
+_RETRY_BACKOFF_CAP_SEC = 120.0
 
 
 class _UpstreamHTTPStatus(RuntimeError):
@@ -494,8 +512,23 @@ def generate(
                 # A 200 login-wall or rate-limit page carries no BardErrorInfo
                 # marker; returning "" made a failed request look like a model
                 # that chose silence.
-                raise RuntimeError("upstream returned an empty answer (rate limit or login wall?)")
+                raise RateLimitError(
+                    "upstream returned an empty answer (rate limit or login wall?)"
+                )
             return text
+        except RateLimitError as exc:
+            # The empty-200 IS the transient failure mode: retry it like a
+            # 429 instead of failing fast like a hard upstream rejection.
+            last_error = exc
+            if attempt < cfg.retry_attempts:
+                delay = _backoff_delay(cfg.retry_delay_sec, attempt, _exc_retry_after(exc))
+                note_gemini_retry()
+                log(
+                    cfg,
+                    f"attempt {attempt}/{cfg.retry_attempts} returned an empty "
+                    f"answer; retrying in {delay:.1f}s",
+                )
+                time.sleep(delay)
         except BridgeError:
             raise  # upstream said no; retrying the same request will not help
         except _UpstreamHTTPStatus as exc:
@@ -520,6 +553,13 @@ def generate(
                     f"retrying in {delay:.1f}s",
                 )
                 time.sleep(delay)
+    if isinstance(last_error, RateLimitError):
+        # Surface the typed error, not a generic BridgeError: callers poll
+        # for exactly this shape to decide "back off for minutes" vs "give up".
+        raise RateLimitError(
+            f"Gemini returned no answer after {cfg.retry_attempts} attempts "
+            "(rate limit or login wall?)"
+        ) from last_error
     raise BridgeError(f"Gemini request failed after {cfg.retry_attempts} attempts: {last_error}")
 
 
@@ -597,7 +637,27 @@ def generate_stream(
                         emitted = text
                         if delta:
                             yield delta
+            if not emitted:
+                # Same failure shape as the non-streaming path: a 200 whose
+                # body never yields an answer is the rate limit or a login
+                # wall. Nothing was emitted, so a retry cannot duplicate.
+                raise RateLimitError(
+                    "upstream returned an empty answer (rate limit or login wall?)"
+                )
             return
+        except RateLimitError as exc:
+            # Empty-200 is transient and nothing reached the client, so
+            # replaying the stream from scratch is safe.
+            last_error = exc
+            if attempt < cfg.retry_attempts:
+                delay = _backoff_delay(cfg.retry_delay_sec, attempt, _exc_retry_after(exc))
+                note_gemini_retry()
+                log(
+                    cfg,
+                    f"stream attempt {attempt}/{cfg.retry_attempts} returned an "
+                    f"empty answer; retrying in {delay:.1f}s",
+                )
+                time.sleep(delay)
         except BridgeError:
             raise
         except Exception as exc:
@@ -619,6 +679,11 @@ def generate_stream(
                     f"retrying in {delay:.1f}s",
                 )
                 time.sleep(delay)
+    if isinstance(last_error, RateLimitError):
+        raise RateLimitError(
+            f"Gemini stream returned no answer after {cfg.retry_attempts} attempts "
+            "(rate limit or login wall?)"
+        ) from last_error
     raise BridgeError(f"Gemini stream failed after {cfg.retry_attempts} attempts: {last_error}")
 
 

@@ -1000,6 +1000,31 @@ class ExtractionQualityTests(unittest.TestCase):
         self.assertEqual(extraction_quality("Jump to content\nLog in\nDonate"), "nav_only")
         self.assertEqual(extraction_quality("word " * 200), "ok")
 
+    def test_short_but_real_prose_is_ok(self) -> None:
+        # Regression: the old 200-char floor labeled a ~100-char real
+        # paragraph nav_only. Short real content must pass the floor.
+        text = (
+            "The pancreas sits behind the stomach and secretes digestive "
+            "enzymes into the small intestine every day."
+        )
+        self.assertEqual(len(text), 103)
+        self.assertEqual(extraction_quality(text), "ok")
+
+    def test_under_floor_is_nav_only(self) -> None:
+        self.assertEqual(extraction_quality("word " * 15), "nav_only")  # 75 chars
+
+    def test_punctuation_heavy_junk_is_nav_only_even_when_long(self) -> None:
+        # 144 chars of copyright/separator chrome: clears the 80-char floor
+        # but is mostly digits, punctuation, and symbols, not prose.
+        junk = "© 2026 • v2.8.1 • " * 8
+        self.assertEqual(len(junk), 144)
+        self.assertEqual(extraction_quality(junk), "nav_only")
+
+    def test_json_payload_is_nav_only_even_when_long(self) -> None:
+        payload = '{"error": "not found", "status": 404, "path": "/api/v1/x"}' * 2
+        self.assertGreaterEqual(len(payload), 80)
+        self.assertEqual(extraction_quality(payload), "nav_only")
+
 
 class VoidElementSkipTests(unittest.TestCase):
     """A void <input> in a page header must not suppress the whole article.

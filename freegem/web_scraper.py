@@ -149,6 +149,22 @@ class ScrapeResult:
     last_modified: str | None = None
 
 
+#: Shortest text that may still count as real content. The old 200-char
+#: floor mislabeled genuinely short pages (dictionary entries, API error
+#: bodies, one-paragraph notices) as nav_only; an 80-char floor plus the
+#: prose-ratio gate below keeps the junk out without punishing short real
+#: content.
+_MIN_CONTENT_CHARS = 80
+
+#: Minimum share of letters + whitespace in labeled text. Real writing in
+#: any language is overwhelmingly letters and separating whitespace, while
+#: boilerplate -- status dumps, base64 blobs, JSON payloads, separator
+#: walls, copyright footers -- leans hard on digits and punctuation.
+#: Deliberately coarse (a word-only link menu can still pass; this labeler
+#: is not a content classifier) but free and deterministic.
+_MIN_PROSE_RATIO = 0.75
+
+
 def extraction_quality(text: str) -> str:
     """Coarse extraction-quality label for one page of text.
 
@@ -157,13 +173,24 @@ def extraction_quality(text: str) -> str:
     cheap on purpose: it guards against the "extractor got only the chrome"
     failure mode (a Wikipedia skin, a cookie wall) without pretending to be
     a content classifier.
+
+    Two gates: an absolute floor (very short text is a stub by definition)
+    and a content ratio (the letters+whitespace share -- prose in any
+    language is mostly letters and spaces, so a low share means the page is
+    chrome even though it cleared the floor). Short-but-real pages that the
+    old 200-char floor labeled nav_only now pass.
     """
     stripped = text.strip()
     if not stripped:
         return "empty"
-    if len(stripped) < 200:
+    if len(stripped) < _MIN_CONTENT_CHARS:
         # Too little to be an article: nav links, "Jump to content", a
         # paywall notice. Navigation-only pages land here.
+        return "nav_only"
+    prose_chars = sum(ch.isalpha() or ch.isspace() for ch in stripped)
+    if prose_chars / len(stripped) < _MIN_PROSE_RATIO:
+        # Long enough to dodge the floor, but not shaped like prose:
+        # status dumps, base64, JSON payloads, separator walls.
         return "nav_only"
     return "ok"
 

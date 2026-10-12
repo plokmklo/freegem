@@ -10,6 +10,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Release gate, browser/proxy security, bounded background jobs, and a
 smarter, limit-free scraping stack.
 
+### Bug fixes (external review round 2)
+
+- **`gemini.RateLimitError`** (new, subclasses `BridgeError`): the
+  ambiguous empty-200 answer — in practice the anonymous-tier rate limit
+  or a login wall — is now a typed, catchable error on both the
+  non-streaming and streaming paths, retried with backoff inside the
+  module and re-raised as itself (never wrapped into a generic
+  `BridgeError`) after the attempts run out. A silent empty stream no
+  longer looks like a successful answer.
+- **Backoff honors Retry-After**: the retry cap 30s → 120s. Truncating a
+  server's explicit "come back in 90s" to 30s just bought another 429;
+  server-provided windows now pass through intact up to the 2-minute
+  safety bound.
+- **`extraction_quality` floor 200 → 80 chars + prose-ratio gate**:
+  genuinely short pages (dictionary entries, one-paragraph notices, API
+  error bodies) were mislabeled `nav_only`; text that clears the 80-char
+  floor but is mostly digits/punctuation/separator chrome (status dumps,
+  JSON payloads, copyright walls) is now still labeled `nav_only`.
+- **`crawl run --model` fixed**: the nested crawl subparsers were built
+  from a parent that lacked the global flags, so `freegem crawl run
+  --model X` failed with "unrecognized arguments" — the one placement
+  users actually type. `crawl_common` now carries the common parent
+  (plan/run; `status` needs no model).
+
 ### Smart fetching and scraping
 
 - **`freegem/smart_fetch.py`** (new): a fallback ladder for pages that

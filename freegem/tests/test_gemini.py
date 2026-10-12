@@ -17,6 +17,7 @@ from freegem.config import BridgeConfig
 from freegem.gemini import (
     _RETRY_BACKOFF_CAP_SEC,
     BridgeError,
+    RateLimitError,
     _backoff_delay,
     _exc_retry_after,
     _retry_after_seconds,
@@ -324,6 +325,47 @@ class GenerateTests(unittest.TestCase):
                 generate(self.cfg, "hi", 1, 4)
         self.assertIn("2 attempts", str(ctx.exception))
 
+    def test_empty_answer_raises_typed_rate_limit(self) -> None:
+        """An empty 200 is the rate-limit/login-wall shape -- typed, catchable."""
+        # side_effect, not return_value: each attempt must get a FRESH
+        # response -- the real contract re-reads a new body per attempt, and
+        # a shared BytesIO is closed after the first read.
+        with mock.patch(
+            "freegem.gemini._post", side_effect=lambda *a, **k: make_response("")
+        ) as post:
+            with self.assertRaises(RateLimitError) as ctx:
+                generate(self.cfg, "hi", 1, 4)
+        self.assertIn("rate limit", str(ctx.exception))
+        self.assertIsInstance(ctx.exception, BridgeError)
+        self.assertEqual(post.call_count, self.cfg.retry_attempts)
+
+    def test_empty_answer_is_retried_then_raised_typed(self) -> None:
+        """Empty-200 is transient: every attempt retried, typed error survives."""
+        # retry_delay_sec=0 in setUp keeps the retry sleeps instant; fresh
+        # response per attempt via side_effect (see the typed-error test).
+        with mock.patch(
+            "freegem.gemini._post", side_effect=lambda *a, **k: make_response("")
+        ) as post:
+            with self.assertRaises(RateLimitError):
+                generate(self.cfg, "hi", 1, 4)
+        self.assertEqual(post.call_count, self.cfg.retry_attempts)
+
+    def test_empty_then_recovery_succeeds(self) -> None:
+        """First attempt rate-limited (empty 200), second answers: recover."""
+        calls = {"n": 0}
+
+        def flaky(*args: Any, **kwargs: Any) -> Any:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return make_response("")
+            return make_response(wrb_line("recovered"))
+
+        with (
+            mock.patch("freegem.gemini._post", side_effect=flaky),
+        ):
+            self.assertEqual(generate(self.cfg, "hi", 1, 4), "recovered")
+        self.assertEqual(calls["n"], 2)
+
     def test_proxy_config_passed_through(self) -> None:
         cfg = self.cfg.replace(proxy="http://127.0.0.1:7890")
         with mock.patch("freegem.gemini._post", return_value=make_response(wrb_line("ok"))):
@@ -419,6 +461,33 @@ class StreamTests(unittest.TestCase):
         ):
             with self.assertRaises(BridgeError):
                 list(gem.generate_stream(self.cfg, "hi", 1, 4))
+
+    def test_empty_stream_raises_typed_rate_limit(self) -> None:
+        """A 200 stream that never yields an answer is the rate-limit shape."""
+        import freegem.gemini as gem
+
+        with (
+            mock.patch.object(gem, "HAS_HTTPX", True),
+            mock.patch.object(gem, "_httpx_client", return_value=self._fake_client([""])),
+        ):
+            with self.assertRaises(RateLimitError):
+                list(gem.generate_stream(self.cfg, "hi", 1, 4))
+
+    def test_empty_stream_retries_and_recovers(self) -> None:
+        """Nothing emitted on the empty attempt, so a replay cannot duplicate."""
+        import freegem.gemini as gem
+
+        empty_cm = self._fake_client([""]).stream.return_value
+        good_cm = self._fake_client([wrb_line("recovered")]).stream.return_value
+        client = mock.MagicMock()
+        client.stream.side_effect = [empty_cm, good_cm]
+        cfg = self.cfg.replace(retry_attempts=2)
+        with (
+            mock.patch.object(gem, "HAS_HTTPX", True),
+            mock.patch.object(gem, "_httpx_client", return_value=client),
+        ):
+            chunks = list(gem.generate_stream(cfg, "hi", 1, 4))
+        self.assertEqual(chunks, ["recovered"])
 
 
 class BuildTagTests(unittest.TestCase):
@@ -542,7 +611,16 @@ class BackoffTests(unittest.TestCase):
     def test_backoff_is_capped(self) -> None:
         # 2 * 2^19 is ~1M seconds; the cap must win long before that.
         self.assertEqual(_backoff_delay(2, 20), _RETRY_BACKOFF_CAP_SEC)
-        self.assertLessEqual(_backoff_delay(2, 20), 30.0)
+        self.assertLessEqual(_backoff_delay(2, 20), 120.0)
+
+    def test_retry_after_ninety_is_honored_not_truncated(self) -> None:
+        # Regression: the old 30s cap truncated a server's explicit "come
+        # back in 90s" to 30s, which just bought another 429. 90s must now
+        # pass through intact -- that is the whole point of Retry-After.
+        self.assertEqual(_backoff_delay(2, 1, retry_after=90.0), 90.0)
+
+    def test_cap_sits_above_typical_retry_after_windows(self) -> None:
+        self.assertEqual(_RETRY_BACKOFF_CAP_SEC, 120.0)
 
     def test_retry_after_overrides_when_longer(self) -> None:
         self.assertEqual(_backoff_delay(2, 1, retry_after=7.0), 7.0)
