@@ -1102,6 +1102,57 @@ class BatchScrapeTests(_FakeSiteTestCase):
         with self.assertRaises(ValueError):
             scrape_many(self.cfg, [f"{self.base}/page"] * 101)
 
+    def _record_pool(self) -> Any:
+        """Patch concurrent.futures.ThreadPoolExecutor to record max_workers.
+
+        scrape_many imports the pool inside the function body, so patching
+        the source module is what the import actually resolves at call time.
+        The recording wrapper returns a REAL executor, so behaviour (order,
+        failures, shutdown) is untouched.
+        """
+        import concurrent.futures
+
+        real_pool = concurrent.futures.ThreadPoolExecutor
+        seen: list[int | None] = []
+
+        def recording_pool(*args: Any, **kwargs: Any) -> Any:
+            seen.append(kwargs.get("max_workers"))
+            return real_pool(*args, **kwargs)
+
+        patcher = mock.patch("concurrent.futures.ThreadPoolExecutor", new=recording_pool)
+        return patcher, seen
+
+    def test_pool_clamps_request_over_sixteen(self) -> None:
+        """--concurrency 20 must build a 16-worker pool (the documented cap)."""
+        from freegem.web_scraper import scrape_many
+
+        urls = [f"{self.base}/page"] * 40
+        patcher, seen = self._record_pool()
+        with patcher:
+            items = scrape_many(self.cfg, urls, max_chars=200, concurrency=20, smart=False)
+        self.assertEqual(seen, [16])
+        self.assertEqual([item.url for item in items], urls)
+        self.assertTrue(all(item.ok for item in items))
+
+    def test_pool_honors_request_within_bounds(self) -> None:
+        from freegem.web_scraper import scrape_many
+
+        patcher, seen = self._record_pool()
+        with patcher:
+            scrape_many(self.cfg, [f"{self.base}/page"] * 4, concurrency=8, smart=False)
+        self.assertEqual(seen, [8])
+
+    def test_clamped_to_one_runs_sequentially_without_a_pool(self) -> None:
+        """concurrency <= 0 clamps to 1 and takes the sequential fast path —
+        no ThreadPoolExecutor is ever constructed."""
+        from freegem.web_scraper import scrape_many
+
+        patcher, seen = self._record_pool()
+        with patcher:
+            items = scrape_many(self.cfg, [f"{self.base}/page"] * 3, concurrency=0, smart=False)
+        self.assertEqual(seen, [])
+        self.assertTrue(all(item.ok for item in items))
+
 
 class ScrapeCacheTests(_FakeSiteTestCase):
     """scrape_page(cache=...) shares the research cache with one-shot scrapes."""
