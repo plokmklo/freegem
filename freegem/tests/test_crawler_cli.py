@@ -123,6 +123,50 @@ class CrawlCliTestCase(unittest.TestCase):
         self.assertEqual(report["seeds"], [])
         self.assertEqual(report["rejected"][0]["reason"], "deny_domain")
 
+    def test_plan_allow_path_prefix_admits_matching_seed(self) -> None:
+        """Scope prefixes through the FULL cli.main() path.
+
+        This is the surface that looked broken during the 2026-10-13 external
+        review — it was Git-Bash/MSYS mangling the flag VALUE, not the scope
+        logic. Regression-lock the real behaviour: a seed whose path starts
+        with the --allow-path prefix is admitted."""
+        code, out = self.run_cli(
+            [
+                "crawl",
+                "plan",
+                "--seeds",
+                "https://example.com/docs/page",
+                "--allow-path",
+                "/docs",
+                "--max-depth",
+                "0",
+                "--max-pages",
+                "5",
+            ]
+        )
+        self.assertEqual(code, 0)
+        report = json.loads(out)
+        self.assertEqual(len(report["seeds"]), 1)
+        self.assertEqual(report["rejected"], [])
+
+    def test_plan_allow_path_prefix_rejects_nonmatching_seed(self) -> None:
+        code, out = self.run_cli(
+            [
+                "crawl",
+                "plan",
+                "--seeds",
+                "https://example.com/blog/",
+                "--allow-path",
+                "/docs",
+                "--max-depth",
+                "0",
+            ]
+        )
+        self.assertEqual(code, 0)
+        report = json.loads(out)
+        self.assertEqual(report["seeds"], [])
+        self.assertEqual(report["rejected"][0]["reason"], "out_of_scope_path")
+
     def test_run_fetches_and_status_reports(self) -> None:
         state = os.path.join(self.dir, "crawl.db")
         out_path = os.path.join(self.dir, "results.jsonl")
