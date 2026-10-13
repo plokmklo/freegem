@@ -1293,6 +1293,32 @@ class BatchScrapeTests(_FakeSiteTestCase):
         self.assertEqual(seen, [])
         self.assertTrue(all(item.ok for item in items))
 
+    def test_refused_url_carries_full_taxonomy_in_jsonl_row(self) -> None:
+        """A fully refused URL must land ok=false with the ladder's whole
+        failure taxonomy in `error`, and that string must survive the jsonl
+        row (as_dict -> json.dumps -> CLI prints exactly this). Locks the
+        honesty contract from the bot-wall gauntlet (candidate #10 / #18)."""
+        from freegem.web_scraper import ScrapeError, scrape_many
+
+        refusal = ScrapeError(
+            "every read path refused 'https://blocked.test/p' — honest failure taxonomy "
+            "[http]: direct: HTTP 403 fetching 'x'; browser-headers: HTTP 403; "
+            "reader: refused; wayback: no snapshot; ai-search: bridge unavailable"
+        )
+        with mock.patch("freegem.web_scraper.scrape_page", side_effect=refusal):
+            items = scrape_many(
+                self.cfg, [f"{self.base}/page", f"{self.base}/page"], concurrency=2, smart=False
+            )
+        self.assertEqual(len(items), 2)
+        for item in items:
+            self.assertFalse(item.ok)
+            self.assertIn("every read path refused", item.error)
+            self.assertIn("honest failure taxonomy", item.error)
+            self.assertIn("browser-headers", item.error)  # per-path detail survives
+        row = json.loads(json.dumps(items[0].as_dict(include_text=False)))
+        self.assertFalse(row["ok"])
+        self.assertIn("every read path refused", row["error"])
+
 
 class ScrapeCacheTests(_FakeSiteTestCase):
     """scrape_page(cache=...) shares the research cache with one-shot scrapes."""
