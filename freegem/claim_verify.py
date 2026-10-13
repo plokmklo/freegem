@@ -929,7 +929,7 @@ def verify(
             }
             if not normalized:
                 # "on <wiki host>" is a lie when the serp backend ran.
-                where = host if backend == "wiki" else f"via {backend}"
+                where = f"on {host}" if backend == "wiki" else f"via {backend}"
                 raise VerifyError(
                     f"discovery found no sources for {query!r} {where}; supply URLs explicitly"
                 )

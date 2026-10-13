@@ -552,6 +552,45 @@ class SerpDiscoveryTests(_TmpDirTestCase):
         footer = line.split("| discovered")[1]
         self.assertNotIn("en.wikipedia.org", footer)
 
+    def test_serp_no_sources_error_names_backend(self) -> None:
+        """Regression for issue #17: the no-sources error must say 'via serp',
+        never the wiki host — the error-path twin of the footer fix (30f7e2c)."""
+        from freegem.serp import DuckDuckGoHTMLProvider
+
+        with mock.patch.object(DuckDuckGoHTMLProvider, "search", return_value=[]):
+            with self.assertRaises(VerifyError) as caught:
+                verify(
+                    BridgeConfig(),
+                    CLAIMS[:1],
+                    None,
+                    discover=True,
+                    discovery_backend="serp",
+                    discovery_query="zzz no result can possibly match this",
+                )
+        message = str(caught.exception)
+        self.assertIn("via serp", message)
+        self.assertNotIn("en.wikipedia.org", message)
+
+    def test_wiki_no_sources_error_names_wiki_host(self) -> None:
+        """Mirror case: the wiki backend still reports its host."""
+        response = _FakeResponse(json.dumps({"pages": []}).encode())
+        with (
+            mock.patch("freegem.web_scraper._check_robots", lambda cfg, url: None),
+            mock.patch(
+                "freegem.web_scraper._fetch",
+                lambda cfg, url, timeout=30, headers=None: response,
+            ),
+        ):
+            with self.assertRaises(VerifyError) as caught:
+                verify(
+                    BridgeConfig(),
+                    CLAIMS[:1],
+                    None,
+                    discover=True,
+                    discovery_query="zzz no result can possibly match this",
+                )
+        self.assertIn("on en.wikipedia.org", str(caught.exception))
+
 
 class SectionAndLocationTests(_TmpDirTestCase):
     """Deterministic splitting, scoring, and quote location."""
