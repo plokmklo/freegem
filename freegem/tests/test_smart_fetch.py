@@ -339,7 +339,7 @@ class ReaderParseTests(unittest.TestCase):
                 "Body of the article.\n"
             ),
         )
-        parsed = _parse_reader_output(raw, "https://news.example/a")
+        parsed = _parse_reader_output(raw, "https://news.example/a", 1000)
         self.assertEqual(parsed.url, "https://news.example/a")
         self.assertEqual(parsed.title, "The Headline")
         self.assertEqual(parsed.text, "Body of the article.")
@@ -349,8 +349,55 @@ class ReaderParseTests(unittest.TestCase):
         from freegem.smart_fetch import _parse_reader_output
 
         raw = ScrapeResult(url="https://r.jina.ai/x", title="", text="plain body")
-        parsed = _parse_reader_output(raw, "https://news.example/a")
+        parsed = _parse_reader_output(raw, "https://news.example/a", 1000)
         self.assertEqual(parsed.text, "plain body")
+
+    def test_reader_output_retruncated_to_caller_budget(self) -> None:
+        """(#22) The rung fetches with 2x headroom but returns the caller's cut."""
+        from freegem.smart_fetch import _parse_reader_output
+
+        body = "word " * 200  # 1000 chars of body behind the envelope
+        raw_text = f"Title: T\nURL Source: https://news.example/a\nMarkdown Content:\n{body}"
+        raw = ScrapeResult(url="https://r.jina.ai/x", title="T", text=raw_text)
+        parsed = _parse_reader_output(raw, "https://news.example/a", 250)
+        self.assertLessEqual(len(parsed.text), 250)
+        self.assertTrue(parsed.truncated, "a cut at the caller's budget must be flagged")
+
+    def test_reader_truncated_flag_reports_caller_budget_not_internal(self) -> None:
+        """(#22) A body that FITS the caller's budget is not flagged as cut,
+        even when the internal 2x-budget fetch flagged itself truncated."""
+        from freegem.smart_fetch import _parse_reader_output
+
+        raw = ScrapeResult(
+            url="https://r.jina.ai/x",
+            title="",
+            text="Title: T\nURL Source: u\nMarkdown Content:\nshort body",
+            truncated=True,  # the INTERNAL fetch hit its own 2x cap
+        )
+        parsed = _parse_reader_output(raw, "https://news.example/a", 2000)
+        self.assertEqual(parsed.text, "short body")
+        self.assertFalse(parsed.truncated, "the flag answers to the caller's budget")
+
+    def test_reader_rung_requests_headroom_and_returns_caller_cut(self) -> None:
+        """(#22) End to end through _try_strategy: 2x fetch budget in, caller
+        budget out."""
+        from freegem.smart_fetch import _try_strategy
+
+        body = "word " * 200
+        envelope = f"Title: T\nURL Source: https://news.example/a\nMarkdown Content:\n{body}"
+
+        def fake_scrape_page(cfg, url, **kwargs):
+            # The reader rung must ask for parse headroom, not caller budget.
+            assert kwargs["max_chars"] == 500, "reader rung fetches with 2x headroom"
+            return ScrapeResult(url=url, title="T", text=envelope)
+
+        with mock.patch("freegem.smart_fetch.scrape_page", side_effect=fake_scrape_page):
+            result = _try_strategy(
+                BridgeConfig(log_requests=False), "https://news.example/a", "reader", 250, True
+            )
+        self.assertEqual(result.url, "https://news.example/a")
+        self.assertLessEqual(len(result.text), 250)
+        self.assertTrue(result.truncated)
 
 
 class SmartIntegrationTests(unittest.TestCase):

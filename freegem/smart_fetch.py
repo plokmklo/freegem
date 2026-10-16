@@ -276,11 +276,14 @@ def _try_strategy(
         result = scrape_page(
             cfg,
             reader_url,
+            # 2x budget: parse HEADROOM for the envelope lines and the
+            # reader's own markdown chrome, never a license to return more
+            # than the caller asked for (#22).
             max_chars=max_chars * 2,
             ignore_robots=True,
             headers_override=_reader_headers(cfg),
         )
-        return _parse_reader_output(result, url)
+        return _parse_reader_output(result, url, max_chars)
     if strategy == "wayback":
         snapshot = _wayback_snapshot(cfg, url)
         result = scrape_page(cfg, snapshot, max_chars=max_chars, ignore_robots=True)
@@ -305,12 +308,16 @@ def _reader_headers(cfg: BridgeConfig) -> dict[str, str]:
     return headers
 
 
-def _parse_reader_output(result: ScrapeResult, original_url: str) -> ScrapeResult:
+def _parse_reader_output(result: ScrapeResult, original_url: str, max_chars: int) -> ScrapeResult:
     """Pull title and body out of the r.jina.ai response envelope.
 
     The reader prefixes content with ``Title: ...`` / ``URL Source: ...`` /
     ``Markdown Content:`` header lines. When the shape is absent (the
     service evolves), the raw text is kept rather than discarded.
+
+    The output is truncated to the CALLER's ``max_chars`` (#22): the rung
+    fetches with ``max_chars * 2`` purely as parse headroom, and the flag
+    ``truncated`` reports the caller's budget, not the internal one.
     """
     text = result.text
     title = result.title
@@ -322,7 +329,17 @@ def _parse_reader_output(result: ScrapeResult, original_url: str) -> ScrapeResul
     if match:
         title = match.group(1).strip() or title
         text = match.group(2).strip()
-    return replace(result, url=original_url, title=title or original_url, text=text, via="reader")
+    truncated = len(text) > max_chars
+    if truncated:
+        text = text[:max_chars].rstrip()
+    return replace(
+        result,
+        url=original_url,
+        title=title or original_url,
+        text=text,
+        truncated=truncated,
+        via="reader",
+    )
 
 
 def _wayback_snapshot(cfg: BridgeConfig, url: str) -> str:
