@@ -16,7 +16,7 @@ from typing import Any
 from unittest import mock
 
 from freegem.config import BridgeConfig
-from freegem.web_scraper import ScrapeResult, _clamp_batch_concurrency, scrape_many
+from freegem.web_scraper import ScrapeResult, _clamp_batch_concurrency, scrape_many, scrape_page
 
 
 def _recording_pool() -> tuple[Any, list[int | None]]:
@@ -128,6 +128,203 @@ class BatchPoolWidthTests(unittest.TestCase):
             seen = self._run_batch(BridgeConfig(batch_max_concurrency=0), 20, count=3)
         self.assertEqual(seen, [], "a floor-1 batch needs no pool at all")
         self.assertEqual(err.getvalue().count("clamped to 1 (batch_max_concurrency)"), 1)
+
+
+#: Fixture page for tag selection. The sharp assertions use NON-extractor-
+#: skipped wrappers (``div``/``article``): ``nav``/``footer`` text is dropped
+#: by the default extractor anyway, so the nav element rides along to prove
+#: it never leaks into a selection, while the filter assertions that must
+#: DISTINGUISH behavior use elements a plain extraction keeps.
+TAG_PAGE = """<!DOCTYPE html>
+<html><head><title>Fixture Gazette</title></head>
+<body>
+<nav id="topnav"><a href="/nav">Nav links only</a></nav>
+<div class="menu"><p>Menu lead-in text here.</p></div>
+<article class="story" id="lead"><h1>Headline Here</h1>
+<p>Article body paragraph with &amp; entity.</p>
+<div class="inline-note">A note inside the article.</div>
+</article>
+<div class="ads"><p>Advert copy text here.</p></div>
+<footer><p>Footer boilerplate text.</p></footer>
+</body></html>
+"""
+
+_TAG_URL = "https://fixture.example/page"
+
+
+class _FakeHeaders:
+    def __init__(self, data: dict[str, str] | None = None) -> None:
+        self.data = data or {}
+
+    def get(self, name: str, default: str | None = None) -> str | None:
+        return self.data.get(name, default)
+
+
+class _FakeResponse:
+    def __init__(self, body: bytes, content_type: str = "text/html; charset=utf-8") -> None:
+        self._body = body
+        self.headers = _FakeHeaders(
+            {"Content-Type": content_type, "Last-Modified": "Wed, 21 Oct 2026 07:28:00 GMT"}
+        )
+
+    def read(self, size: int = -1) -> bytes:
+        if not self._body:
+            return b""
+        out, self._body = self._body, b""
+        return out
+
+
+class TagSelectionTests(unittest.TestCase):
+    """#29: include_tags/exclude_tags shape the extraction, default is untouched."""
+
+    def setUp(self) -> None:
+        self.cfg = BridgeConfig(log_requests=False)
+
+    def _scrape(self, **kwargs: Any) -> ScrapeResult:
+        with mock.patch(
+            "freegem.web_scraper._fetch",
+            return_value=_FakeResponse(TAG_PAGE.encode("utf-8")),
+        ):
+            return scrape_page(self.cfg, _TAG_URL, **kwargs)
+
+    def _plain_extract(self, html: str) -> str:
+        """The pre-#29 pipeline, reproduced from the still-current primitives:
+        parse + clean. This is the golden string the default path must match."""
+        from freegem.web_scraper import _clean_text, _parse_html
+
+        extractor = _parse_html(self.cfg, _TAG_URL, html)
+        return _clean_text(extractor.text_parts)
+
+    def test_default_path_is_byte_identical_to_the_old_pipeline(self) -> None:
+        result = self._scrape()
+        self.assertEqual(result.text, self._plain_extract(TAG_PAGE))
+        self.assertIn("Menu lead-in text here.", result.text)
+        self.assertIn("Headline Here", result.text)
+        self.assertIn("Advert copy text here.", result.text)
+        # Extractor-skipped elements stay skipped in the default path.
+        self.assertNotIn("Footer boilerplate", result.text)
+        self.assertNotIn("Nav links only", result.text)
+        self.assertEqual(result.title, "Fixture Gazette")
+
+    def test_include_tags_extracts_only_the_article(self) -> None:
+        result = self._scrape(include_tags=["article"])
+        self.assertIn("Headline Here", result.text)
+        self.assertIn("Article body paragraph with & entity.", result.text)
+        self.assertIn("A note inside the article.", result.text)
+        self.assertNotIn("Menu lead-in", result.text)
+        self.assertNotIn("Advert copy", result.text)
+        self.assertNotIn("Footer boilerplate", result.text)
+        # The selection cut <head>; the title survives from the full document.
+        self.assertEqual(result.title, "Fixture Gazette")
+
+    def test_exclude_tags_drops_the_matching_element(self) -> None:
+        result = self._scrape(exclude_tags=[".ads"])
+        self.assertIn("Menu lead-in text here.", result.text)
+        self.assertIn("Headline Here", result.text)
+        self.assertNotIn("Advert copy", result.text)
+        # Everything else is exactly the untouched extraction minus the ads.
+        self.assertEqual(
+            result.text,
+            self._plain_extract(
+                TAG_PAGE.replace('<div class="ads"><p>Advert copy text here.</p></div>', "")
+            ),
+        )
+
+    def test_exclude_nav_matches_the_untouched_extraction(self) -> None:
+        # nav is skipped by the extractor anyway, so excluding it must not
+        # disturb anything else: byte-identical to the default pipeline.
+        result = self._scrape(exclude_tags=["nav"])
+        self.assertEqual(result.text, self._plain_extract(TAG_PAGE))
+        self.assertIn("Menu lead-in", result.text)
+
+    def test_include_and_exclude_compose(self) -> None:
+        result = self._scrape(include_tags=["article"], exclude_tags=[".inline-note"])
+        self.assertIn("Headline Here", result.text)
+        self.assertIn("Article body paragraph", result.text)
+        self.assertNotIn("A note inside the article.", result.text)
+        self.assertNotIn("Advert copy", result.text)
+
+    def test_class_and_id_selectors_and_comma_alternatives(self) -> None:
+        by_class = self._scrape(include_tags=[".story"])
+        self.assertIn("Headline Here", by_class.text)
+        self.assertNotIn("Advert copy", by_class.text)
+        by_id = self._scrape(include_tags=["#lead"])
+        self.assertEqual(by_id.text, by_class.text)
+        comma = self._scrape(include_tags=["h1, .ads"])
+        self.assertIn("Headline Here", comma.text)
+        self.assertIn("Advert copy text here.", comma.text)
+        self.assertNotIn("Menu lead-in", comma.text)
+
+    def test_include_matching_nothing_yields_empty_text(self) -> None:
+        result = self._scrape(include_tags=["#does-not-exist"])
+        self.assertEqual(result.text, "")
+        self.assertEqual(result.title, "Fixture Gazette")
+
+    def test_exclude_only_still_uses_main_region_anchoring(self) -> None:
+        # Exclusion-only composes with the existing main-content anchoring:
+        # the filter runs first, the anchor then keeps the surrounding chrome
+        # out (include_tags skips anchoring -- the selection IS the region).
+        page = (
+            "<html><head><title>Wiki Fixture</title></head><body>"
+            '<div class="sidebar">Sidebar chatter text.</div>'
+            '<div id="mw-content-text"><p>' + ("Main article text lives here. " * 10) + "</p>"
+            '<div class="vw-junk">Junk inside the content.</div></div>'
+            "</body></html>"
+        )
+        with mock.patch(
+            "freegem.web_scraper._fetch", return_value=_FakeResponse(page.encode("utf-8"))
+        ):
+            result = scrape_page(self.cfg, _TAG_URL, exclude_tags=[".vw-junk"])
+        self.assertIn("Main article text lives here.", result.text)
+        self.assertNotIn("Junk inside the content.", result.text)
+        self.assertNotIn("Sidebar chatter", result.text)
+
+    def test_unclosed_paragraphs_do_not_fuse_regions(self) -> None:
+        page = (
+            "<html><head><title>T</title></head><body>"
+            "<p class='keep'>first para"
+            "<p class='keep'>second para"
+            "<div>tail text</div>"
+            "</body></html>"
+        )
+        with mock.patch(
+            "freegem.web_scraper._fetch", return_value=_FakeResponse(page.encode("utf-8"))
+        ):
+            result = scrape_page(self.cfg, _TAG_URL, include_tags=["p.keep"])
+        self.assertIn("first para", result.text)
+        self.assertIn("second para", result.text)
+        self.assertNotIn("tail text", result.text)
+
+    def test_unsupported_selector_is_rejected_loudly(self) -> None:
+        with self.assertRaises(ValueError):
+            self._scrape(include_tags=["div > p"])
+
+    def test_tag_selection_never_touches_the_cache(self) -> None:
+        # A selected view is caller-specific: reading OR writing it into the
+        # shared cache would poison full-page entries (#21's lesson).
+        cache = mock.Mock()
+        cache.get.return_value = {
+            "title": "Poison",
+            "text": "cached text",
+            "fetched_at": "1",
+            "last_modified": None,
+        }
+        with mock.patch(
+            "freegem.web_scraper._fetch",
+            return_value=_FakeResponse(TAG_PAGE.encode("utf-8")),
+        ):
+            result = scrape_page(self.cfg, _TAG_URL, include_tags=["article"], cache=cache)
+        self.assertIn("Headline Here", result.text)
+        cache.get.assert_not_called()
+        cache.put.assert_not_called()
+        # And without tags the same cache IS used, unchanged behavior.
+        with mock.patch(
+            "freegem.web_scraper._fetch",
+            return_value=_FakeResponse(TAG_PAGE.encode("utf-8")),
+        ):
+            plain = scrape_page(self.cfg, _TAG_URL, cache=cache)
+        self.assertEqual(plain.via, "cache")
+        self.assertEqual(plain.text, "cached text")
 
 
 if __name__ == "__main__":
