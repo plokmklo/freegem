@@ -88,6 +88,12 @@ DEFAULT_CONFIG: Mapping[str, Any] = MappingProxyType(
         # from well-reputed IPs; datacenter IPs get 401 and must authenticate.
         # Sent ONLY to r.jina.ai, only by the smart-fetch ladder.
         "reader_api_key": "",
+        # Ceiling for batch-scrape concurrency (#15): ``freegem scrape``'s
+        # --concurrency is clamped to this before the bounded pool is built.
+        # The old code hard-clamped to 16 silently; the config key makes the
+        # ceiling explicit and raisable, and a clamped request says so on
+        # stderr (stdout stays pipeline-safe). Floor 1, whatever the value.
+        "batch_max_concurrency": 16,
         # Bounded background-job execution (2.9): fixed worker pool, bounded
         # pending queue (saturation answers HTTP 429), per-job execution
         # timeout with a watchdog, capped retries, retention window.
@@ -121,6 +127,7 @@ _INT_FIELDS = frozenset(
         "request_timeout_sec",
         "research_concurrency",
         "robots_cache_ttl_sec",
+        "batch_max_concurrency",
         "job_max_workers",
         "job_max_pending",
         "job_timeout_sec",
@@ -240,6 +247,7 @@ class BridgeConfig:
     log_requests: bool = DEFAULT_CONFIG["log_requests"]
     research_concurrency: int = DEFAULT_CONFIG["research_concurrency"]
     robots_cache_ttl_sec: int = DEFAULT_CONFIG["robots_cache_ttl_sec"]
+    batch_max_concurrency: int = DEFAULT_CONFIG["batch_max_concurrency"]
     request_queue_wait_sec: float = DEFAULT_CONFIG["request_queue_wait_sec"]
     research_evidence: bool = DEFAULT_CONFIG["research_evidence"]
     discover_wiki: str = DEFAULT_CONFIG["discover_wiki"]
@@ -323,6 +331,7 @@ class BridgeConfig:
             "log_requests": self.log_requests,
             "research_concurrency": self.research_concurrency,
             "robots_cache_ttl_sec": self.robots_cache_ttl_sec,
+            "batch_max_concurrency": self.batch_max_concurrency,
             "request_queue_wait_sec": self.request_queue_wait_sec,
             "research_evidence": self.research_evidence,
             "discover_wiki": self.discover_wiki,

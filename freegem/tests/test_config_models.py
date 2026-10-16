@@ -101,6 +101,21 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertEqual(cfg.xsrf_token, "from-env")
 
 
+class BatchConcurrencyConfigTests(unittest.TestCase):
+    """#15: the batch ceiling is a real config field, coerced like its siblings."""
+
+    def test_default_is_sixteen(self) -> None:
+        self.assertEqual(BridgeConfig().batch_max_concurrency, 16)
+
+    def test_string_value_is_coerced(self) -> None:
+        cfg = BridgeConfig.from_dict({"batch_max_concurrency": "32"})
+        self.assertEqual(cfg.batch_max_concurrency, 32)
+
+    def test_unsalvageable_value_falls_back_to_the_default(self) -> None:
+        cfg = BridgeConfig.from_dict({"batch_max_concurrency": "lots"})
+        self.assertEqual(cfg.batch_max_concurrency, 16)
+
+
 class ModelRegistryTests(unittest.TestCase):
     def test_all_models_resolve(self) -> None:
         for name in MODELS:

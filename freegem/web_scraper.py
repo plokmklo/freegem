@@ -32,6 +32,7 @@ from __future__ import annotations
 import contextlib
 import json
 import re
+import sys
 import threading
 import time
 import urllib.error
@@ -1152,6 +1153,31 @@ _BATCH_RESULT_TIMEOUT_SEC = 300.0
 _SCRAPE_MANY_DELAY_SEC = 0.2
 
 
+#: Default ceiling for one batch's worker pool when the config key is
+#: missing (a BridgeConfig always carries it; the fallback only protects
+#: against exotic configs). Mirrors DEFAULT_CONFIG["batch_max_concurrency"].
+_DEFAULT_BATCH_CONCURRENCY_CAP = 16
+
+
+def _clamp_batch_concurrency(cfg: BridgeConfig, requested: int) -> int:
+    """The batch pool's width, honoring the ``batch_max_concurrency`` ceiling (#15).
+
+    The old code hard-clamped to 16 silently -- a caller asking for 20 got
+    16 and never knew. The ceiling is now config-driven, and a clamped
+    request is announced EXACTLY once on stderr: stdout carries jsonl rows
+    and must stay pipeline-safe, while the warning belongs in the operator's
+    terminal. Within bounds (or below the floor of 1) nothing is printed.
+    """
+    cap = max(1, int(getattr(cfg, "batch_max_concurrency", _DEFAULT_BATCH_CONCURRENCY_CAP)))
+    if requested > cap:
+        print(
+            f"scrape: requested concurrency {requested} clamped to {cap} "
+            "(batch_max_concurrency)",
+            file=sys.stderr,
+        )
+    return min(max(1, requested), cap)
+
+
 def _host_locks_for(urls: list[str]) -> dict[str, threading.Lock]:
     locks: dict[str, threading.Lock] = {}
     for url in urls:
@@ -1211,12 +1237,16 @@ def scrape_many(
     across distinct hosts, per-host locks serializing same-origin fetches,
     one failed URL recorded (with its error) instead of killing the batch.
     Results keep the caller's URL order regardless of completion order.
+
+    ``concurrency`` is clamped to the ``batch_max_concurrency`` config
+    ceiling (#15, default 16); a clamped request is announced once on
+    stderr, and the effective width never drops below 1.
     """
     if len(urls) > _SCRAPE_MANY_MAX:
         raise ValueError(
             f"batch scrape is capped at {_SCRAPE_MANY_MAX} URLs per run; got {len(urls)}"
         )
-    concurrency = max(1, min(concurrency, 16))
+    concurrency = _clamp_batch_concurrency(cfg, concurrency)
     locks = _host_locks_for(urls)
     items: list[BatchItem | None] = [None] * len(urls)
 
