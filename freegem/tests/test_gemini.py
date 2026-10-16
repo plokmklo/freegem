@@ -28,6 +28,7 @@ from freegem.gemini import (
     extract_response_text,
     fetch_build_tag,
     generate,
+    generate_stream,
     load_cookie,
     make_sapisidhash,
     refresh_build_tag,
@@ -192,7 +193,7 @@ class CookieLoadingTests(unittest.TestCase):
     def setUp(self) -> None:
         from freegem import gemini as gem
 
-        gem._COOKIE_CACHE.update({"mtime": None, "cookie": "", "sapisid": None})
+        gem._COOKIE_CACHE.update({"key": None, "cookie": "", "sapisid": None, "xsrf": None})
 
     def test_json_shape(self) -> None:
         import os
@@ -237,8 +238,6 @@ class CookieLoadingTests(unittest.TestCase):
         import os
         import tempfile
 
-        from freegem import gemini as gem
-
         good = json.dumps({"cookie": "SID=good", "sapisid": "s"})
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
             fh.write(good)
@@ -250,9 +249,212 @@ class CookieLoadingTests(unittest.TestCase):
             with open(path, "w") as fh:
                 fh.write("{ truncated")
             os.utime(path, (0, 0))
-            gem._COOKIE_CACHE["mtime"] = -1
             second, _ = load_cookie(BridgeConfig(cookie_file=path))
             self.assertEqual(second, "SID=good")  # kept, not dropped
+        finally:
+            os.unlink(path)
+
+
+class CookieCacheGuardTests(unittest.TestCase):
+    """The cookie cache must never serve one account's session for another (#35)."""
+
+    def setUp(self) -> None:
+        from freegem import gemini as gem
+
+        self.gem = gem
+        gem._COOKIE_CACHE.update({"key": None, "cookie": "", "sapisid": None, "xsrf": None})
+        self.addCleanup(
+            gem._COOKIE_CACHE.update,
+            {"key": None, "cookie": "", "sapisid": None, "xsrf": None},
+        )
+
+    @staticmethod
+    def _write(path: str, content: str) -> None:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(content)
+
+    def test_failure_on_other_file_does_not_leak_cached_session(self) -> None:
+        """A failure on cookie file B returns anonymous, not file A's session."""
+        import os
+        import tempfile
+
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps({"cookie": "SID=account-a", "sapisid": "sa"}))
+            path_a = fh.name
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write("{ truncated")
+            path_b = fh.name
+        try:
+            self.assertEqual(load_cookie(BridgeConfig(cookie_file=path_a)), ("SID=account-a", "sa"))
+            # Parse failure on B: the cache holds A under A's key only.
+            self.assertEqual(load_cookie(BridgeConfig(cookie_file=path_b)), ("", None))
+            # A hard read failure on B behaves the same.
+            with mock.patch("builtins.open", side_effect=PermissionError("denied")):
+                self.assertEqual(load_cookie(BridgeConfig(cookie_file=path_b)), ("", None))
+            # And A's session is still intact afterwards.
+            self.assertEqual(load_cookie(BridgeConfig(cookie_file=path_a)), ("SID=account-a", "sa"))
+        finally:
+            os.unlink(path_a)
+            os.unlink(path_b)
+
+    def test_read_failure_on_same_path_keeps_last_good_value(self) -> None:
+        """Mid-write files must not downgrade the session for the SAME file."""
+        import os
+        import tempfile
+
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps({"cookie": "SID=good", "sapisid": "s"}))
+            path = fh.name
+        try:
+            cfg = BridgeConfig(cookie_file=path)
+            self.assertEqual(load_cookie(cfg), ("SID=good", "s"))
+            os.utime(path, (0, 0))  # force a cache miss on the same path
+            with mock.patch("builtins.open", side_effect=PermissionError("denied")):
+                self.assertEqual(load_cookie(cfg), ("SID=good", "s"))
+        finally:
+            os.unlink(path)
+
+    def test_cache_hit_is_served_without_reopening_the_file(self) -> None:
+        import os
+        import tempfile
+
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps({"cookie": "SID=account-a", "sapisid": "sa"}))
+            path = fh.name
+        try:
+            cfg = BridgeConfig(cookie_file=path)
+            self.assertEqual(load_cookie(cfg), ("SID=account-a", "sa"))
+            with mock.patch("builtins.open", wraps=open) as opener:
+                self.assertEqual(load_cookie(cfg), ("SID=account-a", "sa"))
+            self.assertEqual(opener.call_count, 0)
+        finally:
+            os.unlink(path)
+
+    def test_partial_read_is_never_cached_as_valid(self) -> None:
+        """A size mismatch between read and stat must not poison the cache."""
+        import os
+        import tempfile
+
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps({"cookie": "SID=full", "sapisid": "s"}))
+            path = fh.name
+        try:
+            cfg = BridgeConfig(cookie_file=path)
+            self.assertEqual(load_cookie(cfg), ("SID=full", "s"))
+            key_before = self.gem._COOKIE_CACHE["key"]
+            real_size = os.path.getsize(path)
+            # Simulate a writer landing between our read and our stat: the
+            # pre-read stat sees the old size, the post-read stat a bigger
+            # one. The loader must treat the snapshot as suspect.
+            sizes = iter([real_size - 1, real_size + 13])
+            with mock.patch.object(os.path, "getsize", lambda p: next(sizes)):
+                self.assertEqual(load_cookie(cfg), ("SID=full", "s"))
+            self.assertEqual(self.gem._COOKIE_CACHE["key"], key_before)
+            self.assertEqual(self.gem._COOKIE_CACHE["cookie"], "SID=full")
+        finally:
+            os.unlink(path)
+
+    def test_concurrent_loaders_do_not_corrupt_cache(self) -> None:
+        """Race smoke: hammering the loader never yields a torn session."""
+        import os
+        import tempfile
+        import threading
+
+        # Deliberately different lengths so a mid-write read is detectable
+        # by the size check instead of parsing as plausible garbage.
+        variants = [
+            json.dumps({"cookie": "SID=one; SAPISID=s1", "sapisid": "s1"}),
+            json.dumps({"cookie": "SID=two-two; SAPISID=s2", "sapisid": "s2"}),
+        ]
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(variants[0])
+            path = fh.name
+        allowed = {"SID=one; SAPISID=s1", "SID=two-two; SAPISID=s2", ""}
+        errors: list[str] = []
+
+        def reader() -> None:
+            cfg = BridgeConfig(cookie_file=path)
+            for _ in range(120):
+                try:
+                    cookie, sapisid = load_cookie(cfg)
+                except Exception as exc:  # pragma: no cover - reported below
+                    errors.append(f"loader raised: {exc!r}")
+                    return
+                if cookie not in allowed:
+                    errors.append(f"torn result: {(cookie, sapisid)!r}")
+                    return
+                if cookie == "SID=one; SAPISID=s1" and sapisid != "s1":
+                    errors.append(f"mismatched sapisid: {(cookie, sapisid)!r}")
+                    return
+                if cookie == "SID=two-two; SAPISID=s2" and sapisid != "s2":
+                    errors.append(f"mismatched sapisid: {(cookie, sapisid)!r}")
+                    return
+
+        def writer() -> None:
+            for i in range(80):
+                self._write(path, variants[i % 2])
+                os.utime(path, None)
+
+        threads = [threading.Thread(target=reader) for _ in range(6)]
+        threads.append(threading.Thread(target=writer))
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+            self.assertFalse(thread.is_alive())
+        os.unlink(path)
+        self.assertEqual(errors, [])
+
+
+class XsrfFallbackTests(unittest.TestCase):
+    """The refresh script writes xsrf_token into the session JSON; read it (#37)."""
+
+    def setUp(self) -> None:
+        from freegem import gemini as gem
+
+        gem._COOKIE_CACHE.update({"key": None, "cookie": "", "sapisid": None, "xsrf": None})
+        self.addCleanup(
+            gem._COOKIE_CACHE.update,
+            {"key": None, "cookie": "", "sapisid": None, "xsrf": None},
+        )
+
+    def test_cfg_xsrf_missing_falls_back_to_cookie_file(self) -> None:
+        import os
+        import tempfile
+
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps({"cookie": "SID=a", "sapisid": "b", "xsrf_token": "ATFILE"}))
+            path = fh.name
+        try:
+            payload = build_payload("hi", 1, 4, BridgeConfig(cookie_file=path))
+            self.assertEqual(parse_qs(payload)["at"], ["ATFILE"])
+        finally:
+            os.unlink(path)
+
+    def test_cfg_xsrf_wins_over_cookie_file(self) -> None:
+        import os
+        import tempfile
+
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps({"cookie": "SID=a", "sapisid": "b", "xsrf_token": "ATFILE"}))
+            path = fh.name
+        try:
+            cfg = BridgeConfig(cookie_file=path, xsrf_token="ATCFG")
+            payload = build_payload("hi", 1, 4, cfg)
+            self.assertEqual(parse_qs(payload)["at"], ["ATCFG"])
+        finally:
+            os.unlink(path)
+
+    def test_bare_cookie_string_carries_no_xsrf(self) -> None:
+        import os
+        import tempfile
+
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as fh:
+            fh.write("SID=a; SAPISID=b")
+            path = fh.name
+        try:
+            payload = build_payload("hi", 1, 4, BridgeConfig(cookie_file=path))
+            self.assertNotIn("at", parse_qs(payload))
         finally:
             os.unlink(path)
 
@@ -710,6 +912,353 @@ class BackoffTests(unittest.TestCase):
             mock.patch("freegem.gemini.time.sleep"),
         ):
             self.assertEqual(generate(cfg, "hi", 1, 0), "recovered")
+
+
+class HttpStatusPolicyTests(unittest.TestCase):
+    """Retry policy: transient statuses only, Retry-After everywhere (#34)."""
+
+    def test_urllib_http_error_retry_after_honored_in_generic_branch(self) -> None:
+        """Non-httpx installs: HTTPError's Retry-After must drive the delay.
+
+        The generic ``except Exception`` branch is where urllib errors land
+        (httpx is absent, so there is no status wrapper). It must extract
+        Retry-After exactly like the streaming branch does.
+        """
+        import urllib.error
+
+        cfg = BridgeConfig(retry_attempts=2, retry_delay_sec=2)
+        error = urllib.error.HTTPError(
+            "https://gemini.google.com/app", 502, "Bad Gateway", {"Retry-After": "9"}, None
+        )
+        with (
+            mock.patch(
+                "freegem.gemini._post",
+                side_effect=[error, make_response(wrb_line("recovered"))],
+            ),
+            mock.patch("freegem.gemini.time.sleep") as sleep,
+        ):
+            self.assertEqual(generate(cfg, "hi", 1, 0), "recovered")
+        sleep.assert_called_once_with(9.0)
+
+    def test_401_fails_fast_without_retry(self) -> None:
+        """An auth rejection reproduces identically on retry; do not hammer."""
+        cfg = BridgeConfig(retry_attempts=3, retry_delay_sec=0)
+        with mock.patch("freegem.gemini._post", side_effect=[_StatusResponse(401)]) as post:
+            with self.assertRaises(BridgeError) as ctx:
+                generate(cfg, "hi", 1, 0)
+        self.assertEqual(post.call_count, 1)
+        self.assertIn("401", str(ctx.exception))
+
+    def test_403_fails_fast_without_retry(self) -> None:
+        cfg = BridgeConfig(retry_attempts=3, retry_delay_sec=0)
+        with mock.patch("freegem.gemini._post", side_effect=[_StatusResponse(403)]) as post:
+            with self.assertRaises(BridgeError) as ctx:
+                generate(cfg, "hi", 1, 0)
+        self.assertEqual(post.call_count, 1)
+        self.assertIn("403", str(ctx.exception))
+
+    def test_400_fails_fast_without_retry(self) -> None:
+        cfg = BridgeConfig(retry_attempts=3, retry_delay_sec=0)
+        with mock.patch("freegem.gemini._post", side_effect=[_StatusResponse(400)]) as post:
+            with self.assertRaises(BridgeError) as ctx:
+                generate(cfg, "hi", 1, 0)
+        self.assertEqual(post.call_count, 1)
+        self.assertIn("400", str(ctx.exception))
+
+    def test_429_retries_and_recovers(self) -> None:
+        cfg = BridgeConfig(retry_attempts=2, retry_delay_sec=0)
+        with (
+            mock.patch(
+                "freegem.gemini._post",
+                side_effect=[_StatusResponse(429), make_response(wrb_line("recovered"))],
+            ) as post,
+            mock.patch("freegem.gemini.time.sleep"),
+        ):
+            self.assertEqual(generate(cfg, "hi", 1, 0), "recovered")
+        self.assertEqual(post.call_count, 2)
+
+    def test_502_retries_and_recovers(self) -> None:
+        cfg = BridgeConfig(retry_attempts=2, retry_delay_sec=0)
+        with (
+            mock.patch(
+                "freegem.gemini._post",
+                side_effect=[_StatusResponse(502), make_response(wrb_line("recovered"))],
+            ) as post,
+            mock.patch("freegem.gemini.time.sleep"),
+        ):
+            self.assertEqual(generate(cfg, "hi", 1, 0), "recovered")
+        self.assertEqual(post.call_count, 2)
+
+    def test_408_retries_as_transient(self) -> None:
+        cfg = BridgeConfig(retry_attempts=2, retry_delay_sec=0)
+        with (
+            mock.patch(
+                "freegem.gemini._post",
+                side_effect=[_StatusResponse(408), make_response(wrb_line("recovered"))],
+            ) as post,
+            mock.patch("freegem.gemini.time.sleep"),
+        ):
+            self.assertEqual(generate(cfg, "hi", 1, 0), "recovered")
+        self.assertEqual(post.call_count, 2)
+
+    def test_stream_403_fails_fast_without_retry(self) -> None:
+        """The streaming raise_for_status path must not retry auth rejections."""
+        import freegem.gemini as gem
+
+        response = mock.MagicMock()
+        response.status_code = 403
+        client = mock.MagicMock()
+        client.stream.return_value.__enter__.return_value = response
+        client.stream.return_value.__exit__.return_value = False
+        cfg = BridgeConfig(retry_attempts=3, retry_delay_sec=0)
+        with (
+            mock.patch.object(gem, "HAS_HTTPX", True),
+            mock.patch.object(gem, "_httpx_client", return_value=client),
+        ):
+            with self.assertRaises(BridgeError) as ctx:
+                list(gem.generate_stream(cfg, "hi", 1, 0))
+        self.assertIn("403", str(ctx.exception))
+        self.assertEqual(client.stream.call_count, 1)
+
+
+class ProxyRedactionTests(unittest.TestCase):
+    """Transport errors must not leak proxy credentials into messages (#38)."""
+
+    PROXY = "http://user:secret@proxy.example:8080"
+
+    def setUp(self) -> None:
+        self.cfg = BridgeConfig(retry_attempts=2, retry_delay_sec=0, proxy=self.PROXY)
+
+    def test_generate_error_message_redacts_proxy_credentials(self) -> None:
+        import urllib.error
+
+        leak = f"Cannot connect to proxy {self.PROXY}: connection refused"
+        with mock.patch("freegem.gemini._post", side_effect=urllib.error.URLError(leak)):
+            with self.assertRaises(BridgeError) as ctx:
+                generate(self.cfg, "hi", 1, 0)
+        message = str(ctx.exception)
+        self.assertNotIn("secret", message)
+        self.assertNotIn("user:", message)
+        self.assertIn("proxy.example:8080", message)
+
+    def test_stream_error_message_redacts_proxy_credentials(self) -> None:
+        import freegem.gemini as gem
+
+        leak = f"connect {self.PROXY} failed: connection refused"
+        client = mock.MagicMock()
+        client.stream.side_effect = RuntimeError(leak)
+        with (
+            mock.patch.object(gem, "HAS_HTTPX", True),
+            mock.patch.object(gem, "_httpx_client", return_value=client),
+        ):
+            with self.assertRaises(BridgeError) as ctx:
+                list(generate_stream(self.cfg, "hi", 1, 0))
+        message = str(ctx.exception)
+        self.assertNotIn("secret", message)
+        self.assertNotIn("user:", message)
+        self.assertIn("proxy.example:8080", message)
+
+
+class BuildTagRecoveryTests(unittest.TestCase):
+    """One session-authenticated build-tag re-fetch on BardErrorInfo (#38)."""
+
+    NEW_TAG = "boq_gemini-web-uiserver_20261101.00_p0"
+
+    def setUp(self) -> None:
+        import freegem.gemini as gem
+
+        self.gem = gem
+        gem._BUILD_TAG_REFRESHED = False
+        gem._BUILD_TAG_OVERRIDE = None
+        self.addCleanup(setattr, gem, "_BUILD_TAG_REFRESHED", False)
+        self.addCleanup(setattr, gem, "_BUILD_TAG_OVERRIDE", None)
+
+    def _session_cfg(self) -> BridgeConfig:
+        """A config whose cookie file really exists, so the refresh engages."""
+        import os
+        import tempfile
+
+        fd, path = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps({"cookie": "SID=a", "sapisid": "b"}))
+        self.addCleanup(os.unlink, path)
+        return BridgeConfig(cookie_file=path, log_requests=False)
+
+    @staticmethod
+    def _bard_post() -> Any:
+        """A ``_post`` stand-in returning a FRESH BARD_ERROR body per attempt.
+
+        The shared-BytesIO lesson (documented in GenerateTests): a closed
+        response's read() raises, which sends generate() down the generic
+        retry branch with real sleeps instead of the intended fail-fast path.
+        """
+        return mock.patch(
+            "freegem.gemini._post", side_effect=lambda *a, **k: make_response(BARD_ERROR)
+        )
+
+    def test_bard_error_triggers_one_session_refresh(self) -> None:
+        cfg = self._session_cfg()
+        with (
+            self._bard_post(),
+            mock.patch.object(self.gem, "fetch_build_tag", return_value=self.NEW_TAG) as fetch,
+        ):
+            with self.assertRaises(BridgeError):
+                generate(cfg, "hi", 1, 0)
+        fetch.assert_called_once()
+        self.assertIs(fetch.call_args.kwargs.get("session"), True)
+
+    def test_refresh_happens_once_per_process(self) -> None:
+        cfg = self._session_cfg()
+        with (
+            self._bard_post(),
+            mock.patch.object(self.gem, "fetch_build_tag", return_value=self.NEW_TAG) as fetch,
+        ):
+            for _ in range(3):
+                with self.assertRaises(BridgeError):
+                    generate(cfg, "hi", 1, 0)
+        fetch.assert_called_once()
+
+    def test_refreshed_tag_is_used_by_build_url(self) -> None:
+        cfg = self._session_cfg()
+        with (
+            self._bard_post(),
+            mock.patch.object(self.gem, "fetch_build_tag", return_value=self.NEW_TAG),
+        ):
+            with self.assertRaises(BridgeError):
+                generate(cfg, "hi", 1, 0)
+        self.assertIn(f"bl={self.NEW_TAG}", build_url(cfg))
+
+    def test_no_session_skips_the_refresh(self) -> None:
+        cfg = BridgeConfig(log_requests=False)
+        with (
+            self._bard_post(),
+            mock.patch.object(self.gem, "fetch_build_tag", return_value=self.NEW_TAG) as fetch,
+        ):
+            with self.assertRaises(BridgeError):
+                generate(cfg, "hi", 1, 0)
+        fetch.assert_not_called()
+
+    def test_broken_network_consumes_the_single_attempt(self) -> None:
+        cfg = self._session_cfg()
+        with (
+            self._bard_post(),
+            mock.patch.object(self.gem, "fetch_build_tag", side_effect=RuntimeError("no net")),
+        ):
+            with self.assertRaises(BridgeError):
+                generate(cfg, "hi", 1, 0)
+        with (
+            self._bard_post(),
+            mock.patch.object(
+                self.gem, "fetch_build_tag", side_effect=RuntimeError("no net")
+            ) as fetch,
+        ):
+            with self.assertRaises(BridgeError):
+                generate(cfg, "hi", 1, 0)
+        fetch.assert_not_called()
+
+    def test_stream_bard_error_triggers_refresh(self) -> None:
+        cfg = self._session_cfg()
+        with (
+            mock.patch.object(self.gem, "HAS_HTTPX", True),
+            mock.patch.object(
+                self.gem, "_httpx_client", return_value=StreamTests._fake_client([BARD_ERROR])
+            ),
+            mock.patch.object(self.gem, "fetch_build_tag", return_value=self.NEW_TAG) as fetch,
+        ):
+            with self.assertRaises(BridgeError):
+                list(generate_stream(cfg, "hi", 1, 0))
+        fetch.assert_called_once()
+
+
+class RateLimitKindTests(unittest.TestCase):
+    """Empty-200 answers carry a best-effort ``kind`` classification (#16)."""
+
+    LOGIN_PAGE = (
+        '<html><body><a href="https://accounts.google.com/ServiceLogin">'
+        "Sign in to continue</a></body></html>"
+    )
+
+    def setUp(self) -> None:
+        from freegem import gemini as gem
+
+        gem._COOKIE_CACHE.update({"key": None, "cookie": "", "sapisid": None, "xsrf": None})
+        self.addCleanup(
+            gem._COOKIE_CACHE.update,
+            {"key": None, "cookie": "", "sapisid": None, "xsrf": None},
+        )
+        self.cfg = BridgeConfig(retry_attempts=2, retry_delay_sec=0, log_requests=False)
+
+    def test_default_kind_is_rate_limit(self) -> None:
+        with mock.patch("freegem.gemini._post", side_effect=lambda *a, **k: make_response("")):
+            with self.assertRaises(RateLimitError) as ctx:
+                generate(self.cfg, "hi", 1, 4)
+        self.assertEqual(ctx.exception.kind, "rate_limit")
+        self.assertIn("rate_limit", str(ctx.exception))
+
+    def test_login_markers_classify_login_wall(self) -> None:
+        with mock.patch(
+            "freegem.gemini._post", side_effect=lambda *a, **k: make_response(self.LOGIN_PAGE)
+        ):
+            with self.assertRaises(RateLimitError) as ctx:
+                generate(self.cfg, "hi", 1, 4)
+        self.assertEqual(ctx.exception.kind, "login_wall")
+        self.assertIn("login_wall", str(ctx.exception))
+
+    def test_kind_survives_the_final_typed_error(self) -> None:
+        """After retries exhaust, the re-raised error keeps the kind."""
+        with mock.patch(
+            "freegem.gemini._post", side_effect=lambda *a, **k: make_response(self.LOGIN_PAGE)
+        ):
+            with self.assertRaises(RateLimitError) as ctx:
+                generate(self.cfg, "hi", 1, 4)
+        self.assertEqual(ctx.exception.kind, "login_wall")
+        self.assertIn("login_wall", str(ctx.exception))
+
+    def test_still_a_bridge_error_and_retried_unchanged(self) -> None:
+        with mock.patch(
+            "freegem.gemini._post", side_effect=lambda *a, **k: make_response("")
+        ) as post:
+            with self.assertRaises(RateLimitError) as ctx:
+                generate(self.cfg, "hi", 1, 4)
+        self.assertIsInstance(ctx.exception, BridgeError)
+        self.assertEqual(post.call_count, self.cfg.retry_attempts)
+
+    def test_stream_default_kind_is_rate_limit(self) -> None:
+        import freegem.gemini as gem
+
+        # Fresh response per attempt: a fake client's iter_text iterator is
+        # exhausted by the first retry (same shared-response lesson as the
+        # shared-BytesIO note in GenerateTests), which would classify the
+        # retried attempt from an empty body instead of the real chunks.
+        client = mock.MagicMock()
+        client.stream.side_effect = [
+            StreamTests._fake_client([""]).stream.return_value,
+            StreamTests._fake_client([""]).stream.return_value,
+        ]
+        with (
+            mock.patch.object(gem, "HAS_HTTPX", True),
+            mock.patch.object(gem, "_httpx_client", return_value=client),
+        ):
+            with self.assertRaises(RateLimitError) as ctx:
+                list(generate_stream(self.cfg, "hi", 1, 4))
+        self.assertEqual(ctx.exception.kind, "rate_limit")
+
+    def test_stream_login_markers_classify_login_wall(self) -> None:
+        import freegem.gemini as gem
+
+        marker = "Sign in to continue at https://accounts.google.com/ServiceLogin"
+        client = mock.MagicMock()
+        client.stream.side_effect = [
+            StreamTests._fake_client([marker]).stream.return_value,
+            StreamTests._fake_client([marker]).stream.return_value,
+        ]
+        with (
+            mock.patch.object(gem, "HAS_HTTPX", True),
+            mock.patch.object(gem, "_httpx_client", return_value=client),
+        ):
+            with self.assertRaises(RateLimitError) as ctx:
+                list(generate_stream(self.cfg, "hi", 1, 4))
+        self.assertEqual(ctx.exception.kind, "login_wall")
 
 
 class HttpxPoolTests(unittest.TestCase):

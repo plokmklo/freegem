@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
 
-from .config import BridgeConfig
+from .config import BridgeConfig, redact_proxy
 from .metrics import note_gemini_retry
 
 __all__ = [
@@ -71,15 +71,91 @@ class RateLimitError(BridgeError):
     short backoff usually clears the anonymous limit), and after the
     retries run out it is re-raised as itself -- not wrapped in a generic
     :class:`BridgeError` -- so ``except RateLimitError`` keeps working.
+
+    ``kind`` records the best-effort classification of the empty answer:
+    ``"rate_limit"`` (back off and retry) or ``"login_wall"`` (the session
+    needs re-auth; retrying will not help). It defaults to
+    ``"rate_limit"`` when the body gives no signal -- see
+    :func:`_classify_empty_answer` for the exact signals used.
+    """
+
+    def __init__(self, message: str, code: int | None = None, kind: str = "rate_limit"):
+        super().__init__(message, code)
+        self.kind = kind
+
+
+#: Body fragments that identify the sign-in page Gemini serves instead of an
+#: answer when the session is dead. Matched case-insensitively against the
+#: whole response body.
+_LOGIN_WALL_MARKERS = (
+    "accounts.google.com/servicelogin",
+    "accounts.google.com/signin",
+    "accounts.google.com/v3/signin",
+    "sign in to continue",
+    "sign in with your google account",
+)
+
+_KIND_TEXT = {"rate_limit": "rate limit", "login_wall": "login wall"}
+
+
+def _classify_empty_answer(body: str) -> str:
+    """Best-effort kind for an empty-200: ``"login_wall"`` or ``"rate_limit"``.
+
+    A login wall is recognizable only by content markers: a sign-in page
+    carries identifiable fragments while a rate-limit page is empty. Whether
+    the request carried session cookies was considered as a second signal
+    and rejected -- an authenticated request can still be served a bare
+    login page (expired cookies) and an anonymous one a bare rate limit, so
+    cookie presence cannot discriminate. Undeterminable falls back to the
+    documented default ``"rate_limit"``: back off and retry, which is also
+    the safe action when the guess is wrong.
+    """
+    lowered = (body or "").lower()
+    for marker in _LOGIN_WALL_MARKERS:
+        if marker in lowered:
+            return "login_wall"
+    return "rate_limit"
+
+
+class _StaleBuildTagError(BridgeError):
+    """The upstream answered with a ``BardErrorInfo`` marker.
+
+    In practice that marker means the configured build tag no longer matches
+    what Google serves, or the session died. It is an internal subtype so the
+    retry loops can trigger the once-per-process build-tag recovery
+    (:func:`_refresh_build_tag_once`) without string-matching the message;
+    it changes nothing for callers catching :class:`BridgeError`.
     """
 
 
 _SSL_CTX: ssl.SSLContext | None = None
-# (abspath, mtime, size) -> (cookie_str, sapisid) cache so a hot loop does not
-# re-read the file. The path and size are part of the key: mtime alone let two
-# cookie files with identical mtimes share one session (cross-account leak) and
-# missed same-tick rewrites.
-_COOKIE_CACHE: dict[str, Any] = {"key": None, "cookie": "", "sapisid": None}
+# (abspath, mtime, size) -> (cookie_str, sapisid, xsrf) cache so a hot loop does
+# not re-read the file. The path and size are part of the key: mtime alone let
+# two cookie files with identical mtimes share one session (cross-account leak)
+# and missed same-tick rewrites. The server handles requests on threads, so
+# every read AND write of the dict goes through _COOKIE_CACHE_LOCK: unlocked,
+# a miss->parse->update sequence can publish a torn entry (new key, old
+# cookie) that briefly pairs one account's path with another's session.
+_COOKIE_CACHE: dict[str, Any] = {"key": None, "cookie": "", "sapisid": None, "xsrf": None}
+_COOKIE_CACHE_LOCK = threading.Lock()
+
+
+def _safe_error_text(cfg: BridgeConfig, exc: Exception | None) -> str:
+    """Render an exception for user-facing text without leaking secrets.
+
+    Transport errors routinely embed the configured proxy URL verbatim --
+    including any ``user:pass@`` credentials -- so every occurrence of the
+    configured proxy string is replaced with its credential-free form
+    (:func:`freegem.config.redact_proxy`) before it reaches a log line or a
+    caller's terminal.
+    """
+    text = "" if exc is None else str(exc)
+    proxy = cfg.proxy
+    if proxy and proxy in text:
+        redacted = redact_proxy(proxy)
+        if redacted != proxy:
+            text = text.replace(proxy, redacted)
+    return text
 
 
 def log(cfg: BridgeConfig, message: str) -> None:
@@ -163,6 +239,20 @@ def _exc_retry_after(exc: Exception) -> float | None:
     return _retry_after_seconds(headers)
 
 
+def _is_retryable_status(status: int) -> bool:
+    """Only transient upstream statuses are worth a retry.
+
+    429 (rate limit), 408 (request timeout) and the whole 5xx class are
+    transient by nature. Every other 4xx -- 400 bad request, 401/403 auth
+    failures -- reproduces identically on every attempt: the retry loop
+    rebuilds neither the payload nor the headers, so hammering the endpoint
+    only adds latency to an already-failed request.
+    """
+    if status == 429 or status == 408:
+        return True
+    return 500 <= status <= 599
+
+
 def _backoff_delay(base: float, attempt: int, retry_after: float | None = None) -> float:
     """How long attempt N's failure should wait before retrying.
 
@@ -185,37 +275,57 @@ def account_prefix(cfg: BridgeConfig) -> str:
     return f"/u/{cfg.auth_user}"
 
 
-def load_cookie(cfg: BridgeConfig) -> tuple[str, str | None]:
-    """Read the session file, cached by mtime.
+def _read_session(cfg: BridgeConfig) -> tuple[str, str | None, str | None]:
+    """Read the session file; return ``(cookie, sapisid, xsrf_token)``.
 
-    Accepts both shapes the cookie-sync extension exports:
-    a JSON object with ``cookie``/``sapisid``, or a bare cookie string.
-    On parse failure the last good value is kept rather than failing open to
-    anonymous: a mid-write file should not silently downgrade the session.
+    Accepts both shapes the cookie-sync extension exports: a JSON object with
+    ``cookie``/``sapisid`` (and optionally ``xsrf_token``), or a bare cookie
+    string. Results are cached by ``(abspath, mtime, size)``.
+
+    Two hard rules, both learned from production incidents:
+
+    - A failure (unreadable, unparsable) may only fall back to the last good
+      value cached for THE SAME PATH. A parse failure while reading cookie
+      file B must never serve file A's session -- that is a cross-account
+      leak. Any other case degrades to anonymous.
+    - The content is read FIRST and the cache key is computed after, with a
+      byte-count check against the post-read stat. The old stat-then-read
+      order could cache a half-written snapshot under a key that later
+      requests would consider current.
     """
     path = cfg.cookie_file
     if not path:
-        return "", None
+        return "", None, None
     import os
 
     if not os.path.exists(path):
-        return "", None
+        return "", None, None
+    abspath = os.path.abspath(path)
     try:
-        mtime = os.path.getmtime(path)
-        key = (os.path.abspath(path), mtime, os.path.getsize(path))
-        if _COOKIE_CACHE["key"] == key and _COOKIE_CACHE["cookie"]:
-            return _COOKIE_CACHE["cookie"], _COOKIE_CACHE["sapisid"]
+        probe = (abspath, os.path.getmtime(path), os.path.getsize(path))
+        with _COOKIE_CACHE_LOCK:
+            if _COOKIE_CACHE["key"] == probe and _COOKIE_CACHE["cookie"]:
+                return _COOKIE_CACHE["cookie"], _COOKIE_CACHE["sapisid"], _COOKIE_CACHE["xsrf"]
 
-        with open(path, encoding="utf-8") as fh:
-            content = fh.read().strip()
-
+        with open(path, "rb") as fh:
+            raw = fh.read()
+        size_after = os.path.getsize(path)
+        key = (abspath, os.path.getmtime(path), size_after)
+        if len(raw) != size_after:
+            raise OSError(
+                f"session file changed while reading "
+                f"({len(raw)} of {size_after} bytes); refusing a partial read"
+            )
+        content = raw.decode("utf-8").strip()
         if content.startswith("{"):
             data = json.loads(content)
             cookie_str = str(data.get("cookie", "") or "")
             sapisid = data.get("sapisid") or None
+            xsrf = data.get("xsrf_token") or None
         else:
             cookie_str = content
             sapisid = None
+            xsrf = None
             for pair in cookie_str.split(";"):
                 if "=" not in pair:
                     continue
@@ -224,11 +334,35 @@ def load_cookie(cfg: BridgeConfig) -> tuple[str, str | None]:
                     sapisid = v or None
                     break
 
-        _COOKIE_CACHE.update({"key": key, "cookie": cookie_str, "sapisid": sapisid})
-        return cookie_str, sapisid
+        with _COOKIE_CACHE_LOCK:
+            _COOKIE_CACHE.update(
+                {"key": key, "cookie": cookie_str, "sapisid": sapisid, "xsrf": xsrf}
+            )
+        return cookie_str, sapisid, xsrf
     except Exception as exc:
         log(cfg, f"cookie load failed, using cached value: {exc}")
-        return _COOKIE_CACHE["cookie"], _COOKIE_CACHE["sapisid"]
+        with _COOKIE_CACHE_LOCK:
+            cached_key = _COOKIE_CACHE["key"]
+            # Same-path guard: the cache may only serve the file that
+            # produced it. Another file's key (or no cache at all) must
+            # degrade to anonymous instead of leaking a session.
+            if cached_key is not None and cached_key[0] == abspath and _COOKIE_CACHE["cookie"]:
+                return _COOKIE_CACHE["cookie"], _COOKIE_CACHE["sapisid"], _COOKIE_CACHE["xsrf"]
+        return "", None, None
+
+
+def load_cookie(cfg: BridgeConfig) -> tuple[str, str | None]:
+    """Read the session file, cached by (path, mtime, size).
+
+    Accepts both shapes the cookie-sync extension exports: a JSON object with
+    ``cookie``/``sapisid``, or a bare cookie string.
+    On parse failure the last good value is kept rather than failing open to
+    anonymous: a mid-write file should not silently downgrade the session.
+    A failure on a *different* file never returns this file's session -- see
+    :func:`_read_session` for the exact guard.
+    """
+    cookie, sapisid, _xsrf = _read_session(cfg)
+    return cookie, sapisid
 
 
 def make_sapisidhash(sapisid: str) -> str:
@@ -247,6 +381,27 @@ def make_sapisidhash(sapisid: str) -> str:
 
 
 _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+
+# Build-tag recovery state (issue #38): refreshed at most once per process,
+# set when a BardErrorInfo rejection triggers _refresh_build_tag_once. The
+# override is preferred by build_url for the rest of the process.
+_BUILD_TAG_REFRESH_LOCK = threading.Lock()
+_BUILD_TAG_REFRESHED = False
+_BUILD_TAG_OVERRIDE: str | None = None
+
+
+def _load_xsrf(cfg: BridgeConfig) -> str | None:
+    """The xsrf token for the payload: config first, then the cookie file.
+
+    The cookie-sync refresh script writes ``xsrf_token`` into the session JSON
+    next to ``cookie``/``sapisid``, but the loader used to drop that field, so
+    a config that never set the separate ``xsrf_token`` key silently sent its
+    requests without the ``at`` parameter (and Google rejected or degraded
+    them). Both sources are honored here; the explicit config wins.
+    """
+    if cfg.xsrf_token:
+        return cfg.xsrf_token
+    return _read_session(cfg)[2]
 
 
 def build_headers(cfg: BridgeConfig) -> dict[str, str]:
@@ -328,18 +483,24 @@ def build_payload(
 
     outer = [None, json.dumps(inner)]
     params = {"f.req": json.dumps(outer)}
-    if cfg.xsrf_token:
-        params["at"] = cfg.xsrf_token
+    xsrf = _load_xsrf(cfg)
+    if xsrf:
+        params["at"] = xsrf
     return urllib.parse.urlencode(params)
 
 
 def build_url(cfg: BridgeConfig) -> str:
     reqid = int(time.time()) % 1000000
     prefix = account_prefix(cfg)
+    # A mid-process refresh (see _refresh_build_tag_once) wins over the
+    # configured tag: the process learned the configured one is stale the
+    # hard way, and callers hold frozen configs that cannot be updated
+    # underneath them.
+    bl = _BUILD_TAG_OVERRIDE or cfg.gemini_bl
     return (
         f"https://gemini.google.com{prefix}/_/BardChatUi/data/"
         "assistant.lamda.BardFrontendService/StreamGenerate"
-        f"?bl={cfg.gemini_bl}&hl=en&_reqid={reqid}&rt=c"
+        f"?bl={bl}&hl=en&_reqid={reqid}&rt=c"
     )
 
 
@@ -389,7 +550,7 @@ def extract_response_text(raw: str) -> str:
     """Final answer from a full (non-streamed) Gemini response."""
     match = re.search(r"BardErrorInfo\s*\[(\d+)\]", raw)
     if match:
-        raise BridgeError(
+        raise _StaleBuildTagError(
             f"Gemini rejected the request (BardErrorInfo {match.group(1)}). "
             "The build tag may be stale, or the session needs a refresh.",
             code=int(match.group(1)) if match.group(1).isdigit() else None,
@@ -504,16 +665,26 @@ def generate(
                 if isinstance(status, int) and status >= 400:
                     # Retryable on purpose: 429/5xx are transient, and without
                     # this a rate-limit page streamed back as HTTP 200 with
-                    # content: null while the retry loop never engaged.
-                    raise _UpstreamHTTPStatus(int(status), _retry_after_seconds(response.headers))
+                    # content: null while the retry loop never engaged. Other
+                    # 4xx codes fail fast -- see _is_retryable_status.
+                    if _is_retryable_status(status):
+                        raise _UpstreamHTTPStatus(
+                            int(status), _retry_after_seconds(response.headers)
+                        )
+                    raise BridgeError(
+                        f"upstream returned HTTP {status} (client error; not retried)",
+                        code=int(status),
+                    )
                 raw = response.read().decode("utf-8", errors="replace")
             text = extract_response_text(raw)
             if not text.strip():
                 # A 200 login-wall or rate-limit page carries no BardErrorInfo
                 # marker; returning "" made a failed request look like a model
                 # that chose silence.
+                kind = _classify_empty_answer(raw)
                 raise RateLimitError(
-                    "upstream returned an empty answer (rate limit or login wall?)"
+                    f"upstream returned an empty answer (kind={kind}; {_KIND_TEXT[kind]})",
+                    kind=kind,
                 )
             return text
         except RateLimitError as exc:
@@ -529,6 +700,13 @@ def generate(
                     f"answer; retrying in {delay:.1f}s",
                 )
                 time.sleep(delay)
+        except _StaleBuildTagError:
+            # One-time recovery: the marker usually means the build tag went
+            # stale mid-process. Best effort -- the original error still
+            # propagates (retrying the same body cannot help; the NEXT
+            # request picks up the refreshed tag).
+            _refresh_build_tag_once(cfg)
+            raise
         except BridgeError:
             raise  # upstream said no; retrying the same request will not help
         except _UpstreamHTTPStatus as exc:
@@ -543,9 +721,11 @@ def generate(
                 )
                 time.sleep(delay)
         except Exception as exc:
+            # urllib's fallback path lands here (no status wrapper): extract
+            # Retry-After exactly like the streaming branch does.
             last_error = exc
             if attempt < cfg.retry_attempts:
-                delay = _backoff_delay(cfg.retry_delay_sec, attempt)
+                delay = _backoff_delay(cfg.retry_delay_sec, attempt, _exc_retry_after(exc))
                 note_gemini_retry()
                 log(
                     cfg,
@@ -556,11 +736,16 @@ def generate(
     if isinstance(last_error, RateLimitError):
         # Surface the typed error, not a generic BridgeError: callers poll
         # for exactly this shape to decide "back off for minutes" vs "give up".
+        kind = last_error.kind
         raise RateLimitError(
             f"Gemini returned no answer after {cfg.retry_attempts} attempts "
-            "(rate limit or login wall?)"
+            f"(kind={kind}; {_KIND_TEXT[kind]})",
+            kind=kind,
         ) from last_error
-    raise BridgeError(f"Gemini request failed after {cfg.retry_attempts} attempts: {last_error}")
+    raise BridgeError(
+        f"Gemini request failed after {cfg.retry_attempts} attempts: "
+        f"{_safe_error_text(cfg, last_error)}"
+    )
 
 
 def generate_stream(
@@ -593,16 +778,31 @@ def generate_stream(
     last_error: Exception | None = None
     for attempt in range(1, cfg.retry_attempts + 1):
         emitted = ""
+        streamed = ""
         try:
             with client.stream("POST", url, content=body, headers=headers) as response:
+                # Same policy as the non-streaming path: raise_for_status()
+                # alone would retry every 4xx (httpx raises through the
+                # generic except branch), so auth rejections fail fast here.
+                stream_status = getattr(response, "status_code", None)
+                if (
+                    isinstance(stream_status, int)
+                    and stream_status >= 400
+                    and not _is_retryable_status(stream_status)
+                ):
+                    raise BridgeError(
+                        f"upstream returned HTTP {stream_status} (client error; not retried)",
+                        code=stream_status,
+                    )
                 response.raise_for_status()
                 buffer = ""
                 for chunk in response.iter_text():
                     buffer += chunk
+                    streamed += chunk
                     if "BardErrorInfo" in buffer:
                         match = re.search(r"BardErrorInfo\s*\[(\d+)\]", buffer)
                         if match:
-                            raise BridgeError(
+                            raise _StaleBuildTagError(
                                 "Gemini rejected the request during streaming "
                                 f"(BardErrorInfo {match.group(1)}).",
                                 code=int(match.group(1)) if match.group(1).isdigit() else None,
@@ -641,8 +841,10 @@ def generate_stream(
                 # Same failure shape as the non-streaming path: a 200 whose
                 # body never yields an answer is the rate limit or a login
                 # wall. Nothing was emitted, so a retry cannot duplicate.
+                kind = _classify_empty_answer(streamed)
                 raise RateLimitError(
-                    "upstream returned an empty answer (rate limit or login wall?)"
+                    f"upstream returned an empty answer (kind={kind}; {_KIND_TEXT[kind]})",
+                    kind=kind,
                 )
             return
         except RateLimitError as exc:
@@ -658,6 +860,10 @@ def generate_stream(
                     f"empty answer; retrying in {delay:.1f}s",
                 )
                 time.sleep(delay)
+        except _StaleBuildTagError:
+            # Same one-time recovery as the non-streaming path.
+            _refresh_build_tag_once(cfg)
+            raise
         except BridgeError:
             raise
         except Exception as exc:
@@ -675,19 +881,78 @@ def generate_stream(
                 note_gemini_retry()
                 log(
                     cfg,
-                    f"stream attempt {attempt}/{cfg.retry_attempts} failed: {exc}; "
+                    f"stream attempt {attempt}/{cfg.retry_attempts} failed: "
+                    f"{_safe_error_text(cfg, exc)}; "
                     f"retrying in {delay:.1f}s",
                 )
                 time.sleep(delay)
     if isinstance(last_error, RateLimitError):
+        kind = last_error.kind
         raise RateLimitError(
             f"Gemini stream returned no answer after {cfg.retry_attempts} attempts "
-            "(rate limit or login wall?)"
+            f"(kind={kind}; {_KIND_TEXT[kind]})",
+            kind=kind,
         ) from last_error
-    raise BridgeError(f"Gemini stream failed after {cfg.retry_attempts} attempts: {last_error}")
+    raise BridgeError(
+        f"Gemini stream failed after {cfg.retry_attempts} attempts: "
+        f"{_safe_error_text(cfg, last_error)}"
+    )
 
 
-def fetch_build_tag(cfg: BridgeConfig) -> str | None:
+def _page_headers(cfg: BridgeConfig) -> dict[str, str]:
+    """GET headers for a gemini.google.com page fetch, session-aware.
+
+    Mirrors :func:`build_headers`' authentication (Cookie + SAPISIDHASH,
+    account selector) without the POST-only content headers.
+    """
+    headers = {"User-Agent": _UA}
+    cookie_str, sapisid, _xsrf = _read_session(cfg)
+    if cookie_str:
+        headers["Cookie"] = cookie_str
+    if sapisid:
+        headers["Authorization"] = make_sapisidhash(str(sapisid))
+    if account_prefix(cfg):
+        headers["X-Goog-AuthUser"] = str(cfg.auth_user)
+    return headers
+
+
+def _refresh_build_tag_once(cfg: BridgeConfig) -> None:
+    """One per-process attempt to recover from a stale build tag.
+
+    A ``BardErrorInfo`` marker usually means the configured ``bl`` tag no
+    longer matches what Google serves. The build tag is otherwise refreshed
+    only at serve startup, so a long-running process would keep failing until
+    restarted. On the FIRST rejection in this process, re-scrape the tag
+    through the session: signed-out, ``/app`` answers with a redirect to
+    accounts.google.com whose HTML never contains a build tag.
+
+    The attempt flag is consumed BEFORE the network call: with a broken
+    network, one failure must not turn every subsequent request into an
+    extra scrape. The fresh value is stored process-wide and preferred by
+    :func:`build_url` -- caller configs are frozen dataclasses that cannot
+    be updated underneath them.
+    """
+    global _BUILD_TAG_REFRESHED, _BUILD_TAG_OVERRIDE
+    if not cfg.has_session_cookie():
+        # The recovery fetch is session-authenticated; without a session
+        # there is nothing to authenticate with (and the anonymous
+        # fetch_build_tag already ran at startup).
+        return
+    with _BUILD_TAG_REFRESH_LOCK:
+        if _BUILD_TAG_REFRESHED:
+            return
+        _BUILD_TAG_REFRESHED = True
+        try:
+            found = fetch_build_tag(cfg, session=True)
+        except Exception as exc:
+            log(cfg, f"build-tag refresh after rejection failed: {_safe_error_text(cfg, exc)}")
+            return
+        if found and found != cfg.gemini_bl:
+            log(cfg, f"build tag auto-refreshed after rejection: {cfg.gemini_bl} -> {found}")
+            _BUILD_TAG_OVERRIDE = found
+
+
+def fetch_build_tag(cfg: BridgeConfig, session: bool = False) -> str | None:
     """Scrape the current build tag from Gemini's page.
 
     Two formats are seen in the wild. The original code matched only
@@ -695,9 +960,14 @@ def fetch_build_tag(cfg: BridgeConfig) -> str | None:
     switched to ``boq_gemini-web-uiserver_*`` -- the auto-update looked like it
     worked because it never reported failure. Both patterns are matched now,
     and an actual result is required for the caller to consider it a success.
+
+    ``session=True`` sends the same session headers a StreamGenerate call
+    would (see :func:`_page_headers`) so the fetch works for logged-in
+    sessions; the default keeps the historical anonymous scrape.
     """
     request = urllib.request.Request(
-        f"https://gemini.google.com{account_prefix(cfg)}/app", headers={"User-Agent": _UA}
+        f"https://gemini.google.com{account_prefix(cfg)}/app",
+        headers=_page_headers(cfg) if session else {"User-Agent": _UA},
     )
     try:
         if cfg.proxy:
