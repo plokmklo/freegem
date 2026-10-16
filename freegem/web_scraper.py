@@ -864,10 +864,8 @@ def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
 
 def _select_spans(html: str, selectors: list[_Selector]) -> list[tuple[int, int]]:
     collector = _RegionCollector(html, selectors)
-    try:
+    with contextlib.suppress(Exception):  # malformed markup: keep what was found
         collector.feed(html)
-    except Exception:  # malformed markup: keep whatever regions were found
-        pass
     return collector.finish()
 
 
@@ -1447,8 +1445,7 @@ def _clamp_batch_concurrency(cfg: BridgeConfig, requested: int) -> int:
     cap = max(1, int(getattr(cfg, "batch_max_concurrency", _DEFAULT_BATCH_CONCURRENCY_CAP)))
     if requested > cap:
         print(
-            f"scrape: requested concurrency {requested} clamped to {cap} "
-            "(batch_max_concurrency)",
+            f"scrape: requested concurrency {requested} clamped to {cap} (batch_max_concurrency)",
             file=sys.stderr,
         )
     return min(max(1, requested), cap)
