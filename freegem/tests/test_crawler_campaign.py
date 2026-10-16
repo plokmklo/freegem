@@ -21,6 +21,7 @@ from unittest import mock
 
 from freegem.config import BridgeConfig
 from freegem.crawler.campaign import DISTILL_THRESHOLD_BYTES, run_campaign
+from freegem.crawler.fetch import FetchOutcome
 
 _REAL_GETADDRINFO = socket.getaddrinfo
 _REAL_CREATE_CONNECTION = socket.create_connection
@@ -122,6 +123,40 @@ class CampaignDistillDeadlockTests(unittest.TestCase):
             db.close()
         self.assertIsNotNone(distilled, "campaign state db missing after run")
         self.assertEqual(distilled[0], 1)
+
+
+class CampaignSpillCleanupTests(unittest.TestCase):
+    """Issue #44: the campaign never hands a spilled body to an artifact
+    store, so the temp file must be unlinked once the outcome is recorded."""
+
+    def test_spilled_body_is_unlinked_after_campaign(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        state = os.path.join(tmp.name, "state.db")
+        spill_dir = os.path.join(tmp.name, "spill")
+        os.makedirs(spill_dir)
+        spilled: dict[str, str] = {}
+
+        def fake_fetch(cfg: BridgeConfig, url: str, *, spill_dir: str = "", **kwargs: object):
+            # Mirror the streaming reader: a real temp file inside the
+            # campaign's spill dir, referenced via outcome.body_path.
+            fd, path = tempfile.mkstemp(prefix="freegem-body-", suffix=".bin", dir=spill_dir)
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(b"a very large body, > spill_bytes")
+            spilled[url] = path
+            return FetchOutcome(url=url, kind="ok", status=200, body_path=path, body_size=32)
+
+        with mock.patch("freegem.crawler.campaign.fetch_resilient", side_effect=fake_fetch):
+            result = run_campaign(
+                BridgeConfig(log_requests=False),
+                [{"url": "https://big.test/", "category": "c"}],
+                state_path=state,
+                concurrency=1,
+            )
+        self.assertEqual(result.readable(), 1)
+        self.assertIn("https://big.test/", spilled)
+        self.assertFalse(os.path.exists(spilled["https://big.test/"]), "spill file leaked")
+        self.assertEqual(os.listdir(spill_dir), [])
 
 
 if __name__ == "__main__":

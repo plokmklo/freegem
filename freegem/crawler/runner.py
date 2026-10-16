@@ -20,6 +20,7 @@ recorded:
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -516,112 +517,128 @@ def _process(
         )
     counters.note_outcome(outcome)
     counters.bytes_in += outcome.body_size or len(outcome.body or b"")
-    _log(
-        cfg,
-        {
-            "event": "fetched",
-            "url": url,
-            "status": outcome.status,
-            "kind": outcome.kind,
-            "fallback": outcome.fallback,
-            "attempts": outcome.attempts,
-            "ms": outcome.elapsed_ms,
-            "bytes": outcome.body_size or len(outcome.body or b""),
-        },
-    )
-
-    if outcome.kind == "ssrf":
-        counters.ssrf_refused += 1
-        frontier.mark_skipped(url, "ssrf_refused")
-        return
-    if outcome.ok and outcome.not_modified:
-        counters.pages_not_modified += 1
-        frontier.mark_done(url, http_status=304, etag=item.etag, last_modified=item.last_modified)
-        return
-    if not outcome.ok:
-        counters.pages_failed += 1
-        budget.failed += 1
-        retryable = outcome.kind in ("network", "timeout", "too_large") or (
-            outcome.status in (429, 500, 502, 503, 504)
+    # A body larger than ``spill_bytes`` lives in a temp file inside the
+    # spill dir. Whatever happens below -- an early return, a raise, an
+    # artifact store that already holds this content -- that temp file must
+    # not outlive this call unless the artifact store took it over
+    # (issue #44: it used to leak permanently on every path that did not
+    # hand it to ``_store_artifact``). Only the original spill path is
+    # cleaned: when the artifact store consumes the spill it unlinks the
+    # temp itself and repoints ``body_path`` at the stored artifact.
+    spill_tmp = outcome.body_path
+    try:
+        _log(
+            cfg,
+            {
+                "event": "fetched",
+                "url": url,
+                "status": outcome.status,
+                "kind": outcome.kind,
+                "fallback": outcome.fallback,
+                "attempts": outcome.attempts,
+                "ms": outcome.elapsed_ms,
+                "bytes": outcome.body_size or len(outcome.body or b""),
+            },
         )
-        will_retry = frontier.mark_error(
+
+        if outcome.kind == "ssrf":
+            counters.ssrf_refused += 1
+            frontier.mark_skipped(url, "ssrf_refused")
+            return
+        if outcome.ok and outcome.not_modified:
+            counters.pages_not_modified += 1
+            frontier.mark_done(
+                url, http_status=304, etag=item.etag, last_modified=item.last_modified
+            )
+            return
+        if not outcome.ok:
+            counters.pages_failed += 1
+            budget.failed += 1
+            retryable = outcome.kind in ("network", "timeout", "too_large") or (
+                outcome.status in (429, 500, 502, 503, 504)
+            )
+            will_retry = frontier.mark_error(
+                url,
+                outcome.error or outcome.kind,
+                retry=retryable,
+                max_retries=spec.limits.max_retries,
+                retry_after=outcome.retry_after,
+            )
+            if will_retry:
+                counters.retries += 1
+            return
+
+        counters.pages_ok += 1
+        budget.fetched += 1
+        content_hash = _content_hash_of(outcome)
+        frontier.mark_done(
             url,
-            outcome.error or outcome.kind,
-            retry=retryable,
-            max_retries=spec.limits.max_retries,
-            retry_after=outcome.retry_after,
+            http_status=outcome.status,
+            etag=outcome.etag,
+            last_modified=outcome.last_modified,
+            content_hash=content_hash,
         )
-        if will_retry:
-            counters.retries += 1
-        return
+        _store_artifact(spec, url, outcome, content_hash, counters)
 
-    counters.pages_ok += 1
-    budget.fetched += 1
-    content_hash = _content_hash_of(outcome)
-    frontier.mark_done(
-        url,
-        http_status=outcome.status,
-        etag=outcome.etag,
-        last_modified=outcome.last_modified,
-        content_hash=content_hash,
-    )
-    _store_artifact(spec, url, outcome, content_hash, counters)
+        text = outcome.text()
+        dom: HtmlDom | None = None
+        payload: Any = None
+        mime = outcome.content_type.split(";")[0].strip().lower()
+        if "json" in mime:
+            payload = outcome.json()
+        else:
+            dom = HtmlDom(max_nodes=spec.limits.max_dom_nodes, max_depth=spec.limits.max_dom_depth)
+            dom.feed(text)
 
-    text = outcome.text()
-    dom: HtmlDom | None = None
-    payload: Any = None
-    mime = outcome.content_type.split(";")[0].strip().lower()
-    if "json" in mime:
-        payload = outcome.json()
-    else:
-        dom = HtmlDom(max_nodes=spec.limits.max_dom_nodes, max_depth=spec.limits.max_dom_depth)
-        dom.feed(text)
+        if not schema.fields:
+            # No schema given: one useful record per page -- title and capped
+            # readable text (the same "what did this page say" cut the scraper
+            # makes), so the default crawl output is not empty. Oversized pages
+            # are distilled to their important content when asked for.
+            record = _default_record(dom, payload, url)
+            if (
+                spec.distill
+                and (outcome.body_size or len(outcome.body or b"")) >= DISTILL_THRESHOLD_BYTES
+            ):
+                distilled, mode = distill_text(cfg, url, text, content_type=outcome.content_type)
+                record["distilled"] = distilled
+                record["distill_mode"] = mode
+            records = [record]
+            field_errors: list[FieldError] = []
+        else:
+            records, field_errors = extract_items(
+                dom,
+                payload,
+                schema,
+                base_url=url,
+                stats=stats,
+                max_items=spec.limits.max_items_per_page,
+            )
+        counters.items_extracted += len(records)
+        counters.field_errors += len(field_errors)
+        if writer is not None:
+            provenance = {
+                "url": url,
+                "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "content_hash": content_hash,
+                "via": "crawl",
+            }
+            for record in records:
+                record.pop("_index", None)
+                writer.write({**record, **provenance})
 
-    if not schema.fields:
-        # No schema given: one useful record per page -- title and capped
-        # readable text (the same "what did this page say" cut the scraper
-        # makes), so the default crawl output is not empty. Oversized pages
-        # are distilled to their important content when asked for.
-        record = _default_record(dom, payload, url)
-        if (
-            spec.distill
-            and (outcome.body_size or len(outcome.body or b"")) >= DISTILL_THRESHOLD_BYTES
-        ):
-            distilled, mode = distill_text(cfg, url, text, content_type=outcome.content_type)
-            record["distilled"] = distilled
-            record["distill_mode"] = mode
-        records = [record]
-        field_errors: list[FieldError] = []
-    else:
-        records, field_errors = extract_items(
-            dom,
-            payload,
-            schema,
-            base_url=url,
-            stats=stats,
-            max_items=spec.limits.max_items_per_page,
-        )
-    counters.items_extracted += len(records)
-    counters.field_errors += len(field_errors)
-    if writer is not None:
-        provenance = {
-            "url": url,
-            "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "content_hash": content_hash,
-            "via": "crawl",
-        }
-        for record in records:
-            record.pop("_index", None)
-            writer.write({**record, **provenance})
-
-    if item.depth < spec.scope.max_depth:
-        _queue_links(spec, frontier, counters, url, item.depth + 1, dom, text)
-    if counters.pages_ok % 10 == 0:
-        frontier.checkpoint()
-        _emit(
-            on_event,
-            {"event": "progress", **counters.as_dict(), "pending": frontier.stats().queued},
-        )
+        if item.depth < spec.scope.max_depth:
+            _queue_links(spec, frontier, counters, url, item.depth + 1, dom, text)
+        if counters.pages_ok % 10 == 0:
+            frontier.checkpoint()
+            _emit(
+                on_event,
+                {"event": "progress", **counters.as_dict(), "pending": frontier.stats().queued},
+            )
+    finally:
+        if spill_tmp and os.path.exists(spill_tmp):
+            with contextlib.suppress(OSError):
+                os.unlink(spill_tmp)
 
 
 def _polite_sleep(seconds: float, cancel: threading.Event) -> None:

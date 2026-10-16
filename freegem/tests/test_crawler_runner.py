@@ -19,7 +19,7 @@ from typing import Any, ClassVar
 from unittest import mock
 
 from freegem.config import BridgeConfig
-from freegem.crawler import CrawlSpec, Frontier, ResourceLimits, Scope, plan, run
+from freegem.crawler import Counters, CrawlSpec, Frontier, ResourceLimits, Scope, plan, run
 from freegem.web_scraper import clear_robots_cache
 
 _REAL_GETADDRINFO = socket.getaddrinfo
@@ -300,6 +300,58 @@ class RunTests(CrawlRunnerTestCase):
         for entry in manifest:
             body_path = os.path.join(artifacts, entry["hash"][:2], f"{entry['hash']}.body")
             self.assertTrue(os.path.exists(body_path), f"missing artifact {body_path}")
+
+    def test_spilled_bodies_do_not_leak_without_artifacts_dir(self) -> None:
+        """Issue #44: an oversized body spills to a temp file; with no
+        artifacts dir nothing consumes it, so the spill file must be unlinked
+        when the page is processed (it used to leak permanently)."""
+        state = os.path.join(self.dir, "state.db")
+        spill_dir = state + ".spill"  # the runner's default derivation
+        frontier = Frontier(state)
+        self.addCleanup(frontier.close)
+        counters = run(
+            self.cfg,
+            self.spec(
+                state_path=state,
+                limits=ResourceLimits(timeout_sec=5, spill_bytes=64, max_bytes=1 << 20),
+            ),
+            frontier,
+        )
+        self.assertEqual(counters.as_dict()["pages_ok"], 3)
+        # The spill dir was created by the streaming reader: bodies really
+        # spilled. After the crawl it must hold zero temp files.
+        self.assertTrue(os.path.isdir(spill_dir), "bodies never spilled; test is vacuous")
+        self.assertEqual(os.listdir(spill_dir), [])
+
+    def test_spilled_bodies_move_to_artifacts_and_dedup_does_not_leak(self) -> None:
+        """Issue #44: with an artifacts dir the spill is consumed into the
+        store; a SECOND crawl whose artifacts already exist hits the dedup
+        path, which used to leak the fresh spill file instead."""
+        artifacts = os.path.join(self.dir, "artifacts")
+
+        def crawl(state: str) -> Counters:
+            spill_dir = state + ".spill"
+            frontier = Frontier(state)
+            self.addCleanup(frontier.close)
+            counters = run(
+                self.cfg,
+                self.spec(
+                    state_path=state,
+                    artifacts_dir=artifacts,
+                    spill_dir=spill_dir,
+                    limits=ResourceLimits(timeout_sec=5, spill_bytes=64, max_bytes=1 << 20),
+                ),
+                frontier,
+            )
+            self.assertEqual(os.listdir(spill_dir), [])
+            return counters
+
+        first = crawl(os.path.join(self.dir, "one.db"))
+        self.assertGreater(first.as_dict()["artifacts_stored"], 0)
+        second = crawl(os.path.join(self.dir, "two.db"))
+        # Every artifact already existed: the dedup path ran and stored nothing.
+        self.assertEqual(second.as_dict()["artifacts_stored"], 0)
+        self.assertEqual(second.as_dict()["pages_ok"], 3)
 
     def test_cancel_event_stops_the_loop(self) -> None:
         import threading as th
