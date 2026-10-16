@@ -77,6 +77,14 @@ DEFAULT_CONFIG: Mapping[str, Any] = MappingProxyType(
         # The last ladder step is AI-mediated (Gemini search asked for the
         # page's content, cited and labeled via="ai-search"). Needs a session.
         "smart_fetch_ai": True,
+        # Optional browser-render rung in the smart-fetch ladder (#14): a
+        # headless Chromium render through Playwright, for pages whose text
+        # only exists after JavaScript. OFF by default -- a browser launch
+        # costs seconds and is an explicit choice, never a silent fallback.
+        # When on, the rung sits between the reader and the Internet Archive
+        # (a fresh render beats an old snapshot) and is a plain headless
+        # browser: SSRF-guarded per request, no stealth, NON_GOALS hold.
+        "smart_fetch_browser_render": False,
         # Optional bearer key for the server's own job/result/artifact REST API
         # and the MCP adapter. None keeps the loopback-only, unauthenticated
         # behavior; a non-None value makes those endpoints demand
@@ -88,6 +96,12 @@ DEFAULT_CONFIG: Mapping[str, Any] = MappingProxyType(
         # from well-reputed IPs; datacenter IPs get 401 and must authenticate.
         # Sent ONLY to r.jina.ai, only by the smart-fetch ladder.
         "reader_api_key": "",
+        # Ceiling for batch-scrape concurrency (#15): ``freegem scrape``'s
+        # --concurrency is clamped to this before the bounded pool is built.
+        # The old code hard-clamped to 16 silently; the config key makes the
+        # ceiling explicit and raisable, and a clamped request says so on
+        # stderr (stdout stays pipeline-safe). Floor 1, whatever the value.
+        "batch_max_concurrency": 16,
         # Bounded background-job execution (2.9): fixed worker pool, bounded
         # pending queue (saturation answers HTTP 429), per-job execution
         # timeout with a watchdog, capped retries, retention window.
@@ -121,6 +135,7 @@ _INT_FIELDS = frozenset(
         "request_timeout_sec",
         "research_concurrency",
         "robots_cache_ttl_sec",
+        "batch_max_concurrency",
         "job_max_workers",
         "job_max_pending",
         "job_timeout_sec",
@@ -129,7 +144,14 @@ _INT_FIELDS = frozenset(
 )
 _FLOAT_FIELDS = frozenset({"request_queue_wait_sec"})
 _BOOL_FIELDS = frozenset(
-    {"temporary_chats", "log_requests", "research_evidence", "smart_fetch", "smart_fetch_ai"}
+    {
+        "temporary_chats",
+        "log_requests",
+        "research_evidence",
+        "smart_fetch",
+        "smart_fetch_ai",
+        "smart_fetch_browser_render",
+    }
 )
 _STR_FIELDS = frozenset(
     {
@@ -240,12 +262,14 @@ class BridgeConfig:
     log_requests: bool = DEFAULT_CONFIG["log_requests"]
     research_concurrency: int = DEFAULT_CONFIG["research_concurrency"]
     robots_cache_ttl_sec: int = DEFAULT_CONFIG["robots_cache_ttl_sec"]
+    batch_max_concurrency: int = DEFAULT_CONFIG["batch_max_concurrency"]
     request_queue_wait_sec: float = DEFAULT_CONFIG["request_queue_wait_sec"]
     research_evidence: bool = DEFAULT_CONFIG["research_evidence"]
     discover_wiki: str = DEFAULT_CONFIG["discover_wiki"]
     discover_backend: str = DEFAULT_CONFIG["discover_backend"]
     smart_fetch: bool = DEFAULT_CONFIG["smart_fetch"]
     smart_fetch_ai: bool = DEFAULT_CONFIG["smart_fetch_ai"]
+    smart_fetch_browser_render: bool = DEFAULT_CONFIG["smart_fetch_browser_render"]
     api_key: str | None = DEFAULT_CONFIG["api_key"]
     brave_api_key: str = DEFAULT_CONFIG["brave_api_key"]
     reader_api_key: str = DEFAULT_CONFIG["reader_api_key"]
@@ -323,12 +347,14 @@ class BridgeConfig:
             "log_requests": self.log_requests,
             "research_concurrency": self.research_concurrency,
             "robots_cache_ttl_sec": self.robots_cache_ttl_sec,
+            "batch_max_concurrency": self.batch_max_concurrency,
             "request_queue_wait_sec": self.request_queue_wait_sec,
             "research_evidence": self.research_evidence,
             "discover_wiki": self.discover_wiki,
             "discover_backend": self.discover_backend,
             "smart_fetch": self.smart_fetch,
             "smart_fetch_ai": self.smart_fetch_ai,
+            "smart_fetch_browser_render": self.smart_fetch_browser_render,
             # Booleans and paths only; never the token itself.
             "xsrf_token_set": bool(self.xsrf_token),
             "api_key_set": bool(self.api_key),

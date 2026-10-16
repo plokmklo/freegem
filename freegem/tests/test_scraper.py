@@ -1238,15 +1238,36 @@ class BatchScrapeTests(_FakeSiteTestCase):
         return patcher, seen
 
     def test_pool_clamps_request_over_sixteen(self) -> None:
-        """--concurrency 20 must build a 16-worker pool (the documented cap)."""
+        """--concurrency 20 must build a 16-worker pool (the documented cap)
+        and say so once on stderr (#15)."""
         from freegem.web_scraper import scrape_many
 
         urls = [f"{self.base}/page"] * 40
         patcher, seen = self._record_pool()
-        with patcher:
+        with patcher, redirect_stderr(io.StringIO()) as err:
             items = scrape_many(self.cfg, urls, max_chars=200, concurrency=20, smart=False)
         self.assertEqual(seen, [16])
+        self.assertEqual(err.getvalue().count("clamped to 16 (batch_max_concurrency)"), 1)
         self.assertEqual([item.url for item in items], urls)
+        self.assertTrue(all(item.ok for item in items))
+
+    def test_pool_ceiling_is_config_driven(self) -> None:
+        """(#15) batch_max_concurrency raises the ceiling: 20 workers with the
+        cap at 32, and no clamp warning inside the raised bounds."""
+        from freegem.web_scraper import scrape_many
+
+        urls = [f"{self.base}/page"] * 40
+        patcher, seen = self._record_pool()
+        with patcher, redirect_stderr(io.StringIO()) as err:
+            items = scrape_many(
+                self.cfg.replace(batch_max_concurrency=32),
+                urls,
+                max_chars=200,
+                concurrency=20,
+                smart=False,
+            )
+        self.assertEqual(seen, [20])
+        self.assertEqual(err.getvalue(), "")
         self.assertTrue(all(item.ok for item in items))
 
     def test_pool_honors_request_within_bounds(self) -> None:

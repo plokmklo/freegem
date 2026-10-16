@@ -100,7 +100,8 @@ class MemoryTests(unittest.TestCase):
 
 
 class FallbackLadderTests(unittest.TestCase):
-    """fallback_scrape walks browser-headers -> reader -> wayback -> ai-search."""
+    """fallback_scrape walks browser-headers -> reader -> [browser-render,
+    when enabled] -> wayback -> ai-search."""
 
     def setUp(self) -> None:
         self.cfg = BridgeConfig(log_requests=False)
@@ -273,6 +274,7 @@ class FallbackLadderTests(unittest.TestCase):
         scripted = {
             "browser-headers": refusal,
             "reader": refusal,
+            "browser-render": ScrapeError("browser-render disabled (smart_fetch_browser_render=false)"),
             "wayback": refusal,
             "ai-search": no_session,
         }
@@ -537,6 +539,7 @@ class WaybackSnapshotTests(unittest.TestCase):
         scripted = {
             "browser-headers": refusal,
             "reader": refusal,
+            "browser-render": ScrapeError("browser-render disabled (smart_fetch_browser_render=false)"),
             "wayback": ScrapeError(
                 "wayback availability API returned a snapshot for a different page"
             ),
@@ -556,7 +559,10 @@ class WaybackSnapshotTests(unittest.TestCase):
             mock.patch("freegem.smart_fetch.time.sleep"),
         ):
             result = fallback_scrape(cfg, "https://w.example/", max_chars=100, first_error="403")
-        self.assertEqual(order, ["browser-headers", "reader", "wayback", "ai-search"])
+        self.assertEqual(
+            order,
+            ["browser-headers", "reader", "browser-render", "wayback", "ai-search"],
+        )
         self.assertEqual(result.text, "rescued after wayback")
 
 

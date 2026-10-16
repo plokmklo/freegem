@@ -349,6 +349,13 @@ def _collect_sources(
     ``skipped="total_budget"`` -- its characters never count. ``concurrency=1``
     reproduces the old strictly sequential behavior.
 
+    Caching (#21 residual): the shared cache is passed INTO ``scrape_page``,
+    which writes each entry ONCE with the FULL extraction; this loop's
+    fallback write only covers the paths ``scrape_page`` does not store
+    (in practice just the mocked scrape_page seam the tests drive) and
+    never overwrites a fresh entry -- a budget-cut view can no longer
+    poison the cache.
+
     Source order is the citation contract: ``sources`` (and therefore the
     ``[S1]..[Sn]`` numbering, the URL table, and the JSON schema) always
     follows the order the caller listed, whatever order the network answered.
@@ -367,8 +374,16 @@ def _collect_sources(
 
     def worker(url: str) -> Any:
         # Serialize per host; the pool only widens across distinct hosts.
+        # (#21 residual) The shared cache goes INTO scrape_page: it stores
+        # the FULL extraction once, and this caller's max_chars is a view.
         with host_lock[url]:
-            return scrape_page(cfg, url, max_chars=max_chars_per_page)
+            return scrape_page(
+                cfg,
+                url,
+                max_chars=max_chars_per_page,
+                cache=cache,
+                refresh=refresh,
+            )
 
     fetched = 0
     material: list[tuple[ResearchSource, str]] = []
@@ -398,7 +413,10 @@ def _collect_sources(
                 # a single monster page cannot eat earlier-listed sources.
                 allowance = min(max_chars_per_page, total_budget - fetched)
                 try:
-                    page = scrape_page(cfg, url, max_chars=allowance)
+                    # (#21 residual) The shared cache goes INTO scrape_page so
+                    # the entry is written ONCE, with the FULL extraction; the
+                    # allowance below is this caller's VIEW of it.
+                    page = scrape_page(cfg, url, max_chars=allowance, cache=cache, refresh=refresh)
                 except ScrapeError as exc:
                     source.error = str(exc)
                     sources[position] = source
@@ -412,8 +430,17 @@ def _collect_sources(
                 source.fetched_at = time.time()
                 source.last_modified = page.last_modified
                 text = page.text
+                # Fallback write, NOT a second poisoning writer: the real
+                # scrape_page stored the FULL extraction just now, and a
+                # refresh rewrite goes through scrape_page itself, so the
+                # only caller that reaches this write is one that bypassed
+                # it (the mocked scrape_page seam the tests drive). An entry
+                # whose text already carries our view as a prefix holds the
+                # full extraction -- a budget-cut view must not clobber it.
                 if cache is not None:
-                    cache.put(url, page.title, page.text, page.last_modified)
+                    stored = cache.get(url)
+                    if stored is None or not stored["text"].startswith(page.text):
+                        cache.put(url, page.title, page.text, page.last_modified)
             fetched += source.chars
             sources[position] = source
             material.append((source, text))
@@ -491,8 +518,15 @@ def _collect_sources(
             source.quality = extraction_quality(text)
             source.fetched_at = time.time()
             source.last_modified = page.last_modified
+            # (#21 residual) Same fallback contract as the sequential path:
+            # scrape_page wrote the FULL text; this write only covers the
+            # paths that bypass it (the mocked seam), and a stored entry
+            # that already contains our (possibly budget-cut) text as a
+            # prefix keeps its full extraction.
             if cache is not None:
-                cache.put(urls[position], page.title, text, page.last_modified)
+                stored = cache.get(urls[position])
+                if stored is None or not stored["text"].startswith(text):
+                    cache.put(urls[position], page.title, text, page.last_modified)
             fetched += source.chars
             sources[position] = source
             material.append((source, text))

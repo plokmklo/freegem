@@ -32,6 +32,7 @@ from __future__ import annotations
 import contextlib
 import json
 import re
+import sys
 import threading
 import time
 import urllib.error
@@ -662,6 +663,248 @@ def _dedupe_links(links: list[tuple[str, str]], cap: int = 200) -> list[tuple[st
     return out
 
 
+# ─── tag-level content selection (#29) ────────────────────────────────────────
+#
+# ``include_tags`` / ``exclude_tags`` mirror the Firecrawl semantics: include
+# restricts extraction to the UNION of the regions matching the selectors,
+# exclude removes the matched elements before extraction. Both run on the raw
+# HTML, before the ordinary extractor, so the existing skip/block machinery
+# (scripts, styles, nav) composes on top unchanged.
+#
+# Selector support is the simple, useful subset -- ``tag``, ``.class``,
+# ``#id``, ``tag.class#id`` (multiple classes/ids compounds), and comma
+# alternatives ("h1, h2"). A stdlib-only project has no CSS engine; anything
+# richer (combinators, attribute/pseudo selectors) is REJECTED loudly rather
+# than silently ignored, because a filter the user asked for must never
+# no-op quietly.
+
+#: One parsed simple selector: (tag-or-""-or-"*", required classes, required id).
+_Selector = tuple[str, frozenset[str], str]
+
+_NO_TAGS: frozenset[str] = frozenset()
+
+_SELECTOR_TOKEN_RE = re.compile(r"([.#]?)([^.#]+)")
+_SELECTOR_NAME_RE = re.compile(r"\*|[a-zA-Z][a-zA-Z0-9_-]*")
+_SELECTOR_CHARS_RE = re.compile(r"[\w\-.#*]+")
+
+
+def _parse_simple_selector(part: str) -> _Selector | None:
+    """One compound selector parsed, or None when it is outside the subset."""
+    part = part.strip()
+    if not part or not _SELECTOR_CHARS_RE.fullmatch(part):
+        return None
+    tag = ""
+    ident = ""
+    classes: set[str] = set()
+    for prefix, name in _SELECTOR_TOKEN_RE.findall(part):
+        if not _SELECTOR_NAME_RE.fullmatch(name):
+            return None
+        if prefix == "":
+            if tag:
+                return None  # two bare names is not a compound selector
+            tag = name.lower()
+        elif prefix == ".":
+            classes.add(name)
+        else:  # "#"
+            if ident:
+                return None
+            ident = name
+    return (tag, frozenset(classes), ident)
+
+
+def _parse_selectors(entries: list[str]) -> list[_Selector]:
+    """Parse include/exclude entries; a comma splits alternative selectors."""
+    selectors: list[_Selector] = []
+    for entry in entries:
+        for part in str(entry).split(","):
+            if not part.strip():
+                continue
+            parsed = _parse_simple_selector(part)
+            if parsed is None:
+                raise ValueError(
+                    f"unsupported selector {part.strip()!r}: only simple tag, "
+                    ".class, #id, and tag.class#id selectors are supported"
+                )
+            selectors.append(parsed)
+    if not selectors:
+        raise ValueError("selector list is empty")
+    return selectors
+
+
+def _selector_match(tag: str, attrs: dict[str, str | None], selector: _Selector) -> bool:
+    want_tag, want_classes, want_id = selector
+    if want_tag not in ("", "*") and tag != want_tag:
+        return False
+    if want_id and attrs.get("id") != want_id:
+        return False
+    if want_classes:
+        have = set(str(attrs.get("class") or "").split())
+        if not want_classes.issubset(have):
+            return False
+    return True
+
+
+#: Lenient-HTML approximation of implied end tags: a start tag in the value
+#: set implicitly closes an open element keyed here. Without this, the
+#: unclosed ``<p>`` / ``<li>`` / table cells that real-world markup is full
+#: of would swallow everything up to the next explicit end tag.
+_IMPLIED_END_BY_START: dict[str, frozenset[str]] = {
+    "li": frozenset({"li"}),
+    "dt": frozenset({"dt", "dd"}),
+    "dd": frozenset({"dt", "dd"}),
+    "td": frozenset({"td", "th", "tr"}),
+    "th": frozenset({"td", "th", "tr"}),
+    "tr": frozenset({"tr"}),
+    "thead": frozenset({"tbody", "tfoot"}),
+    "tbody": frozenset({"tbody", "tfoot"}),
+    "tfoot": frozenset({"tbody"}),
+    "option": frozenset({"option", "optgroup"}),
+    "optgroup": frozenset({"optgroup"}),
+    "p": frozenset(_BLOCK_TAGS) - {"br"},
+}
+
+
+class _RegionCollector(HTMLParser):
+    """(start, end) source spans of every element matching the selectors (#29).
+
+    Offsets index the exact string fed in: ``getpos()`` marks the '<' of each
+    tag, and a region ends after its end tag's '>'. Lenient by design (the
+    stdlib parser never raises on bad markup): an unclosed matching element
+    extends to the end of the document, mis-nested end tags close the nearest
+    open match, and the common implied-end cases above keep sibling regions
+    from fusing into one.
+    """
+
+    def __init__(self, html: str, selectors: list[_Selector]) -> None:
+        super().__init__(convert_charrefs=True)
+        self._html = html
+        self._selectors = selectors
+        self._line_starts = [0]
+        for match in re.finditer("\n", html):
+            self._line_starts.append(match.end())
+        self.spans: list[tuple[int, int]] = []
+        # (tag, offset of '<', matched?) for every currently open element.
+        self._open: list[tuple[str, int, bool]] = []
+
+    def _offset(self, pos: tuple[int, int]) -> int:
+        line, col = pos
+        if 1 <= line <= len(self._line_starts):
+            return min(self._line_starts[line - 1] + col, len(self._html))
+        return len(self._html)
+
+    def _tag_end(self, start: int) -> int:
+        gt = self._html.find(">", start)
+        return len(self._html) if gt == -1 else gt + 1
+
+    def _matches(self, tag: str, attrs: list[tuple[str, str | None]]) -> bool:
+        attributes = dict(attrs)
+        return any(_selector_match(tag, attributes, sel) for sel in self._selectors)
+
+    def _imply_end(self, incoming: str, boundary: int) -> None:
+        while self._open:
+            tag, start, matched = self._open[-1]
+            if incoming not in _IMPLIED_END_BY_START.get(tag, _NO_TAGS):
+                break
+            self._open.pop()
+            if matched:
+                self.spans.append((start, boundary))
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        start = self._offset(self.getpos())
+        self._imply_end(tag, start)
+        matched = self._matches(tag, attrs)
+        if tag in _VOID_TAGS:
+            # Void elements have no end tag event; the span is the tag alone.
+            if matched:
+                self.spans.append((start, self._tag_end(start)))
+            return
+        self._open.append((tag, start, matched))
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        start = self._offset(self.getpos())
+        self._imply_end(tag, start)
+        if self._matches(tag, attrs):
+            self.spans.append((start, self._tag_end(start)))
+
+    def handle_endtag(self, tag: str) -> None:
+        end = self._tag_end(self._offset(self.getpos()))
+        for depth in range(len(self._open) - 1, -1, -1):
+            if self._open[depth][0] == tag:
+                # Close this element and every unclosed one above it (the
+                # mis-nesting case); the implicitly closed siblings get the
+                # same end offset, which the merge below absorbs.
+                for _, start, matched in reversed(self._open[depth:]):
+                    if matched:
+                        self.spans.append((start, end))
+                del self._open[depth:]
+                return
+
+    def finish(self) -> list[tuple[int, int]]:
+        """Merged, document-order spans; still-open elements close at EOF."""
+        self.close()
+        while self._open:
+            _, start, matched = self._open.pop()
+            if matched:
+                self.spans.append((start, len(self._html)))
+        return _merge_spans(self.spans)
+
+
+def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Union of the spans: nested and overlapping regions fuse, sorted."""
+    merged: list[list[int]] = []
+    for start, end in sorted(spans):
+        if end <= start:
+            continue
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [(start, end) for start, end in merged]
+
+
+def _select_spans(html: str, selectors: list[_Selector]) -> list[tuple[int, int]]:
+    collector = _RegionCollector(html, selectors)
+    with contextlib.suppress(Exception):  # malformed markup: keep what was found
+        collector.feed(html)
+    return collector.finish()
+
+
+def _remove_spans(html: str, spans: list[tuple[int, int]]) -> str:
+    parts: list[str] = []
+    cursor = 0
+    for start, end in spans:
+        parts.append(html[cursor:start])
+        cursor = max(cursor, end)
+    parts.append(html[cursor:])
+    return "".join(parts)
+
+
+def _apply_tag_selection(
+    cfg: BridgeConfig,
+    url: str,
+    html: str,
+    include_tags: list[str] | None,
+    exclude_tags: list[str] | None,
+) -> str:
+    """The document as the tag filters reshape it (#29).
+
+    include first -- extraction will consider ONLY the union of the matched
+    regions -- then exclude, which removes the matched elements from what
+    remains: an exclusion INSIDE an included region still applies, and an
+    exclusion can never resurrect content outside the inclusion.
+    """
+    selected = html
+    if include_tags:
+        spans = _select_spans(selected, _parse_selectors(include_tags))
+        selected = "".join(selected[start:end] for start, end in spans)
+    if exclude_tags:
+        spans = _select_spans(selected, _parse_selectors(exclude_tags))
+        selected = _remove_spans(selected, spans)
+    if not selected.strip():
+        log(cfg, f"tag selection matched nothing on {url!r}; extraction will be empty")
+    return selected
+
+
 # ─── source adapters ────────────────────────────────────────────────────
 #
 # Some sites offer a SUPPORTED, structured interface to their content.
@@ -884,6 +1127,8 @@ def scrape_page(
     max_chars: int = DEFAULT_MAX_CHARS,
     ignore_robots: bool = True,
     headers_override: dict[str, str] | None = None,
+    include_tags: list[str] | None = None,
+    exclude_tags: list[str] | None = None,
     cache: Any | None = None,
     refresh: bool = False,
     smart: bool = False,
@@ -895,6 +1140,15 @@ def scrape_page(
     attacker-controlled text from the same origin as the pages being read and
     a documented prompt-injection/policy-poisoning vector against scrapers
     and AI agents. Pass ``ignore_robots=False`` to opt back into honoring it.
+
+    ``include_tags`` / ``exclude_tags`` (#29) are CSS-selector lists in the
+    simple forms ``tag``, ``.class``, ``#id``, ``tag.class#id`` and comma
+    alternatives. include restricts extraction to the UNION of the matched
+    regions; exclude removes the matched elements first (so an exclusion
+    inside an included region still applies). Both shape the direct HTML
+    path only and compose with the ordinary skip/block extraction; a
+    tag-selected result is caller-specific, so it is never read from nor
+    written to ``cache`` (cache entries hold full-page extractions, #21).
 
     ``cache`` (a :class:`~freegem.web_research.ResearchCache`) makes the
     result reusable across research AND one-shot scrapes: a hit short-circuits
@@ -919,7 +1173,8 @@ def scrape_page(
     if not ignore_robots:
         _check_robots(cfg, url)
 
-    if cache is not None and not refresh:
+    tag_selection = bool(include_tags or exclude_tags)
+    if cache is not None and not refresh and not tag_selection:
         cached = cache.get(url)
         if cached is not None:
             text = cached["text"]
@@ -942,6 +1197,8 @@ def scrape_page(
             cfg,
             url,
             headers_override=headers_override,
+            include_tags=include_tags,
+            exclude_tags=exclude_tags,
         )
     except ScrapeError as exc:
         if not smart:
@@ -983,10 +1240,11 @@ def scrape_page(
                 progress=progress,
             )
 
-    if cache is not None:
+    if cache is not None and not tag_selection:
         # (#21) Cache the FULL extraction, before any per-caller cut: a
         # caller with a small --max-chars must not poison the entry for
-        # callers with a bigger budget.
+        # callers with a bigger budget. A tag-selected view (#29) is
+        # caller-specific and never enters the cache.
         cache.put(url, result.title, result.text, result.last_modified)
     view, truncated = _caller_view(result.text, max_chars)
     if not truncated:
@@ -999,6 +1257,8 @@ def _scrape_page_uncached(
     url: str,
     *,
     headers_override: dict[str, str] | None,
+    include_tags: list[str] | None = None,
+    exclude_tags: list[str] | None = None,
 ) -> ScrapeResult:
     """The direct fetch path: adapter first, then guarded HTML.
 
@@ -1020,6 +1280,14 @@ def _scrape_page_uncached(
     last_modified = response.headers.get("Last-Modified")
 
     html = _decode_body(_read_capped(response), content_type)
+    title_source = html
+
+    # (#29) Tag-level content selection, before any extraction: include
+    # restricts the document to the union of the selected regions, exclude
+    # drops the matched elements. Both None leaves ``html`` untouched, so
+    # the default path stays byte-identical to the pre-#29 pipeline.
+    if include_tags or exclude_tags:
+        html = _apply_tag_selection(cfg, url, html, include_tags, exclude_tags)
 
     # Main-content anchoring: when the page marks a content region
     # (MediaWiki's mw-content-text / bodyContent / mw-parser-output, a
@@ -1027,8 +1295,10 @@ def _scrape_page_uncached(
     # chrome-heavy pages -- Wikipedia's interlanguage list alone is longer
     # than most articles -- the surrounding junk otherwise drowns the text.
     # Falls back to the whole page when the region yields too little.
+    # With include_tags (#29) the caller's selection IS the content region,
+    # so anchoring inside it would second-guess an explicit request.
     extractor: _TextExtractor | None = None
-    region = _main_region(html)
+    region = None if include_tags else _main_region(html)
     if region is not None:
         start, end = region
         sliced = _parse_html(cfg, url, html[start:end])
@@ -1039,6 +1309,11 @@ def _scrape_page_uncached(
                 extractor.title = _extract_title_fallback(html)
     if extractor is None:
         extractor = _parse_html(cfg, url, html)
+    if (include_tags or exclude_tags) and not extractor.title:
+        # A selection may have cut <head>: recover the title from the
+        # unfiltered document. No-op when the extractor already found one,
+        # and gated on selection so the default path is untouched.
+        extractor.title = _extract_title_fallback(title_source)
 
     text = _clean_text(extractor.text_parts)
     return ScrapeResult(
@@ -1152,6 +1427,30 @@ _BATCH_RESULT_TIMEOUT_SEC = 300.0
 _SCRAPE_MANY_DELAY_SEC = 0.2
 
 
+#: Default ceiling for one batch's worker pool when the config key is
+#: missing (a BridgeConfig always carries it; the fallback only protects
+#: against exotic configs). Mirrors DEFAULT_CONFIG["batch_max_concurrency"].
+_DEFAULT_BATCH_CONCURRENCY_CAP = 16
+
+
+def _clamp_batch_concurrency(cfg: BridgeConfig, requested: int) -> int:
+    """The batch pool's width, honoring the ``batch_max_concurrency`` ceiling (#15).
+
+    The old code hard-clamped to 16 silently -- a caller asking for 20 got
+    16 and never knew. The ceiling is now config-driven, and a clamped
+    request is announced EXACTLY once on stderr: stdout carries jsonl rows
+    and must stay pipeline-safe, while the warning belongs in the operator's
+    terminal. Within bounds (or below the floor of 1) nothing is printed.
+    """
+    cap = max(1, int(getattr(cfg, "batch_max_concurrency", _DEFAULT_BATCH_CONCURRENCY_CAP)))
+    if requested > cap:
+        print(
+            f"scrape: requested concurrency {requested} clamped to {cap} (batch_max_concurrency)",
+            file=sys.stderr,
+        )
+    return min(max(1, requested), cap)
+
+
 def _host_locks_for(urls: list[str]) -> dict[str, threading.Lock]:
     locks: dict[str, threading.Lock] = {}
     for url in urls:
@@ -1211,12 +1510,16 @@ def scrape_many(
     across distinct hosts, per-host locks serializing same-origin fetches,
     one failed URL recorded (with its error) instead of killing the batch.
     Results keep the caller's URL order regardless of completion order.
+
+    ``concurrency`` is clamped to the ``batch_max_concurrency`` config
+    ceiling (#15, default 16); a clamped request is announced once on
+    stderr, and the effective width never drops below 1.
     """
     if len(urls) > _SCRAPE_MANY_MAX:
         raise ValueError(
             f"batch scrape is capped at {_SCRAPE_MANY_MAX} URLs per run; got {len(urls)}"
         )
-    concurrency = max(1, min(concurrency, 16))
+    concurrency = _clamp_batch_concurrency(cfg, concurrency)
     locks = _host_locks_for(urls)
     items: list[BatchItem | None] = [None] * len(urls)
 
