@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
+import time
 import unittest
 from collections.abc import Mapping
 from pathlib import Path
@@ -197,9 +199,7 @@ class FallbackLadderTests(unittest.TestCase):
         self.assertEqual(result1.text, "the article body")
         self.assertEqual(first_order, ["browser-headers", "reader"])
         # Written to DISK by fetch 1 — fetch 2 reads it back with no seeding.
-        self.assertEqual(
-            StrategyMemory(default_memory_path()).get("remembered.example"), "reader"
-        )
+        self.assertEqual(StrategyMemory(default_memory_path()).get("remembered.example"), "reader")
         with (
             mock.patch(
                 "freegem.smart_fetch._try_strategy",
@@ -306,6 +306,36 @@ class FallbackLadderTests(unittest.TestCase):
             _ai_read(cfg, "https://x.example/", 1000)
         self.assertIn("disabled", str(caught.exception))
 
+    def test_ai_search_rung_is_time_bounded(self) -> None:
+        """(#25) A wedged generation cannot hold the rung: _ai_read raises an
+        honest ScrapeError once the bound lapses, without waiting for the
+        model call to finish."""
+        from freegem.smart_fetch import _ai_read
+
+        def wedged_run_tool(cfg, name, kwargs):
+            time.sleep(1.0)
+            return "a late answer that will be discarded"
+
+        with (
+            mock.patch("freegem.smart_fetch._AI_SEARCH_TIMEOUT_SEC", 0.1),
+            mock.patch("freegem.mcp_tools.run_tool", side_effect=wedged_run_tool),
+        ):
+            started = time.monotonic()
+            with self.assertRaises(ScrapeError) as caught:
+                _ai_read(BridgeConfig(log_requests=False), "https://x.example/", 1000)
+        self.assertLess(time.monotonic() - started, 0.9, "the bound held")
+        self.assertIn("timed out", str(caught.exception))
+
+    def test_ai_search_returns_within_the_bound(self) -> None:
+        """(#25) The bound does not disturb a healthy rung."""
+        from freegem.smart_fetch import _ai_read
+
+        with mock.patch("freegem.mcp_tools.run_tool", return_value="word " * 30):
+            result = _ai_read(BridgeConfig(log_requests=False), "https://x.example/", 1000)
+        self.assertEqual(result.via, "ai-search")
+        self.assertIn("word", result.text)
+        self.assertFalse(result.truncated)
+
     def test_progress_receives_ladder_steps(self) -> None:
         events: list[str] = []
         ok_page = ScrapeResult(url="u", title="T", text="content")
@@ -324,6 +354,47 @@ class FallbackLadderTests(unittest.TestCase):
         self.assertTrue(any("browser-headers" in event for event in events))
         self.assertTrue(any("read" in event for event in events))
 
+    def test_ladder_budget_skips_rungs_and_records_it(self) -> None:
+        """(#25) Past the wall-clock budget the remaining rungs are skipped
+        and the taxonomy says so, instead of stacking minutes of silence."""
+        order: list[str] = []
+        scripted = {name: ScrapeError("HTTP 403") for name in STRATEGIES}
+        with (
+            mock.patch("freegem.smart_fetch._LADDER_BUDGET_SEC", 0.0),
+            mock.patch(
+                "freegem.smart_fetch._try_strategy", side_effect=self._ladder(scripted, order)
+            ),
+            mock.patch("freegem.smart_fetch.time.sleep"),
+        ):
+            with self.assertRaises(ScrapeError) as caught:
+                fallback_scrape(
+                    self.cfg, "https://slow.example/", max_chars=100, first_error="HTTP 403"
+                )
+        self.assertEqual(order, [], "no rung may run once the budget is gone")
+        message = str(caught.exception)
+        self.assertEqual(message.count("ladder budget was exhausted"), len(STRATEGIES))
+        self.assertIn("skipped", message)
+
+    def test_healthy_ladder_still_runs_inside_the_budget(self) -> None:
+        """(#25) The default budget never clips a normal two-rung walk."""
+        order: list[str] = []
+        ok_page = ScrapeResult(url="u", title="T", text="real content")
+        scripted = {
+            "browser-headers": ScrapeError("HTTP 403"),
+            "reader": ok_page,
+        }
+        with (
+            mock.patch(
+                "freegem.smart_fetch._try_strategy", side_effect=self._ladder(scripted, order)
+            ),
+            mock.patch("freegem.smart_fetch.time.sleep"),
+        ):
+            result = fallback_scrape(
+                self.cfg, "https://ok.example/", max_chars=100, first_error="HTTP 403"
+            )
+        self.assertEqual(order, ["browser-headers", "reader"])
+        self.assertEqual(result.text, "real content")
+
 
 class ReaderParseTests(unittest.TestCase):
     def test_reader_envelope_is_unwrapped(self) -> None:
@@ -339,7 +410,7 @@ class ReaderParseTests(unittest.TestCase):
                 "Body of the article.\n"
             ),
         )
-        parsed = _parse_reader_output(raw, "https://news.example/a")
+        parsed = _parse_reader_output(raw, "https://news.example/a", 1000)
         self.assertEqual(parsed.url, "https://news.example/a")
         self.assertEqual(parsed.title, "The Headline")
         self.assertEqual(parsed.text, "Body of the article.")
@@ -349,8 +420,144 @@ class ReaderParseTests(unittest.TestCase):
         from freegem.smart_fetch import _parse_reader_output
 
         raw = ScrapeResult(url="https://r.jina.ai/x", title="", text="plain body")
-        parsed = _parse_reader_output(raw, "https://news.example/a")
+        parsed = _parse_reader_output(raw, "https://news.example/a", 1000)
         self.assertEqual(parsed.text, "plain body")
+
+    def test_reader_output_retruncated_to_caller_budget(self) -> None:
+        """(#22) The rung fetches with 2x headroom but returns the caller's cut."""
+        from freegem.smart_fetch import _parse_reader_output
+
+        body = "word " * 200  # 1000 chars of body behind the envelope
+        raw_text = f"Title: T\nURL Source: https://news.example/a\nMarkdown Content:\n{body}"
+        raw = ScrapeResult(url="https://r.jina.ai/x", title="T", text=raw_text)
+        parsed = _parse_reader_output(raw, "https://news.example/a", 250)
+        self.assertLessEqual(len(parsed.text), 250)
+        self.assertTrue(parsed.truncated, "a cut at the caller's budget must be flagged")
+
+    def test_reader_truncated_flag_reports_caller_budget_not_internal(self) -> None:
+        """(#22) A body that FITS the caller's budget is not flagged as cut,
+        even when the internal 2x-budget fetch flagged itself truncated."""
+        from freegem.smart_fetch import _parse_reader_output
+
+        raw = ScrapeResult(
+            url="https://r.jina.ai/x",
+            title="",
+            text="Title: T\nURL Source: u\nMarkdown Content:\nshort body",
+            truncated=True,  # the INTERNAL fetch hit its own 2x cap
+        )
+        parsed = _parse_reader_output(raw, "https://news.example/a", 2000)
+        self.assertEqual(parsed.text, "short body")
+        self.assertFalse(parsed.truncated, "the flag answers to the caller's budget")
+
+    def test_reader_rung_requests_headroom_and_returns_caller_cut(self) -> None:
+        """(#22) End to end through _try_strategy: 2x fetch budget in, caller
+        budget out."""
+        from freegem.smart_fetch import _try_strategy
+
+        body = "word " * 200
+        envelope = f"Title: T\nURL Source: https://news.example/a\nMarkdown Content:\n{body}"
+
+        def fake_scrape_page(cfg, url, **kwargs):
+            # The reader rung must ask for parse headroom, not caller budget.
+            assert kwargs["max_chars"] == 500, "reader rung fetches with 2x headroom"
+            return ScrapeResult(url=url, title="T", text=envelope)
+
+        with mock.patch("freegem.smart_fetch.scrape_page", side_effect=fake_scrape_page):
+            result = _try_strategy(
+                BridgeConfig(log_requests=False), "https://news.example/a", "reader", 250, True
+            )
+        self.assertEqual(result.url, "https://news.example/a")
+        self.assertLessEqual(len(result.text), 250)
+        self.assertTrue(result.truncated)
+
+
+class WaybackSnapshotTests(unittest.TestCase):
+    """(#23) The availability API's snapshot must be FOR the requested page."""
+
+    def _snapshot(self, snapshot_url: str) -> Any:
+        from freegem.smart_fetch import _wayback_snapshot
+
+        body = json.dumps({"archived_snapshots": {"closest": {"url": snapshot_url}}}).encode()
+        with mock.patch("freegem.web_scraper._fetch", return_value=_FakeResponse(body)):
+            return _wayback_snapshot(BridgeConfig(log_requests=False), "https://news.example/a")
+
+    def test_matching_snapshot_returned_and_upgraded_to_https(self) -> None:
+        out = self._snapshot("http://web.archive.org/web/20240101000000/https://news.example/a")
+        self.assertEqual(out, "https://web.archive.org/web/20240101000000/https://news.example/a")
+
+    def test_matching_snapshot_with_id_modifier(self) -> None:
+        out = self._snapshot("https://web.archive.org/web/20240101000000id_/https://news.example/a")
+        self.assertIn("/a", out)
+
+    def test_bare_domain_snapshot_matches(self) -> None:
+        from freegem.smart_fetch import _wayback_snapshot
+
+        # Bare domains: /web/<stamp>/https://example.com (no path) and the
+        # trailing-slash variant must both verify.
+        for snap in (
+            "https://web.archive.org/web/20240101/https://example.com",
+            "https://web.archive.org/web/20240101/https://example.com/",
+        ):
+            body = json.dumps({"archived_snapshots": {"closest": {"url": snap}}}).encode()
+            with mock.patch("freegem.web_scraper._fetch", return_value=_FakeResponse(body)):
+                out = _wayback_snapshot(BridgeConfig(log_requests=False), "https://example.com")
+            self.assertEqual(out, snap)
+
+    def test_snapshot_for_a_different_host_is_rejected(self) -> None:
+        with self.assertRaises(ScrapeError) as caught:
+            self._snapshot("https://web.archive.org/web/20240101000000/https://OTHER.example/a")
+        self.assertIn("different page", str(caught.exception))
+
+    def test_snapshot_for_a_different_path_is_rejected(self) -> None:
+        with self.assertRaises(ScrapeError) as caught:
+            self._snapshot("https://web.archive.org/web/20240101000000/https://news.example/OTHER")
+        self.assertIn("different page", str(caught.exception))
+
+    def test_snapshot_without_a_web_prefix_is_rejected(self) -> None:
+        with self.assertRaises(ScrapeError) as caught:
+            self._snapshot("https://elsewhere.example/mirror/news.example/a")
+        self.assertIn("different page", str(caught.exception))
+
+    def test_rejection_engages_the_ladder(self) -> None:
+        """(#23) The mismatch refusal classifies as the site's failure, not
+        ours, so the ladder records it and moves on to the next rung."""
+        from freegem.smart_fetch import classify_failure
+
+        kind = classify_failure(
+            "wayback availability API returned a snapshot for a different page than 'u'"
+        )
+        self.assertEqual(kind, "network")
+
+    def test_mismatched_snapshot_continues_to_the_next_rung(self) -> None:
+        """(#23) End to end: wayback refuses the wrong-page snapshot, the
+        ladder proceeds and the next rung rescues the fetch."""
+        order: list[str] = []
+        refusal = ScrapeError("HTTP 403 fetching 'x'")
+        ok_page = ScrapeResult(url="u", title="T", text="rescued after wayback")
+        scripted = {
+            "browser-headers": refusal,
+            "reader": refusal,
+            "wayback": ScrapeError(
+                "wayback availability API returned a snapshot for a different page"
+            ),
+            "ai-search": ok_page,
+        }
+
+        def try_strategy(cfg, url, strategy, max_chars, ignore_robots):
+            order.append(strategy)
+            outcome = scripted[strategy]
+            if isinstance(outcome, ScrapeError):
+                raise outcome
+            return outcome
+
+        cfg = BridgeConfig(log_requests=False)
+        with (
+            mock.patch("freegem.smart_fetch._try_strategy", side_effect=try_strategy),
+            mock.patch("freegem.smart_fetch.time.sleep"),
+        ):
+            result = fallback_scrape(cfg, "https://w.example/", max_chars=100, first_error="403")
+        self.assertEqual(order, ["browser-headers", "reader", "wayback", "ai-search"])
+        self.assertEqual(result.text, "rescued after wayback")
 
 
 class SmartIntegrationTests(unittest.TestCase):
@@ -399,6 +606,48 @@ class SmartIntegrationTests(unittest.TestCase):
         ):
             with self.assertRaises(ScrapeError):
                 scrape_page(self.cfg, "https://blocked.example/")
+        self.assertFalse(fallback.called)
+
+    def test_challenge_shaped_direct_200_walks_the_ladder(self) -> None:
+        """(#12) A 200 that is really a bot wall is not a success."""
+        response = _FakeResponse(
+            b"<html><body><p>Just a moment... enable javascript and cookies</p></body></html>"
+        )
+        saved = ScrapeResult(url="u", title="T", text="rescued by the ladder")
+        with (
+            mock.patch("freegem.web_scraper._fetch", return_value=response),
+            mock.patch("freegem.smart_fetch.fallback_scrape", return_value=saved) as fallback,
+        ):
+            result = scrape_page(self.cfg, "https://cloudguarded.example/", smart=True)
+        self.assertEqual(result.text, "rescued by the ladder")
+        self.assertTrue(fallback.called)
+        self.assertIn("bot-challenge", fallback.call_args.kwargs["first_error"])
+
+    def test_long_page_mentioning_challenge_words_is_content(self) -> None:
+        """(#12) The challenge detector only fires on SHORT pages: an article
+        that quotes 'captcha' past the detector's length cap stays content."""
+        body = ("<p>" + "real article content " * 60 + "about the captcha economy</p>").encode()
+        response = _FakeResponse(b"<html><body>" + body + b"</body></html>")
+        with (
+            mock.patch("freegem.web_scraper._fetch", return_value=response),
+            mock.patch("freegem.smart_fetch.fallback_scrape") as fallback,
+        ):
+            result = scrape_page(self.cfg, "https://news.example/captcha-economy", smart=True)
+        self.assertIn("captcha economy", result.text)
+        self.assertFalse(fallback.called)
+
+    def test_challenge_check_only_when_smart(self) -> None:
+        """(#12) With the ladder off, a challenge 200 is returned as-is (the
+        caller asked for the honest direct path, not alternate reads)."""
+        response = _FakeResponse(
+            b"<html><body><p>Just a moment... verify you are human</p></body></html>"
+        )
+        with (
+            mock.patch("freegem.web_scraper._fetch", return_value=response),
+            mock.patch("freegem.smart_fetch.fallback_scrape") as fallback,
+        ):
+            result = scrape_page(self.cfg, "https://cloudguarded.example/", smart=False)
+        self.assertIn("Just a moment", result.text)
         self.assertFalse(fallback.called)
 
     def test_browser_headers_override_threaded_to_fetch(self) -> None:

@@ -22,6 +22,7 @@ import socket
 import ssl
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.parse
@@ -161,6 +162,10 @@ class _FakeSite(BaseHTTPRequestHandler):
                 + "</p></body></html>"
             )
             self._send(html.encode(), "text/html")
+            return
+        if path == "/empty":
+            # A 200 with no readable text at all: the JS-shell shape.
+            self._send(b"<html><head><title>Empty</title></head><body></body></html>", "text/html")
             return
         if path == "/page" or path == "/private-page":
             self._send(PAGE_HTML.encode(), "text/html; charset=utf-8")
@@ -1025,6 +1030,32 @@ class ExtractionQualityTests(unittest.TestCase):
         self.assertGreaterEqual(len(payload), 80)
         self.assertEqual(extraction_quality(payload), "nav_only")
 
+    def test_digit_heavy_real_content_is_ok(self) -> None:
+        """#24: a sports box score / timetable is digit-heavy REAL content.
+        The old letters-only prose ratio labeled it nav_only."""
+        box_score = (
+            "SCORES FROM LAST NIGHT\n"
+            "LIONS 102 34 12\nTIGERS 98 30 15\nBEARS 88 27 09\n"
+            "WOLVES 77 25 08\nHAWKS 74 22 11\nOTTERS 71 21 14\n"
+        )
+        self.assertGreaterEqual(len(box_score), 80)
+        self.assertEqual(extraction_quality(box_score), "ok")
+
+        itinerary = (
+            "DAY 1: Arrive Paris 09:15, transfer to hotel 11:00. "
+            "DAY 2: Louvre 09:00, Seine cruise 19:30. "
+            "DAY 3: Train to Lyon 07:45."
+        )
+        self.assertGreaterEqual(len(itinerary), 80)
+        self.assertEqual(extraction_quality(itinerary), "ok")
+
+    def test_pure_number_dump_is_still_nav_only(self) -> None:
+        """#24's escape hatch: digits count as prose, so an absolute letters
+        floor keeps a raw number dump from passing as content."""
+        dump = "1 2 3 4 5 6 7 8 9 0 " * 12
+        self.assertGreaterEqual(len(dump), 80)
+        self.assertEqual(extraction_quality(dump), "nav_only")
+
 
 class VoidElementSkipTests(unittest.TestCase):
     """A void <input> in a page header must not suppress the whole article.
@@ -1095,6 +1126,90 @@ class BatchScrapeTests(_FakeSiteTestCase):
 
         items = scrape_many(self.cfg, [f"{self.base}/no-such-page"], concurrency=1, smart=False)
         self.assertFalse(items[0].ok)
+
+    def test_zero_text_200_is_not_ok(self) -> None:
+        """(#11) A 200 whose extraction is empty is a failure with an honest
+        error, not an ok:true row with an empty text field."""
+        from freegem.web_scraper import scrape_many
+
+        items = scrape_many(
+            self.cfg,
+            [f"{self.base}/empty", f"{self.base}/page"],
+            concurrency=2,
+            smart=False,
+        )
+        self.assertFalse(items[0].ok)
+        self.assertIn("zero readable text", items[0].error)
+        row = items[0].as_dict()  # exactly what the jsonl writer emits
+        self.assertFalse(row["ok"])
+        self.assertIn("error", row)
+        self.assertNotIn("text", row)
+        self.assertTrue(items[1].ok)
+
+    def test_zero_text_200_fails_in_sequential_mode_too(self) -> None:
+        from freegem.web_scraper import scrape_many
+
+        items = scrape_many(self.cfg, [f"{self.base}/empty"], concurrency=1, smart=False)
+        self.assertFalse(items[0].ok)
+        self.assertIn("zero readable text", items[0].error)
+
+    # ── #25: the pool's result loop is bounded ───────────────────────────
+
+    @staticmethod
+    def _delayed_scrape(delay: float) -> Any:
+        """A scrape_page stand-in: 'slow' hosts stall, everything else is fine."""
+
+        def fake(cfg: Any, url: str, **_kwargs: Any) -> Any:
+            if "slow" in url:
+                time.sleep(delay)
+                return ScrapeResult(url=url, title="T", text="late but fine")
+            return ScrapeResult(url=url, title="T", text="fast page")
+
+        return fake
+
+    def test_batch_bound_holds_and_finished_work_is_harvested(self) -> None:
+        """(#25) One wedged item fails honestly at the bound; a sibling that
+        already FINISHED is still collected, and the call returns promptly."""
+        from freegem.web_scraper import scrape_many
+
+        with (
+            mock.patch("freegem.web_scraper._BATCH_RESULT_TIMEOUT_SEC", 0.2),
+            mock.patch("freegem.web_scraper.scrape_page", side_effect=self._delayed_scrape(1.0)),
+        ):
+            started = time.monotonic()
+            items = scrape_many(
+                self.cfg,
+                ["https://slow.example/a", "https://fast.example/b"],
+                concurrency=2,
+                smart=False,
+            )
+        self.assertLess(time.monotonic() - started, 0.9, "the bound held")
+        self.assertFalse(items[0].ok)
+        self.assertIn("timed out", items[0].error)
+        self.assertTrue(items[1].ok, "finished work is still harvested")
+        self.assertEqual(items[1].text, "fast page")
+
+    def test_batch_bound_abandons_uncollected_work(self) -> None:
+        """(#25) When the bound lapses, still-running siblings are abandoned
+        with an honest note instead of being waited on."""
+        from freegem.web_scraper import scrape_many
+
+        with (
+            mock.patch("freegem.web_scraper._BATCH_RESULT_TIMEOUT_SEC", 0.2),
+            mock.patch("freegem.web_scraper.scrape_page", side_effect=self._delayed_scrape(1.0)),
+        ):
+            started = time.monotonic()
+            items = scrape_many(
+                self.cfg,
+                ["https://slow.example/a", "https://slow.example/b"],
+                concurrency=2,
+                smart=False,
+            )
+        self.assertLess(time.monotonic() - started, 0.9, "the bound held")
+        self.assertFalse(items[0].ok)
+        self.assertIn("timed out", items[0].error)
+        self.assertFalse(items[1].ok)
+        self.assertIn("abandoned", items[1].error)
 
     def test_batch_over_cap_refused(self) -> None:
         from freegem.web_scraper import scrape_many
@@ -1210,6 +1325,57 @@ class ScrapeCacheTests(_FakeSiteTestCase):
                     concurrency=2,
                 )
             self.assertTrue(all(item.via == "cache" for item in again))
+
+    def test_full_text_is_cached_not_the_callers_cut(self) -> None:
+        """(#21) A small --max-chars must not poison the entry: the cache
+        holds the full extraction and each caller truncates its own view."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = self._cache(tmp)
+            small = scrape_page(self.cfg, f"{self.base}/big", max_chars=50, cache=cache)
+            self.assertTrue(small.truncated)
+            self.assertEqual(len(small.text), 50)
+            cached_text = cache.get(f"{self.base}/big")["text"]
+            self.assertGreater(
+                len(cached_text), 50, "the entry must hold the full text, not the 50-char cut"
+            )
+            # A later caller with a bigger budget gets the FULL page from the
+            # same entry, with no network.
+            with mock.patch(
+                "freegem.web_scraper._fetch", side_effect=AssertionError("network hit")
+            ):
+                bigger = scrape_page(self.cfg, f"{self.base}/big", max_chars=10_000, cache=cache)
+                whole = scrape_page(self.cfg, f"{self.base}/big", cache=cache)
+            self.assertEqual(len(bigger.text), 10_000)
+            self.assertTrue(bigger.truncated)
+            self.assertEqual(len(whole.text), len(cached_text))
+            self.assertFalse(whole.truncated)
+
+    def test_empty_cache_entry_does_not_short_circuit_smart(self) -> None:
+        """(#21) A zero-text entry (cached by a --no-smart run) must not pose
+        as a successful read for a later smart run: it is a miss, and a real
+        fetch heals the entry."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = self._cache(tmp)
+            url = f"{self.base}/page"
+            cache.put(url, "Empty", "", None)
+            healed = scrape_page(self.cfg, url, cache=cache, smart=True)
+            self.assertEqual(healed.via, "html", "the empty entry must fall through")
+            self.assertTrue(healed.text.strip())
+            self.assertTrue(cache.get(url)["text"].strip(), "the fetch rewrites the entry")
+
+    def test_empty_cache_entry_still_served_when_smart_off(self) -> None:
+        """(#21) With the ladder off, the cached entry is still what the
+        caller asked for: the dumb direct path, unchanged."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = self._cache(tmp)
+            url = f"{self.base}/page"
+            cache.put(url, "Empty", "", None)
+            with mock.patch(
+                "freegem.web_scraper._fetch", side_effect=AssertionError("network hit")
+            ):
+                result = scrape_page(self.cfg, url, cache=cache, smart=False)
+            self.assertEqual(result.via, "cache")
+            self.assertEqual(result.text, "")
 
 
 class MainRegionAnchorsTests(unittest.TestCase):
