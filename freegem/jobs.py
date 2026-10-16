@@ -296,6 +296,32 @@ class JobManager:
         # ones already relabeled by the store on open).
         for job in self._store.load_all():
             self.jobs[job.id] = job
+        self._sweep_orphan_artifact_files()
+
+    def _sweep_orphan_artifact_files(self) -> None:
+        """Startup sweep: unlink artifact files whose artifact id is no
+        longer known to any job (issue #39 -- evictions leaked the files
+        before the purge fix, and a crash can orphan a mid-write file).
+        Files referenced by a restored durable job are kept; anything that
+        is not a JobManager artifact (no ``art-`` id prefix) is never
+        touched. Best-effort by design."""
+        referenced = {aid for job in self.jobs.values() for aid in job.artifacts}
+        referenced.update(self.artifacts)
+        try:
+            entries = list(self.artifact_dir.iterdir())
+        except OSError:
+            return
+        for path in entries:
+            name = path.name
+            if not name.startswith("art-"):
+                continue
+            if name.split("_", 1)[0] in referenced:
+                continue
+            try:
+                if path.is_file():
+                    path.unlink()
+            except OSError:
+                continue
 
     def attach_store(self, store: MemoryJobStore | SqliteJobStore) -> None:
         """Make this manager durable (once): merge stored rows into memory."""
@@ -456,7 +482,13 @@ class JobManager:
                 self._store.upsert(job)
 
     def enforce_retention(self, keep: int) -> int:
-        """Evict the oldest TERMINAL jobs beyond ``keep``. Returns evicted count."""
+        """Evict the oldest TERMINAL jobs beyond ``keep``. Returns evicted count.
+
+        Eviction is whole-object (#39, same as duplicate #32): the job's
+        artifact records and their files on disk go with it, not just the
+        job row -- otherwise freegem_artifacts/ grows without bound no
+        matter how small the job registry is kept.
+        """
         if keep <= 0:
             return 0
         with self._lock:
@@ -469,10 +501,27 @@ class JobManager:
             overflow = len(terminal) - keep
             evicted = 0
             for job in terminal[: max(0, overflow)]:
+                self._purge_artifacts_locked(job.id)
                 self.jobs.pop(job.id, None)
                 self._store.delete(job.id)
                 evicted += 1
             return evicted
+
+    def _purge_artifacts_locked(self, job_id: str) -> None:
+        """Drop a job's artifact records and unlink their files.
+
+        Caller must hold ``self._lock``. File removal is best-effort: a
+        missing file is fine (already swept), an unreadable one must not
+        block the eviction of the registry entries."""
+        doomed = [aid for aid, art in self.artifacts.items() if art.job_id == job_id]
+        for aid in doomed:
+            art = self.artifacts.pop(aid, None)
+            if art is None:
+                continue
+            try:
+                os.unlink(art.file_path)
+            except OSError:
+                pass
 
     def save_artifact(
         self, job_id: str, filename: str, content_type: str, file_path_or_bytes: str | bytes

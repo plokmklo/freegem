@@ -20,6 +20,7 @@ import tempfile
 import threading
 import time
 import unittest
+from pathlib import Path
 from typing import Any
 from unittest import mock
 
@@ -372,6 +373,72 @@ class RetryBackoffTests(unittest.TestCase):
         self.assertGreaterEqual(len(current.retry_traces), 1)
         assert current.result is not None
         self.assertEqual(current.result["attempt"], 2)
+
+
+# ---------------------------------------------------------------------------
+# Issue #39 (= duplicate #32): retention eviction must purge artifacts too.
+# ---------------------------------------------------------------------------
+
+
+class RetentionArtifactPurgeTests(unittest.TestCase):
+    def test_eviction_purges_artifact_records_and_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = JobManager(artifact_dir=tmp)
+            victim = mgr.create_job("scrape", {})
+            mgr.update_job_status(victim.id, "completed", result={"ok": True})
+            survivor = mgr.create_job("scrape", {})
+            mgr.update_job_status(survivor.id, "completed", result={"ok": True})
+            victim_art = mgr.save_artifact(victim.id, "shot.png", "image/png", b"PNG-bytes")
+            survivor_art = mgr.save_artifact(survivor.id, "keep.png", "image/png", b"PNG-bytes")
+            self.assertTrue(os.path.exists(victim_art.file_path))
+
+            self.assertEqual(mgr.enforce_retention(keep=1), 1)
+
+            # The evicted job takes its artifacts with it: registry entry
+            # AND file on disk.
+            self.assertIsNone(mgr.get_job(victim.id))
+            self.assertIsNone(mgr.get_artifact(victim_art.id))
+            self.assertFalse(os.path.exists(victim_art.file_path))
+            # A still-live job's artifacts are untouched.
+            self.assertIsNotNone(mgr.get_job(survivor.id))
+            self.assertIsNotNone(mgr.get_artifact(survivor_art.id))
+            self.assertTrue(os.path.exists(survivor_art.file_path))
+
+    def test_startup_sweep_removes_orphaned_artifact_files(self) -> None:
+        """Files left behind by pre-fix evictions or a mid-write crash, whose
+        artifact id no longer belongs to any known job, are swept at startup.
+        Files that are not JobManager artifacts are never touched."""
+        with tempfile.TemporaryDirectory() as tmp:
+            orphan = Path(tmp) / "art-orphan12_ghost.png"
+            foreign = Path(tmp) / "unrelated.txt"
+            orphan.write_bytes(b"orphan")
+            foreign.write_bytes(b"keep me")
+            JobManager(artifact_dir=tmp)  # no known jobs: every art-* file is an orphan
+            self.assertFalse(orphan.exists())
+            self.assertTrue(foreign.exists())
+
+    def test_startup_sweep_keeps_durable_job_artifacts(self) -> None:
+        """A file referenced by a job restored from the durable store must
+        survive the sweep (its artifact id is still known)."""
+        from freegem.jobs import SqliteJobStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "jobs.sqlite3"
+            store1 = SqliteJobStore(db)
+            try:
+                mgr = JobManager(artifact_dir=tmp, store=store1)
+                job = mgr.create_job("scrape", {})
+                mgr.update_job_status(job.id, "completed")
+                art = mgr.save_artifact(job.id, "shot.png", "image/png", b"PNG")
+                art_path = Path(art.file_path)
+            finally:
+                store1.close()
+            store2 = SqliteJobStore(db)
+            try:
+                JobManager(artifact_dir=tmp, store=store2)  # restart sweep
+                self.assertTrue(art_path.exists())
+            finally:
+                store2.close()
 
 
 if __name__ == "__main__":
