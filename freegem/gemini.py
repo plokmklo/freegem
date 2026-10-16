@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
 
-from .config import BridgeConfig
+from .config import BridgeConfig, redact_proxy
 from .metrics import note_gemini_retry
 
 __all__ = [
@@ -74,6 +74,17 @@ class RateLimitError(BridgeError):
     """
 
 
+class _StaleBuildTagError(BridgeError):
+    """The upstream answered with a ``BardErrorInfo`` marker.
+
+    In practice that marker means the configured build tag no longer matches
+    what Google serves, or the session died. It is an internal subtype so the
+    retry loops can trigger the once-per-process build-tag recovery
+    (:func:`_refresh_build_tag_once`) without string-matching the message;
+    it changes nothing for callers catching :class:`BridgeError`.
+    """
+
+
 _SSL_CTX: ssl.SSLContext | None = None
 # (abspath, mtime, size) -> (cookie_str, sapisid, xsrf) cache so a hot loop does
 # not re-read the file. The path and size are part of the key: mtime alone let
@@ -84,6 +95,24 @@ _SSL_CTX: ssl.SSLContext | None = None
 # cookie) that briefly pairs one account's path with another's session.
 _COOKIE_CACHE: dict[str, Any] = {"key": None, "cookie": "", "sapisid": None, "xsrf": None}
 _COOKIE_CACHE_LOCK = threading.Lock()
+
+
+def _safe_error_text(cfg: BridgeConfig, exc: Exception | None) -> str:
+    """Render an exception for user-facing text without leaking secrets.
+
+    Transport errors routinely embed the configured proxy URL verbatim --
+    including any ``user:pass@`` credentials -- so every occurrence of the
+    configured proxy string is replaced with its credential-free form
+    (:func:`freegem.config.redact_proxy`) before it reaches a log line or a
+    caller's terminal.
+    """
+    text = "" if exc is None else str(exc)
+    proxy = cfg.proxy
+    if proxy and proxy in text:
+        redacted = redact_proxy(proxy)
+        if redacted != proxy:
+            text = text.replace(proxy, redacted)
+    return text
 
 
 def log(cfg: BridgeConfig, message: str) -> None:
@@ -310,6 +339,13 @@ def make_sapisidhash(sapisid: str) -> str:
 
 _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
+# Build-tag recovery state (issue #38): refreshed at most once per process,
+# set when a BardErrorInfo rejection triggers _refresh_build_tag_once. The
+# override is preferred by build_url for the rest of the process.
+_BUILD_TAG_REFRESH_LOCK = threading.Lock()
+_BUILD_TAG_REFRESHED = False
+_BUILD_TAG_OVERRIDE: str | None = None
+
 
 def _load_xsrf(cfg: BridgeConfig) -> str | None:
     """The xsrf token for the payload: config first, then the cookie file.
@@ -413,10 +449,15 @@ def build_payload(
 def build_url(cfg: BridgeConfig) -> str:
     reqid = int(time.time()) % 1000000
     prefix = account_prefix(cfg)
+    # A mid-process refresh (see _refresh_build_tag_once) wins over the
+    # configured tag: the process learned the configured one is stale the
+    # hard way, and callers hold frozen configs that cannot be updated
+    # underneath them.
+    bl = _BUILD_TAG_OVERRIDE or cfg.gemini_bl
     return (
         f"https://gemini.google.com{prefix}/_/BardChatUi/data/"
         "assistant.lamda.BardFrontendService/StreamGenerate"
-        f"?bl={cfg.gemini_bl}&hl=en&_reqid={reqid}&rt=c"
+        f"?bl={bl}&hl=en&_reqid={reqid}&rt=c"
     )
 
 
@@ -466,7 +507,7 @@ def extract_response_text(raw: str) -> str:
     """Final answer from a full (non-streamed) Gemini response."""
     match = re.search(r"BardErrorInfo\s*\[(\d+)\]", raw)
     if match:
-        raise BridgeError(
+        raise _StaleBuildTagError(
             f"Gemini rejected the request (BardErrorInfo {match.group(1)}). "
             "The build tag may be stale, or the session needs a refresh.",
             code=int(match.group(1)) if match.group(1).isdigit() else None,
@@ -614,6 +655,13 @@ def generate(
                     f"answer; retrying in {delay:.1f}s",
                 )
                 time.sleep(delay)
+        except _StaleBuildTagError:
+            # One-time recovery: the marker usually means the build tag went
+            # stale mid-process. Best effort -- the original error still
+            # propagates (retrying the same body cannot help; the NEXT
+            # request picks up the refreshed tag).
+            _refresh_build_tag_once(cfg)
+            raise
         except BridgeError:
             raise  # upstream said no; retrying the same request will not help
         except _UpstreamHTTPStatus as exc:
@@ -647,7 +695,10 @@ def generate(
             f"Gemini returned no answer after {cfg.retry_attempts} attempts "
             "(rate limit or login wall?)"
         ) from last_error
-    raise BridgeError(f"Gemini request failed after {cfg.retry_attempts} attempts: {last_error}")
+    raise BridgeError(
+        f"Gemini request failed after {cfg.retry_attempts} attempts: "
+        f"{_safe_error_text(cfg, last_error)}"
+    )
 
 
 def generate_stream(
@@ -702,7 +753,7 @@ def generate_stream(
                     if "BardErrorInfo" in buffer:
                         match = re.search(r"BardErrorInfo\s*\[(\d+)\]", buffer)
                         if match:
-                            raise BridgeError(
+                            raise _StaleBuildTagError(
                                 "Gemini rejected the request during streaming "
                                 f"(BardErrorInfo {match.group(1)}).",
                                 code=int(match.group(1)) if match.group(1).isdigit() else None,
@@ -758,6 +809,10 @@ def generate_stream(
                     f"empty answer; retrying in {delay:.1f}s",
                 )
                 time.sleep(delay)
+        except _StaleBuildTagError:
+            # Same one-time recovery as the non-streaming path.
+            _refresh_build_tag_once(cfg)
+            raise
         except BridgeError:
             raise
         except Exception as exc:
@@ -775,7 +830,8 @@ def generate_stream(
                 note_gemini_retry()
                 log(
                     cfg,
-                    f"stream attempt {attempt}/{cfg.retry_attempts} failed: {exc}; "
+                    f"stream attempt {attempt}/{cfg.retry_attempts} failed: "
+                    f"{_safe_error_text(cfg, exc)}; "
                     f"retrying in {delay:.1f}s",
                 )
                 time.sleep(delay)
@@ -784,10 +840,66 @@ def generate_stream(
             f"Gemini stream returned no answer after {cfg.retry_attempts} attempts "
             "(rate limit or login wall?)"
         ) from last_error
-    raise BridgeError(f"Gemini stream failed after {cfg.retry_attempts} attempts: {last_error}")
+    raise BridgeError(
+        f"Gemini stream failed after {cfg.retry_attempts} attempts: "
+        f"{_safe_error_text(cfg, last_error)}"
+    )
 
 
-def fetch_build_tag(cfg: BridgeConfig) -> str | None:
+def _page_headers(cfg: BridgeConfig) -> dict[str, str]:
+    """GET headers for a gemini.google.com page fetch, session-aware.
+
+    Mirrors :func:`build_headers`' authentication (Cookie + SAPISIDHASH,
+    account selector) without the POST-only content headers.
+    """
+    headers = {"User-Agent": _UA}
+    cookie_str, sapisid, _xsrf = _read_session(cfg)
+    if cookie_str:
+        headers["Cookie"] = cookie_str
+    if sapisid:
+        headers["Authorization"] = make_sapisidhash(str(sapisid))
+    if account_prefix(cfg):
+        headers["X-Goog-AuthUser"] = str(cfg.auth_user)
+    return headers
+
+
+def _refresh_build_tag_once(cfg: BridgeConfig) -> None:
+    """One per-process attempt to recover from a stale build tag.
+
+    A ``BardErrorInfo`` marker usually means the configured ``bl`` tag no
+    longer matches what Google serves. The build tag is otherwise refreshed
+    only at serve startup, so a long-running process would keep failing until
+    restarted. On the FIRST rejection in this process, re-scrape the tag
+    through the session: signed-out, ``/app`` answers with a redirect to
+    accounts.google.com whose HTML never contains a build tag.
+
+    The attempt flag is consumed BEFORE the network call: with a broken
+    network, one failure must not turn every subsequent request into an
+    extra scrape. The fresh value is stored process-wide and preferred by
+    :func:`build_url` -- caller configs are frozen dataclasses that cannot
+    be updated underneath them.
+    """
+    global _BUILD_TAG_REFRESHED, _BUILD_TAG_OVERRIDE
+    if not cfg.has_session_cookie():
+        # The recovery fetch is session-authenticated; without a session
+        # there is nothing to authenticate with (and the anonymous
+        # fetch_build_tag already ran at startup).
+        return
+    with _BUILD_TAG_REFRESH_LOCK:
+        if _BUILD_TAG_REFRESHED:
+            return
+        _BUILD_TAG_REFRESHED = True
+        try:
+            found = fetch_build_tag(cfg, session=True)
+        except Exception as exc:
+            log(cfg, f"build-tag refresh after rejection failed: {_safe_error_text(cfg, exc)}")
+            return
+        if found and found != cfg.gemini_bl:
+            log(cfg, f"build tag auto-refreshed after rejection: {cfg.gemini_bl} -> {found}")
+            _BUILD_TAG_OVERRIDE = found
+
+
+def fetch_build_tag(cfg: BridgeConfig, session: bool = False) -> str | None:
     """Scrape the current build tag from Gemini's page.
 
     Two formats are seen in the wild. The original code matched only
@@ -795,9 +907,14 @@ def fetch_build_tag(cfg: BridgeConfig) -> str | None:
     switched to ``boq_gemini-web-uiserver_*`` -- the auto-update looked like it
     worked because it never reported failure. Both patterns are matched now,
     and an actual result is required for the caller to consider it a success.
+
+    ``session=True`` sends the same session headers a StreamGenerate call
+    would (see :func:`_page_headers`) so the fetch works for logged-in
+    sessions; the default keeps the historical anonymous scrape.
     """
     request = urllib.request.Request(
-        f"https://gemini.google.com{account_prefix(cfg)}/app", headers={"User-Agent": _UA}
+        f"https://gemini.google.com{account_prefix(cfg)}/app",
+        headers=_page_headers(cfg) if session else {"User-Agent": _UA},
     )
     try:
         if cfg.proxy:

@@ -28,6 +28,7 @@ from freegem.gemini import (
     extract_response_text,
     fetch_build_tag,
     generate,
+    generate_stream,
     load_cookie,
     make_sapisidhash,
     refresh_build_tag,
@@ -1022,6 +1023,155 @@ class HttpStatusPolicyTests(unittest.TestCase):
                 list(gem.generate_stream(cfg, "hi", 1, 0))
         self.assertIn("403", str(ctx.exception))
         self.assertEqual(client.stream.call_count, 1)
+
+
+class ProxyRedactionTests(unittest.TestCase):
+    """Transport errors must not leak proxy credentials into messages (#38)."""
+
+    PROXY = "http://user:secret@proxy.example:8080"
+
+    def setUp(self) -> None:
+        self.cfg = BridgeConfig(retry_attempts=2, retry_delay_sec=0, proxy=self.PROXY)
+
+    def test_generate_error_message_redacts_proxy_credentials(self) -> None:
+        import urllib.error
+
+        leak = f"Cannot connect to proxy {self.PROXY}: connection refused"
+        with mock.patch("freegem.gemini._post", side_effect=urllib.error.URLError(leak)):
+            with self.assertRaises(BridgeError) as ctx:
+                generate(self.cfg, "hi", 1, 0)
+        message = str(ctx.exception)
+        self.assertNotIn("secret", message)
+        self.assertNotIn("user:", message)
+        self.assertIn("proxy.example:8080", message)
+
+    def test_stream_error_message_redacts_proxy_credentials(self) -> None:
+        import freegem.gemini as gem
+
+        leak = f"connect {self.PROXY} failed: connection refused"
+        client = mock.MagicMock()
+        client.stream.side_effect = RuntimeError(leak)
+        with (
+            mock.patch.object(gem, "HAS_HTTPX", True),
+            mock.patch.object(gem, "_httpx_client", return_value=client),
+        ):
+            with self.assertRaises(BridgeError) as ctx:
+                list(generate_stream(self.cfg, "hi", 1, 0))
+        message = str(ctx.exception)
+        self.assertNotIn("secret", message)
+        self.assertNotIn("user:", message)
+        self.assertIn("proxy.example:8080", message)
+
+
+class BuildTagRecoveryTests(unittest.TestCase):
+    """One session-authenticated build-tag re-fetch on BardErrorInfo (#38)."""
+
+    NEW_TAG = "boq_gemini-web-uiserver_20261101.00_p0"
+
+    def setUp(self) -> None:
+        import freegem.gemini as gem
+
+        self.gem = gem
+        gem._BUILD_TAG_REFRESHED = False
+        gem._BUILD_TAG_OVERRIDE = None
+        self.addCleanup(setattr, gem, "_BUILD_TAG_REFRESHED", False)
+        self.addCleanup(setattr, gem, "_BUILD_TAG_OVERRIDE", None)
+
+    def _session_cfg(self) -> BridgeConfig:
+        """A config whose cookie file really exists, so the refresh engages."""
+        import os
+        import tempfile
+
+        fd, path = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps({"cookie": "SID=a", "sapisid": "b"}))
+        self.addCleanup(os.unlink, path)
+        return BridgeConfig(cookie_file=path, log_requests=False)
+
+    @staticmethod
+    def _bard_post() -> Any:
+        """A ``_post`` stand-in returning a FRESH BARD_ERROR body per attempt.
+
+        The shared-BytesIO lesson (documented in GenerateTests): a closed
+        response's read() raises, which sends generate() down the generic
+        retry branch with real sleeps instead of the intended fail-fast path.
+        """
+        return mock.patch(
+            "freegem.gemini._post", side_effect=lambda *a, **k: make_response(BARD_ERROR)
+        )
+
+    def test_bard_error_triggers_one_session_refresh(self) -> None:
+        cfg = self._session_cfg()
+        with (
+            self._bard_post(),
+            mock.patch.object(self.gem, "fetch_build_tag", return_value=self.NEW_TAG) as fetch,
+        ):
+            with self.assertRaises(BridgeError):
+                generate(cfg, "hi", 1, 0)
+        fetch.assert_called_once()
+        self.assertIs(fetch.call_args.kwargs.get("session"), True)
+
+    def test_refresh_happens_once_per_process(self) -> None:
+        cfg = self._session_cfg()
+        with (
+            self._bard_post(),
+            mock.patch.object(self.gem, "fetch_build_tag", return_value=self.NEW_TAG) as fetch,
+        ):
+            for _ in range(3):
+                with self.assertRaises(BridgeError):
+                    generate(cfg, "hi", 1, 0)
+        fetch.assert_called_once()
+
+    def test_refreshed_tag_is_used_by_build_url(self) -> None:
+        cfg = self._session_cfg()
+        with (
+            self._bard_post(),
+            mock.patch.object(self.gem, "fetch_build_tag", return_value=self.NEW_TAG),
+        ):
+            with self.assertRaises(BridgeError):
+                generate(cfg, "hi", 1, 0)
+        self.assertIn(f"bl={self.NEW_TAG}", build_url(cfg))
+
+    def test_no_session_skips_the_refresh(self) -> None:
+        cfg = BridgeConfig(log_requests=False)
+        with (
+            self._bard_post(),
+            mock.patch.object(self.gem, "fetch_build_tag", return_value=self.NEW_TAG) as fetch,
+        ):
+            with self.assertRaises(BridgeError):
+                generate(cfg, "hi", 1, 0)
+        fetch.assert_not_called()
+
+    def test_broken_network_consumes_the_single_attempt(self) -> None:
+        cfg = self._session_cfg()
+        with (
+            self._bard_post(),
+            mock.patch.object(self.gem, "fetch_build_tag", side_effect=RuntimeError("no net")),
+        ):
+            with self.assertRaises(BridgeError):
+                generate(cfg, "hi", 1, 0)
+        with (
+            self._bard_post(),
+            mock.patch.object(
+                self.gem, "fetch_build_tag", side_effect=RuntimeError("no net")
+            ) as fetch,
+        ):
+            with self.assertRaises(BridgeError):
+                generate(cfg, "hi", 1, 0)
+        fetch.assert_not_called()
+
+    def test_stream_bard_error_triggers_refresh(self) -> None:
+        cfg = self._session_cfg()
+        with (
+            mock.patch.object(self.gem, "HAS_HTTPX", True),
+            mock.patch.object(
+                self.gem, "_httpx_client", return_value=StreamTests._fake_client([BARD_ERROR])
+            ),
+            mock.patch.object(self.gem, "fetch_build_tag", return_value=self.NEW_TAG) as fetch,
+        ):
+            with self.assertRaises(BridgeError):
+                list(generate_stream(cfg, "hi", 1, 0))
+        fetch.assert_called_once()
 
 
 class HttpxPoolTests(unittest.TestCase):
