@@ -77,6 +77,14 @@ DEFAULT_CONFIG: Mapping[str, Any] = MappingProxyType(
         # The last ladder step is AI-mediated (Gemini search asked for the
         # page's content, cited and labeled via="ai-search"). Needs a session.
         "smart_fetch_ai": True,
+        # Optional browser-render rung in the smart-fetch ladder (#14): a
+        # headless Chromium render through Playwright, for pages whose text
+        # only exists after JavaScript. OFF by default -- a browser launch
+        # costs seconds and is an explicit choice, never a silent fallback.
+        # When on, the rung sits between the reader and the Internet Archive
+        # (a fresh render beats an old snapshot) and is a plain headless
+        # browser: SSRF-guarded per request, no stealth, NON_GOALS hold.
+        "smart_fetch_browser_render": False,
         # Optional bearer key for the server's own job/result/artifact REST API
         # and the MCP adapter. None keeps the loopback-only, unauthenticated
         # behavior; a non-None value makes those endpoints demand
@@ -136,7 +144,14 @@ _INT_FIELDS = frozenset(
 )
 _FLOAT_FIELDS = frozenset({"request_queue_wait_sec"})
 _BOOL_FIELDS = frozenset(
-    {"temporary_chats", "log_requests", "research_evidence", "smart_fetch", "smart_fetch_ai"}
+    {
+        "temporary_chats",
+        "log_requests",
+        "research_evidence",
+        "smart_fetch",
+        "smart_fetch_ai",
+        "smart_fetch_browser_render",
+    }
 )
 _STR_FIELDS = frozenset(
     {
@@ -254,6 +269,7 @@ class BridgeConfig:
     discover_backend: str = DEFAULT_CONFIG["discover_backend"]
     smart_fetch: bool = DEFAULT_CONFIG["smart_fetch"]
     smart_fetch_ai: bool = DEFAULT_CONFIG["smart_fetch_ai"]
+    smart_fetch_browser_render: bool = DEFAULT_CONFIG["smart_fetch_browser_render"]
     api_key: str | None = DEFAULT_CONFIG["api_key"]
     brave_api_key: str = DEFAULT_CONFIG["brave_api_key"]
     reader_api_key: str = DEFAULT_CONFIG["reader_api_key"]
@@ -338,6 +354,7 @@ class BridgeConfig:
             "discover_backend": self.discover_backend,
             "smart_fetch": self.smart_fetch,
             "smart_fetch_ai": self.smart_fetch_ai,
+            "smart_fetch_browser_render": self.smart_fetch_browser_render,
             # Booleans and paths only; never the token itself.
             "xsrf_token_set": bool(self.xsrf_token),
             "api_key_set": bool(self.api_key),

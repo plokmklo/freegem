@@ -15,10 +15,16 @@ The ladder, in order:
 2. ``reader``           -- ``https://r.jina.ai/<url>``, a public reader
    service that fetches the page itself and returns markdown. The page is
    read through a service the site can see and rate-limit like any client.
-3. ``wayback``          -- the Internet Archive's availability API, then
+3. ``browser-render``   -- OPTIONAL, off by default (config
+   ``smart_fetch_browser_render``): a plain headless Chromium render
+   through the Playwright fetcher, for pages whose text only exists after
+   JavaScript. Positioned here because a FRESH render beats an OLD
+   archive; a browser launch is an explicit choice, never a silent
+   fallback, and no stealth is involved (NON_GOALS hold).
+4. ``wayback``          -- the Internet Archive's availability API, then
    the closest snapshot. Published, permanent, and legal: the archive is
    meant to be read.
-4. ``ai-search``        -- the bridge's own Gemini search tool is asked for
+5. ``ai-search``        -- the bridge's own Gemini search tool is asked for
    the page's content, with citations. AI-mediated and clearly labeled
    (``via="ai-search"``): never presented as a verbatim fetch. Requires a
    configured session; skipped, never half-tried, without one.
@@ -60,9 +66,11 @@ __all__ = [
     "fallback_scrape",
 ]
 
-#: The ladder, in default order. ``ai-search`` is gated at runtime (needs a
-#: session and the ``smart_fetch_ai`` config flag).
-STRATEGIES = ("browser-headers", "reader", "wayback", "ai-search")
+#: The ladder, in default order. ``browser-render`` is the OPTIONAL rung
+#: (config ``smart_fetch_browser_render``, default off: gated inside the
+#: rung itself, like ai-search's flag gate). ``ai-search`` is gated at
+#: runtime (needs a session and the ``smart_fetch_ai`` config flag).
+STRATEGIES = ("browser-headers", "reader", "browser-render", "wayback", "ai-search")
 
 #: Pause between ladder steps. One failed request per strategy, spaced out:
 #: the ladder is a polite reader, not a hammer.
@@ -81,6 +89,19 @@ _LADDER_BUDGET_SEC = 60.0
 #: is discarded. The bound exists so a wedged generation cannot hold a ladder
 #: slot (and, inside a batch, a pool worker) hostage.
 _AI_SEARCH_TIMEOUT_SEC = 30.0
+
+#: Wall-clock bound for the optional browser-render rung (#14). The render
+#: runs in a worker thread (the #25 discipline): OUR wait is bounded so a
+#: wedged launch cannot hold the ladder slot. Playwright's own navigation
+#: wait (``_BROWSER_RENDER_WAIT_MS``) fires first for the normal slow-page
+#: case; this bound additionally covers everything around it. RESIDUAL
+#: (documented, deliberate): the thread is abandoned, not killed -- threads
+#: cannot be killed -- until Playwright's own bounds end it.
+_BROWSER_RENDER_TIMEOUT_SEC = 20.0
+
+#: Playwright navigation wait for the render rung: headroom under the rung
+#: wall-clock bound above.
+_BROWSER_RENDER_WAIT_MS = 15_000
 
 #: A response that is tiny AND challenge-shaped is not content.
 _CHALLENGE_RE = re.compile(
@@ -298,6 +319,8 @@ def _try_strategy(
             headers_override=_reader_headers(cfg),
         )
         return _parse_reader_output(result, url, max_chars)
+    if strategy == "browser-render":
+        return _browser_render_read(cfg, url, max_chars)
     if strategy == "wayback":
         snapshot = _wayback_snapshot(cfg, url)
         result = scrape_page(cfg, snapshot, max_chars=max_chars, ignore_robots=True)
@@ -357,6 +380,85 @@ def _parse_reader_output(result: ScrapeResult, original_url: str, max_chars: int
 
 
 _WAYBACK_PATH_RE = re.compile(r"^/web/\d{4,14}[a-z_]*/(?:https?://)?(.+)$", re.IGNORECASE)
+
+
+def _browser_render_read(cfg: BridgeConfig, url: str, max_chars: int) -> ScrapeResult:
+    """Render the page in a headless browser and extract its text (#14).
+
+    The optional ladder rung, OFF by default: only runs when config
+    ``smart_fetch_browser_render`` is set, because a browser launch costs
+    seconds and is an explicit choice. The browser is a PLAIN headless
+    Chromium through :func:`freegem.playwright_fetcher.fetch_with_playwright`
+    (the same public entry the background-job API uses): default identity,
+    SSRF-guarded per request inside the fetcher, no stealth flags.
+
+    Every failure is a clean ScrapeError so the ladder records it and moves
+    on to wayback; nothing raises through. Bounded twice: Playwright's own
+    navigation wait, then the wall-clock bound on OUR wait for the render
+    thread (see ``_BROWSER_RENDER_TIMEOUT_SEC``).
+    """
+    if not getattr(cfg, "smart_fetch_browser_render", False):
+        raise ScrapeError("browser-render disabled (smart_fetch_browser_render=false)")
+
+    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import TimeoutError as FuturesTimeout
+
+    from .playwright_fetcher import (
+        PlaywrightOptions,
+        fetch_with_playwright,
+        is_playwright_available,
+    )
+    from .web_scraper import _clean_text, _parse_html
+
+    if not is_playwright_available():
+        raise ScrapeError(f"browser-render unavailable for {url!r}: playwright is not installed")
+
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="browser-render")
+    try:
+        future = pool.submit(
+            fetch_with_playwright,
+            PlaywrightOptions(url=url, wait_timeout_ms=_BROWSER_RENDER_WAIT_MS),
+        )
+        try:
+            rendered = future.result(timeout=_BROWSER_RENDER_TIMEOUT_SEC)
+        except FuturesTimeout as exc:
+            raise ScrapeError(
+                f"browser-render timed out after {_BROWSER_RENDER_TIMEOUT_SEC:g}s for {url!r}"
+            ) from exc
+        except Exception as exc:
+            # A not-installed race, a launch failure, anything: the rung
+            # fails cleanly and the ladder continues to the next rung.
+            raise ScrapeError(
+                f"browser-render failed for {url!r}: {type(exc).__name__}: {exc}"
+            ) from exc
+    finally:
+        # Do NOT wait: the whole point is that a wedged render cannot hold
+        # the ladder (or a batch worker) hostage.
+        pool.shutdown(wait=False, cancel_futures=True)
+
+    if rendered.error:
+        raise ScrapeError(f"browser-render refused for {url!r}: {rendered.error}")
+    if not rendered.ok:
+        raise ScrapeError(f"browser-render got HTTP {rendered.status} for {url!r}")
+    if not (rendered.text or "").strip():
+        raise ScrapeError(f"browser-render returned no content for {url!r}")
+
+    # The rendered DOM is HTML: the ordinary extractor strips scripts and
+    # chrome, exactly like the direct path.
+    extractor = _parse_html(cfg, url, rendered.text)
+    text = _clean_text(extractor.text_parts)
+    if not text:
+        raise ScrapeError(f"browser-render extracted zero readable text from {url!r}")
+    truncated = len(text) > max_chars
+    if truncated:
+        text = text[:max_chars].rstrip()
+    return ScrapeResult(
+        url=url,
+        title=extractor.title or rendered.title or url,
+        text=text,
+        truncated=truncated,
+        via="browser-render",
+    )
 
 
 def _snapshot_matches(snapshot: str, url: str) -> bool:

@@ -11,12 +11,20 @@ from __future__ import annotations
 
 import contextlib
 import io
+import time
 import unittest
 from typing import Any
 from unittest import mock
 
 from freegem.config import BridgeConfig
-from freegem.web_scraper import ScrapeResult, _clamp_batch_concurrency, scrape_many, scrape_page
+from freegem.smart_fetch import STRATEGIES, clear_memory
+from freegem.web_scraper import (
+    ScrapeError,
+    ScrapeResult,
+    _clamp_batch_concurrency,
+    scrape_many,
+    scrape_page,
+)
 
 
 def _recording_pool() -> tuple[Any, list[int | None]]:
@@ -325,6 +333,238 @@ class TagSelectionTests(unittest.TestCase):
             plain = scrape_page(self.cfg, _TAG_URL, cache=cache)
         self.assertEqual(plain.via, "cache")
         self.assertEqual(plain.text, "cached text")
+
+
+RENDERED_HTML = (
+    "<html><head><title>Rendered Fresh</title></head><body><main>"
+    "<p>Client-side article text, rendered fresh by the browser.</p>"
+    "</main></body></html>"
+)
+_SNAPSHOT_HTML = "<html><body><p>archived copy text for the blocked page</p></body></html>"
+_BLOCKED_URL = "https://blocked.example/page"
+
+
+class _FakeLadder:
+    """Scripted seams for ladder walks: the network and the browser."""
+
+    def __init__(
+        self,
+        *,
+        render: Any = None,
+        playwright_installed: bool = True,
+        snapshot: str | None = _SNAPSHOT_HTML,
+    ) -> None:
+        self.events: list[tuple[str, str]] = []
+        self._render = render
+        self._installed = playwright_installed
+        self._snapshot = snapshot
+
+    def fetch(self, _cfg: Any, url: str, timeout: float = 30, headers: Any = None) -> Any:
+        self.events.append(("fetch", url))
+        if url.startswith("https://archive.org/wayback/available"):
+            import json as _json
+
+            body = _json.dumps(
+                {
+                    "archived_snapshots": {
+                        "closest": {
+                            "url": "https://web.archive.org/web/20240101000000/"
+                            + _BLOCKED_URL
+                        }
+                    }
+                }
+            ).encode("utf-8")
+            return _FakeResponse(body, "application/json")
+        if url.startswith("https://web.archive.org/web/"):
+            return _FakeResponse((self._snapshot or "").encode("utf-8"))
+        raise ScrapeError(f"HTTP 403 fetching {url!r}")
+
+    def render(self, opts: Any) -> Any:
+        self.events.append(("render", opts.url))
+        outcome = self._render
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    def patches(self) -> list[Any]:
+        return [
+            mock.patch("freegem.web_scraper._fetch", side_effect=self.fetch),
+            mock.patch(
+                "freegem.playwright_fetcher.is_playwright_available",
+                return_value=self._installed,
+            ),
+            mock.patch(
+                "freegem.playwright_fetcher.fetch_with_playwright", side_effect=self.render
+            ),
+            mock.patch("freegem.smart_fetch.time.sleep"),
+        ]
+
+
+class BrowserRenderRungTests(unittest.TestCase):
+    """#14: the optional browser-render rung -- after reader, before wayback."""
+
+    def setUp(self) -> None:
+        self.cfg = BridgeConfig(log_requests=False, smart_fetch_browser_render=True)
+        clear_memory()
+
+    def tearDown(self) -> None:
+        clear_memory()
+
+    def _ok_render(self) -> Any:
+        from freegem.playwright_fetcher import PlaywrightResult
+
+        return PlaywrightResult(
+            url=_BLOCKED_URL,
+            final_url=_BLOCKED_URL,
+            status=200,
+            text=RENDERED_HTML,
+            title="Rendered Fresh",
+        )
+
+    def test_rung_sits_between_reader_and_wayback(self) -> None:
+        from freegem.smart_fetch import STRATEGIES
+
+        self.assertEqual(STRATEGIES, ("browser-headers", "reader", "browser-render", "wayback", "ai-search"))
+
+    def test_render_rescues_a_page_the_http_rungs_cannot_read(self) -> None:
+        from freegem.smart_fetch import fallback_scrape
+
+        ladder = _FakeLadder(render=self._ok_render())
+        with contextlib.ExitStack() as stack:
+            for patcher in ladder.patches():
+                stack.enter_context(patcher)
+            result = fallback_scrape(
+                self.cfg, _BLOCKED_URL, max_chars=2000, first_error="HTTP 403"
+            )
+        self.assertEqual(result.via, "browser-render")
+        self.assertIn("Client-side article text", result.text)
+        self.assertEqual(result.title, "Rendered Fresh")
+        # The render came after the two HTTP rungs and wayback never ran.
+        kinds = [kind for kind, _ in ladder.events]
+        self.assertIn("render", kinds)
+        self.assertNotIn("https://archive.org", " ".join(url for _, url in ladder.events))
+
+    def test_render_is_attempted_before_wayback(self) -> None:
+        """A fresh render beats an old archive: when the render fails, the
+        wayback rung still runs AFTER it."""
+        from freegem.smart_fetch import fallback_scrape
+
+        ladder = _FakeLadder(render=RuntimeError("Playwright package is not installed."))
+        with contextlib.ExitStack() as stack:
+            for patcher in ladder.patches():
+                stack.enter_context(patcher)
+            result = fallback_scrape(
+                self.cfg, _BLOCKED_URL, max_chars=2000, first_error="HTTP 403"
+            )
+        self.assertEqual(result.via, "wayback")
+        self.assertIn("archived copy text", result.text)
+        wayback_at = next(
+            i for i, (_, url) in enumerate(ladder.events) if "archive.org" in url
+        )
+        render_at = next(i for i, (kind, _) in enumerate(ladder.events) if kind == "render")
+        self.assertLess(render_at, wayback_at)
+
+    def test_disabled_by_default_never_calls_the_browser(self) -> None:
+        from freegem.smart_fetch import fallback_scrape
+
+        cfg = BridgeConfig(log_requests=False)  # smart_fetch_browser_render=False
+        ladder = _FakeLadder(render=self._ok_render())
+        with contextlib.ExitStack() as stack:
+            for patcher in ladder.patches():
+                stack.enter_context(patcher)
+            result = fallback_scrape(
+                cfg, _BLOCKED_URL, max_chars=2000, first_error="HTTP 403"
+            )
+        self.assertEqual(result.via, "wayback")
+        self.assertNotIn("render", [kind for kind, _ in ladder.events])
+
+    def test_playwright_not_installed_continues_to_wayback(self) -> None:
+        from freegem.smart_fetch import fallback_scrape
+
+        ladder = _FakeLadder(render=self._ok_render(), playwright_installed=False)
+        with contextlib.ExitStack() as stack:
+            for patcher in ladder.patches():
+                stack.enter_context(patcher)
+            result = fallback_scrape(
+                self.cfg, _BLOCKED_URL, max_chars=2000, first_error="HTTP 403"
+            )
+        self.assertEqual(result.via, "wayback")
+        self.assertNotIn("render", [kind for kind, _ in ladder.events])
+
+    def test_budget_exhaustion_skips_the_rung(self) -> None:
+        """(#25 discipline) No rung -- browser-render included -- starts once
+        the ladder's wall-clock budget is gone."""
+        from freegem.smart_fetch import fallback_scrape
+
+        ladder = _FakeLadder(render=self._ok_render())
+        with contextlib.ExitStack() as stack:
+            for patcher in ladder.patches():
+                stack.enter_context(patcher)
+            stack.enter_context(mock.patch("freegem.smart_fetch._LADDER_BUDGET_SEC", 0.0))
+            with self.assertRaises(ScrapeError) as caught:
+                fallback_scrape(
+                    self.cfg, _BLOCKED_URL, max_chars=2000, first_error="HTTP 403"
+                )
+        self.assertEqual(
+            [kind for kind, _ in ladder.events],
+            [],
+            "no rung -- and no fetch -- may run once the budget is gone",
+        )
+        message = str(caught.exception)
+        self.assertEqual(message.count("ladder budget was exhausted"), len(STRATEGIES))
+        self.assertIn("browser-render: skipped", message)
+
+    def test_rung_is_time_bounded(self) -> None:
+        """(#25 discipline) A wedged render cannot hold the rung: our wait
+        lapses into an honest ScrapeError."""
+        import time as _time
+
+        from freegem.smart_fetch import _browser_render_read
+
+        def wedged(_opts: Any) -> Any:
+            _time.sleep(1.0)
+            return self._ok_render()
+
+        with (
+            mock.patch("freegem.smart_fetch._BROWSER_RENDER_TIMEOUT_SEC", 0.1),
+            mock.patch(
+                "freegem.playwright_fetcher.is_playwright_available", return_value=True
+            ),
+            mock.patch("freegem.playwright_fetcher.fetch_with_playwright", side_effect=wedged),
+        ):
+            started = time.monotonic()
+            with self.assertRaises(ScrapeError) as caught:
+                _browser_render_read(self.cfg, _BLOCKED_URL, 2000)
+        self.assertLess(time.monotonic() - started, 0.9, "the bound held")
+        self.assertIn("timed out", str(caught.exception))
+
+    def test_disabled_flag_gates_the_rung_directly(self) -> None:
+        from freegem.smart_fetch import _browser_render_read
+
+        cfg = BridgeConfig(log_requests=False)  # default: off
+        with mock.patch(
+            "freegem.playwright_fetcher.is_playwright_available", return_value=True
+        ) as available:
+            with self.assertRaises(ScrapeError) as caught:
+                _browser_render_read(cfg, _BLOCKED_URL, 2000)
+        self.assertIn("disabled", str(caught.exception))
+        available.assert_not_called()
+
+    def test_http_error_render_is_a_clean_failure(self) -> None:
+        from freegem.smart_fetch import _browser_render_read
+
+        from freegem.playwright_fetcher import PlaywrightResult
+
+        bad = PlaywrightResult(url=_BLOCKED_URL, final_url=_BLOCKED_URL, status=503, ok=False)
+        with (
+            mock.patch(
+                "freegem.playwright_fetcher.is_playwright_available", return_value=True
+            ),
+            mock.patch("freegem.playwright_fetcher.fetch_with_playwright", return_value=bad),
+        ):
+            with self.assertRaises(ScrapeError) as caught:
+                _browser_render_read(self.cfg, _BLOCKED_URL, 2000)
+        self.assertIn("HTTP 503", str(caught.exception))
 
 
 if __name__ == "__main__":

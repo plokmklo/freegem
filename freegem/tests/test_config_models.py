@@ -116,6 +116,21 @@ class BatchConcurrencyConfigTests(unittest.TestCase):
         self.assertEqual(cfg.batch_max_concurrency, 16)
 
 
+class BrowserRenderConfigTests(unittest.TestCase):
+    """#14: the optional browser-render rung's flag is a real config field."""
+
+    def test_default_is_off(self) -> None:
+        self.assertFalse(BridgeConfig().smart_fetch_browser_render)
+
+    def test_string_values_are_coerced(self) -> None:
+        self.assertTrue(BridgeConfig.from_dict({"smart_fetch_browser_render": "true"}).smart_fetch_browser_render)
+        self.assertFalse(BridgeConfig.from_dict({"smart_fetch_browser_render": "off"}).smart_fetch_browser_render)
+
+    def test_unsalvageable_value_falls_back_to_the_default(self) -> None:
+        cfg = BridgeConfig.from_dict({"smart_fetch_browser_render": "maybe"})
+        self.assertFalse(cfg.smart_fetch_browser_render)
+
+
 class ModelRegistryTests(unittest.TestCase):
     def test_all_models_resolve(self) -> None:
         for name in MODELS:
