@@ -202,9 +202,7 @@ def extraction_quality(text: str) -> str:
         # paywall notice. Navigation-only pages land here.
         return "nav_only"
     letters = sum(ch.isalpha() for ch in stripped)
-    prose_chars = sum(
-        ch.isalpha() or ch.isdigit() or ch.isspace() for ch in stripped
-    )
+    prose_chars = sum(ch.isalpha() or ch.isdigit() or ch.isspace() for ch in stripped)
     if prose_chars / len(stripped) < _MIN_PROSE_RATIO:
         # Long enough to dodge the floor, but not shaped like prose:
         # JSON payloads, base64, separator walls, punctuation confetti.
@@ -1141,6 +1139,15 @@ def scrape_cli(
 #: bounded pool below is sized for interactive waits, not a fleet.
 _SCRAPE_MANY_MAX = 100
 
+#: Total wall-clock the batch result loop may wait for futures (#25): one
+#: item that never finishes must not hold the whole batch. Every fetch has
+#: socket timeouts, but a slow-trickle server can stretch a capped body for
+#: hours without tripping one. Past the bound the item is recorded as failed;
+#: work that already FINISHED is still harvested, still-running work is
+#: abandoned (threads cannot be killed; their own socket and compression
+#: bounds eventually end them).
+_BATCH_RESULT_TIMEOUT_SEC = 300.0
+
 #: politeness pause between per-host fallback attempts inside the ladder.
 _SCRAPE_MANY_DELAY_SEC = 0.2
 
@@ -1253,11 +1260,49 @@ def scrape_many(
         return [item for item in items if item is not None]
 
     from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import TimeoutError as FuturesTimeout
 
-    with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="scrape-many") as pool:
+    pool = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="scrape-many")
+    try:
         futures = [pool.submit(work, url) for url in urls]
-        for position, future in enumerate(futures):
-            items[position] = future.result()
+        position = 0
+        while position < len(futures):
+            try:
+                items[position] = futures[position].result(timeout=_BATCH_RESULT_TIMEOUT_SEC)
+                position += 1
+                continue
+            except FuturesTimeout:
+                futures[position].cancel()
+                items[position] = BatchItem(
+                    url=urls[position],
+                    ok=False,
+                    error=(
+                        f"batch item timed out after {_BATCH_RESULT_TIMEOUT_SEC:g}s "
+                        "without finishing"
+                    ),
+                )
+            # (#25) One wedged item must not stretch the batch: everything
+            # still uncollected is abandoned with an honest note -- but work
+            # that already finished is still harvested (it costs one instant
+            # poll per future, not a wait).
+            for later in range(position + 1, len(futures)):
+                try:
+                    items[later] = futures[later].result(timeout=0.05)
+                except FuturesTimeout:
+                    futures[later].cancel()
+                    items[later] = BatchItem(
+                        url=urls[later],
+                        ok=False,
+                        error=(
+                            "batch abandoned after an item exceeded the "
+                            f"{_BATCH_RESULT_TIMEOUT_SEC:g}s pool bound"
+                        ),
+                    )
+            break
+    finally:
+        # Never wait on abandoned workers: their own socket/compression
+        # bounds end them; the batch result must not.
+        pool.shutdown(wait=False, cancel_futures=True)
     return [item for item in items if item is not None]
 
 

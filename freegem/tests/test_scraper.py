@@ -22,6 +22,7 @@ import socket
 import ssl
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.parse
@@ -164,9 +165,7 @@ class _FakeSite(BaseHTTPRequestHandler):
             return
         if path == "/empty":
             # A 200 with no readable text at all: the JS-shell shape.
-            self._send(
-                b"<html><head><title>Empty</title></head><body></body></html>", "text/html"
-            )
+            self._send(b"<html><head><title>Empty</title></head><body></body></html>", "text/html")
             return
         if path == "/page" or path == "/private-page":
             self._send(PAGE_HTML.encode(), "text/html; charset=utf-8")
@@ -1154,6 +1153,64 @@ class BatchScrapeTests(_FakeSiteTestCase):
         self.assertFalse(items[0].ok)
         self.assertIn("zero readable text", items[0].error)
 
+    # ── #25: the pool's result loop is bounded ───────────────────────────
+
+    @staticmethod
+    def _delayed_scrape(delay: float) -> Any:
+        """A scrape_page stand-in: 'slow' hosts stall, everything else is fine."""
+
+        def fake(cfg: Any, url: str, **_kwargs: Any) -> Any:
+            if "slow" in url:
+                time.sleep(delay)
+                return ScrapeResult(url=url, title="T", text="late but fine")
+            return ScrapeResult(url=url, title="T", text="fast page")
+
+        return fake
+
+    def test_batch_bound_holds_and_finished_work_is_harvested(self) -> None:
+        """(#25) One wedged item fails honestly at the bound; a sibling that
+        already FINISHED is still collected, and the call returns promptly."""
+        from freegem.web_scraper import scrape_many
+
+        with (
+            mock.patch("freegem.web_scraper._BATCH_RESULT_TIMEOUT_SEC", 0.2),
+            mock.patch("freegem.web_scraper.scrape_page", side_effect=self._delayed_scrape(1.0)),
+        ):
+            started = time.monotonic()
+            items = scrape_many(
+                self.cfg,
+                ["https://slow.example/a", "https://fast.example/b"],
+                concurrency=2,
+                smart=False,
+            )
+        self.assertLess(time.monotonic() - started, 0.9, "the bound held")
+        self.assertFalse(items[0].ok)
+        self.assertIn("timed out", items[0].error)
+        self.assertTrue(items[1].ok, "finished work is still harvested")
+        self.assertEqual(items[1].text, "fast page")
+
+    def test_batch_bound_abandons_uncollected_work(self) -> None:
+        """(#25) When the bound lapses, still-running siblings are abandoned
+        with an honest note instead of being waited on."""
+        from freegem.web_scraper import scrape_many
+
+        with (
+            mock.patch("freegem.web_scraper._BATCH_RESULT_TIMEOUT_SEC", 0.2),
+            mock.patch("freegem.web_scraper.scrape_page", side_effect=self._delayed_scrape(1.0)),
+        ):
+            started = time.monotonic()
+            items = scrape_many(
+                self.cfg,
+                ["https://slow.example/a", "https://slow.example/b"],
+                concurrency=2,
+                smart=False,
+            )
+        self.assertLess(time.monotonic() - started, 0.9, "the bound held")
+        self.assertFalse(items[0].ok)
+        self.assertIn("timed out", items[0].error)
+        self.assertFalse(items[1].ok)
+        self.assertIn("abandoned", items[1].error)
+
     def test_batch_over_cap_refused(self) -> None:
         from freegem.web_scraper import scrape_many
 
@@ -1286,9 +1343,7 @@ class ScrapeCacheTests(_FakeSiteTestCase):
             with mock.patch(
                 "freegem.web_scraper._fetch", side_effect=AssertionError("network hit")
             ):
-                bigger = scrape_page(
-                    self.cfg, f"{self.base}/big", max_chars=10_000, cache=cache
-                )
+                bigger = scrape_page(self.cfg, f"{self.base}/big", max_chars=10_000, cache=cache)
                 whole = scrape_page(self.cfg, f"{self.base}/big", cache=cache)
             self.assertEqual(len(bigger.text), 10_000)
             self.assertTrue(bigger.truncated)

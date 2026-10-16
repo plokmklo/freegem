@@ -68,6 +68,20 @@ STRATEGIES = ("browser-headers", "reader", "wayback", "ai-search")
 #: the ladder is a polite reader, not a hammer.
 _PAUSE_SEC = 0.4
 
+#: Total wall-clock the ladder may spend walking rungs (#25). Every rung has
+#: socket timeouts, but the rungs are SEQUENTIAL: four slow rungs would stack
+#: into minutes of silent waiting inside one call. Past the budget the
+#: remaining rungs are skipped and recorded honestly in the taxonomy.
+_LADDER_BUDGET_SEC = 60.0
+
+#: Wall-clock bound for the ai-search rung's one model call (#25). RESIDUAL
+#: (documented, deliberate): the generation thread is abandoned, not killed
+#: -- threads cannot be killed -- so a timed-out request keeps running in the
+#: background until gemini's own socket and retry bounds end it; its answer
+#: is discarded. The bound exists so a wedged generation cannot hold a ladder
+#: slot (and, inside a batch, a pool worker) hostage.
+_AI_SEARCH_TIMEOUT_SEC = 30.0
+
 #: A response that is tiny AND challenge-shaped is not content.
 _CHALLENGE_RE = re.compile(
     r"captcha|just a moment|challenge|verify you are human|enable javascript "
@@ -394,10 +408,37 @@ def _wayback_snapshot(cfg: BridgeConfig, url: str) -> str:
         # of ``url`` would be a lie; refuse the rung and let the ladder move
         # on to the next one.
         raise ScrapeError(
-            f"wayback availability API returned a snapshot for a different "
-            f"page than {url!r}"
+            f"wayback availability API returned a snapshot for a different page than {url!r}"
         )
     return snapshot
+
+
+def _ai_search_answer(cfg: BridgeConfig, prompt: str, url: str) -> str:
+    """One bounded model call for the ai-search rung (#25).
+
+    A thread is the only way to bound a synchronous call: ``run_tool`` ->
+    ``generate`` carries its own retry/backoff budget, but nothing a caller
+    can wait on. ``result(timeout=...)`` bounds OUR wait; the generation
+    thread itself is abandoned (see ``_AI_SEARCH_TIMEOUT_SEC``).
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import TimeoutError as FuturesTimeout
+
+    from .mcp_tools import run_tool
+
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ai-search")
+    try:
+        future = pool.submit(run_tool, cfg, "gemini_search", {"query": prompt})
+        try:
+            return future.result(timeout=_AI_SEARCH_TIMEOUT_SEC)
+        except FuturesTimeout as exc:
+            raise ScrapeError(
+                f"ai-search timed out after {_AI_SEARCH_TIMEOUT_SEC:g}s for {url!r}"
+            ) from exc
+    finally:
+        # Do NOT wait: the whole point is that a wedged generation cannot
+        # hold the ladder (or a batch worker) hostage.
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def _ai_read(cfg: BridgeConfig, url: str, max_chars: int) -> ScrapeResult:
@@ -413,15 +454,13 @@ def _ai_read(cfg: BridgeConfig, url: str, max_chars: int) -> ScrapeResult:
     """
     if not getattr(cfg, "smart_fetch_ai", True):
         raise ScrapeError("ai-search disabled (smart_fetch_ai=false)")
-    from .mcp_tools import run_tool
-
     prompt = (
         f"Find and return the main text content of the page {url}. Quote the "
         "article body as fully and verbatim as you can, and cite the source "
         "URL. If you cannot access the page content, say exactly that "
         "instead of summarizing from memory."
     )
-    answer = run_tool(cfg, "gemini_search", {"query": prompt}).strip()
+    answer = _ai_search_answer(cfg, prompt, url).strip()
     if not answer or len(answer) < 80:
         raise ScrapeError(f"ai-search produced no usable content for {url!r}")
     text = answer[:max_chars]
@@ -465,7 +504,16 @@ def fallback_scrape(
 
     with _ladder_lock(host):
         attempts: list[str] = [f"direct: {first_error}"]
+        deadline = time.monotonic() + _LADDER_BUDGET_SEC
         for strategy in _strategy_order(host):
+            if time.monotonic() >= deadline:
+                # (#25) The budget exists so four slow rungs cannot stack
+                # into minutes of silence. Skipped rungs are recorded just
+                # like failed ones: the taxonomy stays honest.
+                attempts.append(
+                    f"{strategy}: skipped, the {_LADDER_BUDGET_SEC:g}s ladder budget was exhausted"
+                )
+                continue
             if progress is not None:
                 progress(f"smart-fetch: direct failed ({first_error}); trying {strategy}")
             time.sleep(_PAUSE_SEC)

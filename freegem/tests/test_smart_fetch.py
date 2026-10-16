@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import time
 import unittest
 from collections.abc import Mapping
 from pathlib import Path
@@ -198,9 +199,7 @@ class FallbackLadderTests(unittest.TestCase):
         self.assertEqual(result1.text, "the article body")
         self.assertEqual(first_order, ["browser-headers", "reader"])
         # Written to DISK by fetch 1 — fetch 2 reads it back with no seeding.
-        self.assertEqual(
-            StrategyMemory(default_memory_path()).get("remembered.example"), "reader"
-        )
+        self.assertEqual(StrategyMemory(default_memory_path()).get("remembered.example"), "reader")
         with (
             mock.patch(
                 "freegem.smart_fetch._try_strategy",
@@ -307,6 +306,36 @@ class FallbackLadderTests(unittest.TestCase):
             _ai_read(cfg, "https://x.example/", 1000)
         self.assertIn("disabled", str(caught.exception))
 
+    def test_ai_search_rung_is_time_bounded(self) -> None:
+        """(#25) A wedged generation cannot hold the rung: _ai_read raises an
+        honest ScrapeError once the bound lapses, without waiting for the
+        model call to finish."""
+        from freegem.smart_fetch import _ai_read
+
+        def wedged_run_tool(cfg, name, kwargs):
+            time.sleep(1.0)
+            return "a late answer that will be discarded"
+
+        with (
+            mock.patch("freegem.smart_fetch._AI_SEARCH_TIMEOUT_SEC", 0.1),
+            mock.patch("freegem.mcp_tools.run_tool", side_effect=wedged_run_tool),
+        ):
+            started = time.monotonic()
+            with self.assertRaises(ScrapeError) as caught:
+                _ai_read(BridgeConfig(log_requests=False), "https://x.example/", 1000)
+        self.assertLess(time.monotonic() - started, 0.9, "the bound held")
+        self.assertIn("timed out", str(caught.exception))
+
+    def test_ai_search_returns_within_the_bound(self) -> None:
+        """(#25) The bound does not disturb a healthy rung."""
+        from freegem.smart_fetch import _ai_read
+
+        with mock.patch("freegem.mcp_tools.run_tool", return_value="word " * 30):
+            result = _ai_read(BridgeConfig(log_requests=False), "https://x.example/", 1000)
+        self.assertEqual(result.via, "ai-search")
+        self.assertIn("word", result.text)
+        self.assertFalse(result.truncated)
+
     def test_progress_receives_ladder_steps(self) -> None:
         events: list[str] = []
         ok_page = ScrapeResult(url="u", title="T", text="content")
@@ -324,6 +353,47 @@ class FallbackLadderTests(unittest.TestCase):
             )
         self.assertTrue(any("browser-headers" in event for event in events))
         self.assertTrue(any("read" in event for event in events))
+
+    def test_ladder_budget_skips_rungs_and_records_it(self) -> None:
+        """(#25) Past the wall-clock budget the remaining rungs are skipped
+        and the taxonomy says so, instead of stacking minutes of silence."""
+        order: list[str] = []
+        scripted = {name: ScrapeError("HTTP 403") for name in STRATEGIES}
+        with (
+            mock.patch("freegem.smart_fetch._LADDER_BUDGET_SEC", 0.0),
+            mock.patch(
+                "freegem.smart_fetch._try_strategy", side_effect=self._ladder(scripted, order)
+            ),
+            mock.patch("freegem.smart_fetch.time.sleep"),
+        ):
+            with self.assertRaises(ScrapeError) as caught:
+                fallback_scrape(
+                    self.cfg, "https://slow.example/", max_chars=100, first_error="HTTP 403"
+                )
+        self.assertEqual(order, [], "no rung may run once the budget is gone")
+        message = str(caught.exception)
+        self.assertEqual(message.count("ladder budget was exhausted"), len(STRATEGIES))
+        self.assertIn("skipped", message)
+
+    def test_healthy_ladder_still_runs_inside_the_budget(self) -> None:
+        """(#25) The default budget never clips a normal two-rung walk."""
+        order: list[str] = []
+        ok_page = ScrapeResult(url="u", title="T", text="real content")
+        scripted = {
+            "browser-headers": ScrapeError("HTTP 403"),
+            "reader": ok_page,
+        }
+        with (
+            mock.patch(
+                "freegem.smart_fetch._try_strategy", side_effect=self._ladder(scripted, order)
+            ),
+            mock.patch("freegem.smart_fetch.time.sleep"),
+        ):
+            result = fallback_scrape(
+                self.cfg, "https://ok.example/", max_chars=100, first_error="HTTP 403"
+            )
+        self.assertEqual(order, ["browser-headers", "reader"])
+        self.assertEqual(result.text, "real content")
 
 
 class ReaderParseTests(unittest.TestCase):
@@ -416,9 +486,7 @@ class WaybackSnapshotTests(unittest.TestCase):
         self.assertEqual(out, "https://web.archive.org/web/20240101000000/https://news.example/a")
 
     def test_matching_snapshot_with_id_modifier(self) -> None:
-        out = self._snapshot(
-            "https://web.archive.org/web/20240101000000id_/https://news.example/a"
-        )
+        out = self._snapshot("https://web.archive.org/web/20240101000000id_/https://news.example/a")
         self.assertIn("/a", out)
 
     def test_bare_domain_snapshot_matches(self) -> None:
@@ -432,23 +500,17 @@ class WaybackSnapshotTests(unittest.TestCase):
         ):
             body = json.dumps({"archived_snapshots": {"closest": {"url": snap}}}).encode()
             with mock.patch("freegem.web_scraper._fetch", return_value=_FakeResponse(body)):
-                out = _wayback_snapshot(
-                    BridgeConfig(log_requests=False), "https://example.com"
-                )
+                out = _wayback_snapshot(BridgeConfig(log_requests=False), "https://example.com")
             self.assertEqual(out, snap)
 
     def test_snapshot_for_a_different_host_is_rejected(self) -> None:
         with self.assertRaises(ScrapeError) as caught:
-            self._snapshot(
-                "https://web.archive.org/web/20240101000000/https://OTHER.example/a"
-            )
+            self._snapshot("https://web.archive.org/web/20240101000000/https://OTHER.example/a")
         self.assertIn("different page", str(caught.exception))
 
     def test_snapshot_for_a_different_path_is_rejected(self) -> None:
         with self.assertRaises(ScrapeError) as caught:
-            self._snapshot(
-                "https://web.archive.org/web/20240101000000/https://news.example/OTHER"
-            )
+            self._snapshot("https://web.archive.org/web/20240101000000/https://news.example/OTHER")
         self.assertIn("different page", str(caught.exception))
 
     def test_snapshot_without_a_web_prefix_is_rejected(self) -> None:
