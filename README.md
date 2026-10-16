@@ -72,6 +72,9 @@ pip install freegem        # or: pip install "freegem[full]"
 freegem serve
 ```
 
+Global flags (`--model`, `--proxy`, `--quiet`, …) work before or after the
+subcommand — see [Global flags](#global-flags).
+
 The server starts on `http://127.0.0.1:8081` — loopback only. Point any
 OpenAI-compatible client at it:
 
@@ -188,6 +191,45 @@ freegem crawl plan --seeds https://example.com --max-pages 20   # dry run
 freegem models                                  # registry + session state
 freegem doctor                                  # diagnostics, no generation
 ```
+
+#### Global flags
+
+The global flags are accepted in BOTH positions — before or after the
+subcommand — because every subcommand re-declares them (`crawl status` is
+the only exception; it takes just `--state`). `--version` is top-level only.
+
+| Flag | Meaning |
+| --- | --- |
+| `--config PATH` | Config file (default: search `./config.json`, `./gemini-auth.json`, `~/.config/freegem/config.json`, `$FREEGEM_CONFIG`) |
+| `--model ID` | Default model id |
+| `--cookie-file PATH` | Session cookie file |
+| `--proxy URL` | HTTP proxy, e.g. `http://127.0.0.1:7890` |
+| `--quiet` | Suppress request logging |
+| `--version` | Print the version and exit (top level) |
+
+```bash
+freegem --model gemini-3.6-flash ask "hi"   # before the subcommand
+freegem ask "hi" --model gemini-3.6-flash   # after it — the same thing
+freegem crawl run --model gemini-3.6-flash --seeds https://example.com/docs/ --max-pages 5
+```
+
+#### Windows notes
+
+**Git Bash / MSYS rewrites flag values that start with `/` before a native
+Windows executable sees them.** A forward-slash argument is converted to a
+Windows path under the Git installation, which silently changes its meaning:
+
+```bash
+# intended: allow the /docs path prefix
+freegem crawl plan --seeds https://example.com/docs/ --allow-path /docs
+# under Git Bash the plan rejects every URL with out_of_scope_path, because
+# MSYS delivered --allow-path as C:/Program Files/Git/docs. The scope logic
+# itself is correct — the shell mangled the argument before freegem ran.
+```
+
+Workarounds: disable the conversion for one command with
+`MSYS_NO_PATHCONV=1 freegem crawl plan ...`, or run the same command from
+PowerShell or cmd, which pass arguments through untouched.
 
 ---
 
@@ -552,7 +594,9 @@ url, title, readable text. Formats: `--format jsonl` (default), `json`,
 `csv`.
 
 **Hardening** — every response body is capped on the wire AND after
-decompression (default 100 MiB, `--max-bytes`), with bodies over 16 MiB
+decompression — default 5 MiB per page (`--max-bytes`); a body past the cap
+is refused `too_large`, never read forever (the hardening layer's own
+ceiling is 100 MiB, which campaign runs read at) — with bodies over 16 MiB
 spilled to disk instead of held in RAM; the DOM is capped in nodes
 and depth; XML (sitemaps, feeds) is parsed with DTD/ENTITY refused outright;
 every log line and output row passes a secret-redaction pass (API-key and

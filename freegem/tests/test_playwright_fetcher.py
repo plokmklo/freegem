@@ -40,8 +40,19 @@ class TestPlaywrightFetcher(unittest.TestCase):
         )
         self.assertFalse(should_fallback_to_browser(outcome_ok))
 
+    @patch(
+        "freegem.playwright_fetcher.browser_request_allowed",
+        side_effect=lambda url: url,
+    )
     @patch("freegem.playwright_fetcher.is_playwright_available", return_value=False)
-    def test_fetch_with_playwright_not_installed(self, mock_avail: Any) -> None:
+    def test_fetch_with_playwright_not_installed(
+        self, mock_avail: Any, mock_allowed: Any
+    ) -> None:
+        # The guard is a pass-through here: fetch_with_playwright validates
+        # the FULL SSRF policy (strict resolve-and-check, i.e. DNS) before
+        # the availability check, and a transient outage made that refusal
+        # fire before the expected RuntimeError. The not-installed path must
+        # be observable regardless of resolver behavior.
         opts = PlaywrightOptions(url="https://example.com")
         with self.assertRaises(RuntimeError):
             fetch_with_playwright(opts)

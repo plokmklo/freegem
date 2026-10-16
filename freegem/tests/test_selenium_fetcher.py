@@ -4,6 +4,14 @@ No browser and no Grid in CI: the real driver paths are exercised through a
 fake ``webdriver`` module injected into sys.modules, verifying isolation
 (fresh driver per fetch, quit in finally), cookie seeding, waits, CDP PDF,
 and the HTTP-first fallback decision.
+
+No real DNS either: ``fetch_with_selenium`` runs the browser SSRF policy
+(``browser_request_allowed`` -> ``ssrf.host_public_strict``) before any
+driver is built, and that policy resolves the target host through
+``socket.getaddrinfo``. The resolver seam is stubbed the same way the other
+crawler tests stub it (cf. test_browser_guard.py, test_crawler_runner.py),
+so a transient network outage cannot fail these tests with
+``SSRF refused: cannot resolve 'example.org'``.
 """
 
 from __future__ import annotations
@@ -24,6 +32,29 @@ from freegem.selenium_fetcher import (
     is_selenium_available,
     should_fallback_to_selenium,
 )
+
+#: Deterministic answers for the hosts these tests fetch; everything else is
+#: refused fail-closed, like a real resolver during an outage. The address is
+#: a checked-public-looking IP; the browser is faked, so nothing dials it.
+_HERMETIC_DNS: ClassVar[dict[str, str]] = {
+    "example.org": "93.184.216.34",
+    "example.com": "93.184.216.34",
+}
+
+
+def _hermetic_getaddrinfo(host: str, *args: object, **kwargs: object) -> list[tuple]:
+    """Static resolver table: names -> IPs, unknown names raise (no network)."""
+    if host in _HERMETIC_DNS:
+        return [("AF_INET", None, None, "", (_HERMETIC_DNS[host], 0))]
+    # Match real getaddrinfo, which errors on unresolvable names instead of
+    # returning an empty list (same convention as test_browser_guard.py).
+    raise OSError(f"hermetic test resolver: no entry for {host!r}")
+
+
+@pytest.fixture(autouse=True)
+def hermetic_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub the SSRF guard's resolver seam for every test in this module."""
+    monkeypatch.setattr("freegem.ssrf.socket.getaddrinfo", _hermetic_getaddrinfo)
 
 
 class FakeDriver:

@@ -3,16 +3,17 @@
 #   cp config.example.json config.json
 #
 # Every field is optional; anything omitted falls back to the default shown
-# below. Values can also come from environment variables, which take priority
+# below (these are exactly the DEFAULT_CONFIG values from freegem/config.py).
+# Values can also come from environment variables, which take priority
 # over the file (useful for Docker and CI):
 #
-#   GEMINI_BL, GEMINI_AUTH_USER, GEMINI_XSRF_TOKEN, GEMINI_PROXY,
-#   GEMINI_COOKIE_FILE, FREEGEM_CONFIG
+#   FREEGEM_API_KEY, GEMINI_BL, GEMINI_AUTH_USER, GEMINI_XSRF_TOKEN,
+#   GEMINI_PROXY, GEMINI_COOKIE_FILE, FREEGEM_CONFIG
 #
-# NOTE: there is deliberately no api_keys field. This project has no
-# authentication layer. Access control is that the server binds to loopback.
-# Expose it beyond your own machine only behind a reverse proxy that does the
-# auth, because the thing you would be protecting is your Google session.
+# The optional api_key below gates freegem's OWN REST/MCP API when set (see
+# _comment_keys); it never authenticates to Google. The thing actually worth
+# protecting is your Google session (cookie_file + xsrf_token), so keep the
+# server bound to loopback unless you know why not.
 {
   "host": "127.0.0.1",
   "port": 8081,
@@ -26,8 +27,8 @@
   "_comment_bl": "Gemini's frontend build tag. Refreshed automatically at startup by `freegem serve`; set it only to pin a version.",
   "gemini_bl": "boq_assistant-bard-web-server_20260716.08_p0",
 
-  "_comment_behaviour": "temporary_chats=true keeps requests out of your Gemini account history.",
-  "temporary_chats": true,
+  "_comment_behaviour": "temporary_chats=true sends requests as temporary chats, kept out of your Gemini account history (the default is false — normal history rules apply).",
+  "temporary_chats": false,
   "retry_attempts": 3,
   "retry_delay_sec": 2,
   "request_timeout_sec": 180,
@@ -40,6 +41,18 @@
   "request_queue_wait_sec": 0.0,
   "research_evidence": true,
   "discover_wiki": "en.wikipedia.org",
+
+  "_comment_discovery": "discover_backend = backend for verify --discover URL discovery: \"wiki\" searches the MediaWiki site above; \"serp\" searches the web through the DuckDuckGo HTML endpoint (better for claims about software, companies, current events).",
+  "discover_backend": "wiki",
+
+  "_comment_smart_fetch": "Smart-fetch fallback ladder: when the direct, self-identifying fetch is refused (403/405/401/...), retry through legitimate read paths (browser-identifying headers, r.jina.ai public reader, Internet Archive, Gemini search) and remember what worked per host. No CAPTCHA solving, no challenge answering. smart_fetch_ai=false disables the last, AI-mediated ladder step (Gemini search, labeled via=\"ai-search\").",
+  "smart_fetch": true,
+  "smart_fetch_ai": true,
+
+  "_comment_keys": "api_key (optional) gates the server's OWN job/result/artifact REST API and MCP adapter behind `Authorization: Bearer <key>` or `X-API-Key` when set (FREEGEM_API_KEY does the same); null keeps the loopback-only, unauthenticated behavior. It never authenticates to Google — the Gemini session above is separate. brave_api_key = Brave Search API token for the \"serp\" discovery backend. reader_api_key = optional r.jina.ai key: the reader serves anonymous queries from well-reputed IPs, datacenter IPs get 401 — sent ONLY to r.jina.ai, only by the smart-fetch ladder.",
+  "api_key": null,
+  "brave_api_key": "",
+  "reader_api_key": "",
 
   "_comment_jobs": "Bounded background-job execution (the /v1/jobs API and MCP job tools). job_max_workers = fixed worker pool size. job_max_pending = bounded queue; beyond it submissions get HTTP 429 instead of unbounded memory. job_timeout_sec = per-job watchdog timeout (a job can override via params.timeout_sec, clamped 1-3600). job_retention = terminal jobs kept before the oldest are evicted. job_db = durable SQLite status file (null = ~/.config/freegem/jobs.sqlite3; \"memory\" disables persistence; jobs queued/processing at restart come back 'interrupted'). job_queue_url = optional external execution queue: memory://, sqlite:///path/q.sqlite3, redis://host:6379/0, amqp://...",
   "job_max_workers": 4,
