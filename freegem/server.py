@@ -146,7 +146,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
             return True
 
         record_audit_event("auth_failure", client_ip, req_id, {"path": self.path})
-        self.send_error_json("Unauthorized: invalid or missing API key", 401)
+        self._reject_request("Unauthorized: invalid or missing API key", 401)
         return False
 
     def _handle_jobs_get(self, path: str) -> None:
@@ -283,6 +283,13 @@ class GeminiHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        # A pre-body rejection (or any path that set close_connection before
+        # answering) must TELL the client (#27): a keep-alive client that is
+        # not told would try to reuse the socket while the unread request
+        # body desyncs the stream. For plain keep-alive responses
+        # close_connection is False here and no header is added.
+        if self.close_connection:
+            self.send_header("Connection", "close")
         request_id = getattr(self, "_request_id", None)
         if request_id:
             self.send_header("X-Request-Id", request_id)
@@ -303,6 +310,18 @@ class GeminiHandler(BaseHTTPRequestHandler):
 
     def send_error_json(self, message: str, status: int) -> None:
         self.send_json({"error": {"message": message, "type": "bridge_error"}}, status)
+
+    def _reject_request(self, message: str, status: int) -> None:
+        """Refuse a request BEFORE its body has been read (#27).
+
+        On a keep-alive connection the unread POST body would then be parsed
+        as the next request line -- the same framing desync _json_body
+        documents for its own too-large path. Every pre-body rejection goes
+        through here so the connection is closed after the answer, and
+        _send echoes ``Connection: close`` so the client is told too.
+        """
+        self.close_connection = True
+        self.send_error_json(message, status)
 
     def _start_sse(self) -> None:
         """Begin an SSE response.
@@ -435,7 +454,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
         allowed = _LOOPBACK_HOSTS | {self.cfg.host.split("%")[0].lower()}
         if hostname not in allowed:
             log(self.cfg, f"rejected request with unexpected Host {hostname!r}")
-            self.send_error_json("forbidden host", 403)
+            self._reject_request("forbidden host", 403)
             return False
         return True
 
@@ -469,17 +488,17 @@ class GeminiHandler(BaseHTTPRequestHandler):
         site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
         if site == "cross-site":
             log(self.cfg, "rejected cross-site POST (Sec-Fetch-Site: cross-site)")
-            self.send_error_json("cross-site POSTs are not allowed", 403)
+            self._reject_request("cross-site POSTs are not allowed", 403)
             return False
         origin = self.headers.get("Origin")
         if origin is not None and not _origin_is_loopback(origin):
             log(self.cfg, f"rejected cross-origin POST from Origin {origin!r}")
-            self.send_error_json("cross-origin POSTs are not allowed", 403)
+            self._reject_request("cross-origin POSTs are not allowed", 403)
             return False
         content_type = (self.headers.get("Content-Type") or "").split(";", 1)[0]
         if content_type.strip().lower() != "application/json":
             log(self.cfg, f"rejected POST with Content-Type {content_type.strip()!r}")
-            self.send_error_json("Content-Type must be application/json", 415)
+            self._reject_request("Content-Type must be application/json", 415)
             return False
         return True
 
@@ -658,7 +677,9 @@ class GeminiHandler(BaseHTTPRequestHandler):
                 # catch-all: clients differ on exact path, treat as chat
                 self._handle_chat()
             else:
-                self.send_error_json("not found", 404)
+                # Rejected before any body read: same keep-alive desync
+                # hazard as the other pre-body rejections (#27).
+                self._reject_request("not found", 404)
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception as exc:
@@ -1058,55 +1079,67 @@ class GeminiHandler(BaseHTTPRequestHandler):
 
         base = {"id": response_id, "object": "response", "created_at": created, "model": model_name}
         self._start_sse()
-        emit(
-            "response.created",
-            response={**base, "status": "in_progress", "output": [], "usage": None},
-        )
-        emit(
-            "response.in_progress",
-            response={**base, "status": "in_progress", "output": [], "usage": None},
-        )
+        # Everything after _start_sse() runs with SSE headers already on the
+        # wire: an escaping error would reach the generic handler and call
+        # send_error_json, injecting a second status line into the body
+        # (issue #31). Errors become Responses-API ``error`` events instead;
+        # only client disconnects are silently swallowed.
+        try:
+            emit(
+                "response.created",
+                response={**base, "status": "in_progress", "output": [], "usage": None},
+            )
+            emit(
+                "response.in_progress",
+                response={**base, "status": "in_progress", "output": [], "usage": None},
+            )
 
-        for output_index, item in enumerate(output):
-            if item["type"] == "function_call":
-                pending = {**item, "arguments": "", "status": "in_progress"}
-                emit("response.output_item.added", output_index=output_index, item=pending)
-                emit(
-                    "response.function_call_arguments.delta",
-                    item_id=item["id"],
-                    output_index=output_index,
-                    delta=item["arguments"],
-                )
-                emit(
-                    "response.function_call_arguments.done",
-                    item_id=item["id"],
-                    output_index=output_index,
-                    arguments=item["arguments"],
-                )
-                emit("response.output_item.done", output_index=output_index, item=item)
-            else:
-                pending = {**item, "content": [], "status": "in_progress"}
-                emit("response.output_item.added", output_index=output_index, item=pending)
-                for content_index, part in enumerate(item["content"]):
-                    anchors = {
-                        "item_id": item["id"],
-                        "output_index": output_index,
-                        "content_index": content_index,
-                    }
+            for output_index, item in enumerate(output):
+                if item["type"] == "function_call":
+                    pending = {**item, "arguments": "", "status": "in_progress"}
+                    emit("response.output_item.added", output_index=output_index, item=pending)
                     emit(
-                        "response.content_part.added",
-                        **anchors,
-                        part={"type": "output_text", "text": "", "annotations": []},
+                        "response.function_call_arguments.delta",
+                        item_id=item["id"],
+                        output_index=output_index,
+                        delta=item["arguments"],
                     )
-                    emit("response.output_text.delta", **anchors, delta=part["text"])
-                    emit("response.output_text.done", **anchors, text=part["text"])
-                    emit("response.content_part.done", **anchors, part=part)
-                emit("response.output_item.done", output_index=output_index, item=item)
+                    emit(
+                        "response.function_call_arguments.done",
+                        item_id=item["id"],
+                        output_index=output_index,
+                        arguments=item["arguments"],
+                    )
+                    emit("response.output_item.done", output_index=output_index, item=item)
+                else:
+                    pending = {**item, "content": [], "status": "in_progress"}
+                    emit("response.output_item.added", output_index=output_index, item=pending)
+                    for content_index, part in enumerate(item["content"]):
+                        anchors = {
+                            "item_id": item["id"],
+                            "output_index": output_index,
+                            "content_index": content_index,
+                        }
+                        emit(
+                            "response.content_part.added",
+                            **anchors,
+                            part={"type": "output_text", "text": "", "annotations": []},
+                        )
+                        emit("response.output_text.delta", **anchors, delta=part["text"])
+                        emit("response.output_text.done", **anchors, text=part["text"])
+                        emit("response.content_part.done", **anchors, part=part)
+                    emit("response.output_item.done", output_index=output_index, item=item)
 
-        emit(
-            "response.completed",
-            response={**base, "status": "completed", "output": output, "usage": usage},
-        )
+            emit(
+                "response.completed",
+                response={**base, "status": "completed", "output": output, "usage": usage},
+            )
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as exc:
+            log(self.cfg, f"responses stream error: {exc}")
+            with contextlib.suppress(Exception):
+                emit("error", code="stream_error", message=str(exc), param=None)
 
     # ── /v1beta (Gemini CLI) ─────────────────────────────────────────────────
 
@@ -1247,6 +1280,16 @@ class GeminiHandler(BaseHTTPRequestHandler):
             pass
         except Exception as exc:
             log(self.cfg, f"google stream error: {exc}")
+            # Returning silently hands the client a 200 whose event stream
+            # just stops -- indistinguishable from a completed answer with no
+            # text (issue #31). Emit a Google-style error frame; the Gemini
+            # face has no [DONE] sentinel, so the error frame is the honest
+            # terminator. Never propagate: headers are already on the wire.
+            with contextlib.suppress(Exception):
+                self._sse(
+                    None,
+                    {"error": {"code": 500, "message": str(exc), "status": "INTERNAL"}},
+                )
 
 
 # Refusal-path bounds. _refuse_busy runs on the accept thread, so every wait

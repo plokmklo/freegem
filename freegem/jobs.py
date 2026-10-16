@@ -296,6 +296,32 @@ class JobManager:
         # ones already relabeled by the store on open).
         for job in self._store.load_all():
             self.jobs[job.id] = job
+        self._sweep_orphan_artifact_files()
+
+    def _sweep_orphan_artifact_files(self) -> None:
+        """Startup sweep: unlink artifact files whose artifact id is no
+        longer known to any job (issue #39 -- evictions leaked the files
+        before the purge fix, and a crash can orphan a mid-write file).
+        Files referenced by a restored durable job are kept; anything that
+        is not a JobManager artifact (no ``art-`` id prefix) is never
+        touched. Best-effort by design."""
+        referenced = {aid for job in self.jobs.values() for aid in job.artifacts}
+        referenced.update(self.artifacts)
+        try:
+            entries = list(self.artifact_dir.iterdir())
+        except OSError:
+            return
+        for path in entries:
+            name = path.name
+            if not name.startswith("art-"):
+                continue
+            if name.split("_", 1)[0] in referenced:
+                continue
+            try:
+                if path.is_file():
+                    path.unlink()
+            except OSError:
+                continue
 
     def attach_store(self, store: MemoryJobStore | SqliteJobStore) -> None:
         """Make this manager durable (once): merge stored rows into memory."""
@@ -334,12 +360,22 @@ class JobManager:
         result: dict[str, Any] | None = None,
         error: str | None = None,
         retry_trace: dict[str, Any] | None = None,
-    ) -> None:
-        """Update status and record results or retry trace for a job."""
+    ) -> bool:
+        """Update status and record results or retry trace for a job.
+
+        Returns True when the write was applied. Terminal states are final:
+        once a job is completed/failed/cancelled/timed_out/interrupted, later
+        updates are ignored -- except an idempotent re-write of the same
+        state. Without this guard, a body that keeps draining after the
+        watchdog stamped ``timed_out`` would overwrite it with ``completed``
+        and deliver a result nobody trusts (issue #26a).
+        """
         with self._lock:
             job = self.jobs.get(job_id)
             if not job:
-                return
+                return False
+            if job.status in TERMINAL_STATUSES and status != job.status:
+                return False
             job.status = status
             now = time.time()
             if status == "processing" and job.started_at is None:
@@ -353,6 +389,79 @@ class JobManager:
             if retry_trace is not None:
                 job.retry_traces.append(retry_trace)
             self._store.upsert(job)
+            return True
+
+    def stamp_timed_out(
+        self,
+        job_id: str,
+        *,
+        error: str,
+        retry_trace: dict[str, Any] | None = None,
+    ) -> bool:
+        """Watchdog-only: stamp ``timed_out`` and drop any result in ONE
+        locked step, refusing jobs that already reached a terminal state.
+
+        The atomicity is the point (#26b): a body finishing exactly at the
+        deadline could otherwise slip its result in between the status stamp
+        and a separate result clear, leaving a ``completed`` job without its
+        result -- or, pre-guard, have its untrusted output overwrite the
+        timeout. Returns True when the stamp was applied.
+        """
+        with self._lock:
+            job = self.jobs.get(job_id)
+            if job is None or job.status in TERMINAL_STATUSES:
+                return False
+            job.status = "timed_out"
+            job.completed_at = time.time()
+            job.error = error
+            job.result = None  # the call may still be draining: not trusted
+            if retry_trace is not None:
+                job.retry_traces.append(retry_trace)
+            self._store.upsert(job)
+            return True
+
+    def job_status(self, job_id: str) -> str | None:
+        """Read a job's status under the manager lock (a consistent read)."""
+        with self._lock:
+            job = self.jobs.get(job_id)
+            return job.status if job is not None else None
+
+    def mark_cancelled(
+        self,
+        job_id: str,
+        *,
+        error: str,
+        retry_trace: dict[str, Any] | None = None,
+        override: bool = False,
+    ) -> bool:
+        """Stamp ``cancelled`` and drop any result in one locked step.
+
+        Without ``override`` this is terminal-guarded like every status
+        write (#26c): a cancel stamp that lands after the job already
+        finished must not flip it to ``cancelled`` while its result
+        survives. With ``override=True`` -- used only by the runner when it
+        observed the cancel flag set while THIS run was executing -- a
+        completion that raced the cancel is overridden (the documented
+        contract: the runner never delivers a result for a cancelled job);
+        a watchdog ``timed_out`` state still wins in that case.
+        """
+        with self._lock:
+            job = self.jobs.get(job_id)
+            if job is None:
+                return False
+            if override:
+                if job.status == "timed_out":
+                    return False
+            elif job.status in TERMINAL_STATUSES:
+                return False
+            job.status = "cancelled"
+            job.completed_at = time.time()
+            job.error = error
+            job.result = None
+            if retry_trace is not None:
+                job.retry_traces.append(retry_trace)
+            self._store.upsert(job)
+            return True
 
     def bump_attempts(self, job_id: str) -> int:
         """Count one execution attempt; returns the new attempt number."""
@@ -373,7 +482,13 @@ class JobManager:
                 self._store.upsert(job)
 
     def enforce_retention(self, keep: int) -> int:
-        """Evict the oldest TERMINAL jobs beyond ``keep``. Returns evicted count."""
+        """Evict the oldest TERMINAL jobs beyond ``keep``. Returns evicted count.
+
+        Eviction is whole-object (#39, same as duplicate #32): the job's
+        artifact records and their files on disk go with it, not just the
+        job row -- otherwise freegem_artifacts/ grows without bound no
+        matter how small the job registry is kept.
+        """
         if keep <= 0:
             return 0
         with self._lock:
@@ -386,10 +501,27 @@ class JobManager:
             overflow = len(terminal) - keep
             evicted = 0
             for job in terminal[: max(0, overflow)]:
+                self._purge_artifacts_locked(job.id)
                 self.jobs.pop(job.id, None)
                 self._store.delete(job.id)
                 evicted += 1
             return evicted
+
+    def _purge_artifacts_locked(self, job_id: str) -> None:
+        """Drop a job's artifact records and unlink their files.
+
+        Caller must hold ``self._lock``. File removal is best-effort: a
+        missing file is fine (already swept), an unreadable one must not
+        block the eviction of the registry entries."""
+        doomed = [aid for aid, art in self.artifacts.items() if art.job_id == job_id]
+        for aid in doomed:
+            art = self.artifacts.pop(aid, None)
+            if art is None:
+                continue
+            try:
+                os.unlink(art.file_path)
+            except OSError:
+                pass
 
     def save_artifact(
         self, job_id: str, filename: str, content_type: str, file_path_or_bytes: str | bytes
@@ -536,20 +668,26 @@ class JobRunner:
         return job
 
     def cancel(self, job_id: str) -> bool:
-        """Request cancellation. Queued: immediate. Running: cooperative."""
-        job = self.manager.get_job(job_id)
-        if job is None:
+        """Request cancellation. Queued: immediate. Running: cooperative.
+
+        The status is read under the manager's lock (job_status), and the
+        stamp itself is terminal-guarded -- so a job that completes while the
+        cancel request is in flight keeps its terminal status and result.
+        Pre-fix (#26c), the unlocked ``job.status`` read let a cancel racing
+        a completion flip the finished job back to ``cancelled`` while its
+        result survived, an incoherent state.
+        """
+        status = self.manager.job_status(job_id)
+        if status is None or status in TERMINAL_STATUSES:
             return False
-        if job.status == "queued":
-            with self._lock:
-                self._cancel_requested.add(job_id)
-            self.manager.update_job_status(job_id, "cancelled", error="cancelled before start")
-            return True
-        if job.status == "processing":
-            with self._lock:
-                self._cancel_requested.add(job_id)
-            return True
-        return False
+        with self._lock:
+            self._cancel_requested.add(job_id)
+        if status == "queued":
+            # May lose to a worker that picked the job up first (the stamp
+            # is terminal-guarded); the flag set above still owns the
+            # outcome via the cooperative path.
+            self.manager.mark_cancelled(job_id, error="cancelled before start")
+        return True
 
     def stats(self) -> dict[str, Any]:
         """Operational snapshot for /metrics (no job contents)."""
@@ -612,37 +750,47 @@ class JobRunner:
             self._running[job.id] = time.monotonic() + self._timeout_for(job)
         self.manager.update_job_status(job.id, "processing")
         self.manager.bump_attempts(job.id)
+        failure: Exception | None = None
         try:
             self._body(job)
         except Exception as exc:
-            self._handle_failure(job, exc)
+            failure = exc
         finally:
             with self._lock:
                 self._running.pop(job.id, None)
                 cancelled = job.id in self._cancel_requested
                 self._cancel_requested.discard(job.id)
+        # The job is no longer registered as running: the watchdog owns no
+        # deadline for it from here on. Failure handling -- including the
+        # retry backoff sleep -- therefore happens AFTER the pop (#28): the
+        # old code slept up to 30s inside the except, still holding the
+        # slot, so the watchdog could mark a sleeping job ``timed_out`` and
+        # the retry then resurrected it -- and the sleeping worker stalled
+        # the pool either way.
+        if failure is not None:
+            self._handle_failure(job, failure, cancelled=cancelled)
+            self.manager.enforce_retention(self.retention)
+            return
         if cancelled:
             # Cooperative cancel landed while the body ran: the worker's
             # completion is overridden -- cancelled results are not trusted.
-            current = self.manager.get_job(job.id)
-            if current is not None and current.status != "timed_out":
-                self.manager.update_job_status(job.id, "cancelled", error="cancelled during run")
-                self.manager.clear_result(job.id)
+            # The override is atomic and refuses a watchdog ``timed_out``;
+            # a completion that beat the cancel flag keeps its result.
+            self.manager.mark_cancelled(job.id, error="cancelled during run", override=True)
         self.manager.enforce_retention(self.retention)
 
-    def _handle_failure(self, job: Job, exc: Exception) -> None:
+    def _handle_failure(self, job: Job, exc: Exception, *, cancelled: bool = False) -> None:
         trace = {"timestamp": time.time(), "attempt": job.attempts, "error": str(exc)}
         current = self.manager.get_job(job.id)
         if current is None:
             return
-        with self._lock:
-            cancelled = job.id in self._cancel_requested
-            self._cancel_requested.discard(job.id)
         if cancelled:
-            self.manager.update_job_status(
-                job.id, "cancelled", error="cancelled during run", retry_trace=trace
+            # The cancel flag was set while this run executed: cancelled wins
+            # over the failure (result dropped, atomic), but a watchdog
+            # ``timed_out`` stamp is not downgraded.
+            self.manager.mark_cancelled(
+                job.id, error="cancelled during run", retry_trace=trace, override=True
             )
-            self.manager.clear_result(job.id)
             return
         if current.status == "timed_out":
             # The watchdog owns this job now; the body's exception is just
@@ -650,12 +798,20 @@ class JobRunner:
             return
         if current.attempts <= self._max_retries_for(current):
             delay = min(30.0, 2.0 ** (current.attempts - 1))
-            self.manager.update_job_status(
+            # The re-queue stamp is terminal-guarded (#26a): if a cancel or a
+            # timeout won the race for this job, the write is refused and the
+            # job is NOT resurrected out of a terminal state.
+            if not self.manager.update_job_status(
                 job.id,
                 "queued",
                 error=f"attempt {current.attempts} failed: {exc}; retrying in {delay:.0f}s",
                 retry_trace=trace,
-            )
+            ):
+                return
+            # Backoff happens with the job already popped from _running (the
+            # caller's finally ran before this method), so the watchdog
+            # cannot stamp the sleeper mid-backoff (#28) and the pool slot is
+            # free while we wait.
             time.sleep(delay)
             if self._stop.is_set():
                 return
@@ -671,23 +827,36 @@ class JobRunner:
     def _watchdog_loop(self) -> None:
         while not self._stop.is_set():
             time.sleep(0.5)
-            now = time.monotonic()
+            self._reap_expired()
+
+    def _reap_expired(self) -> None:
+        """One watchdog sweep: stamp deadline-exceeded jobs still registered
+        as running. Extracted from the loop so tests can drive a sweep
+        deterministically."""
+        now = time.monotonic()
+        with self._lock:
+            expired = [jid for jid, deadline in self._running.items() if now >= deadline]
+        for job_id in expired:
             with self._lock:
-                expired = [jid for jid, deadline in self._running.items() if now >= deadline]
-            for job_id in expired:
-                with self._lock:
-                    self._running.pop(job_id, None)
-                    self._cancel_requested.discard(job_id)
-                job = self.manager.get_job(job_id)
-                limit = self._timeout_for(job) if job else self.job_timeout_sec
-                self.manager.update_job_status(
-                    job_id,
-                    "timed_out",
-                    error=f"job exceeded {limit:.0f}s execution timeout",
-                    retry_trace={"timestamp": time.time(), "error": "execution timeout"},
-                )
-                self.manager.clear_result(job_id)
-                self.manager.enforce_retention(self.retention)
+                # TOCTOU guard (#26b): the snapshot above was taken before we
+                # held the lock; the job may have finished and been popped by
+                # its worker's finally between the snapshot and now. Only a
+                # job still registered as running may be reaped.
+                if job_id not in self._running:
+                    continue
+                self._running.pop(job_id, None)
+                self._cancel_requested.discard(job_id)
+            job = self.manager.get_job(job_id)
+            limit = self._timeout_for(job) if job else self.job_timeout_sec
+            # stamp_timed_out is atomic (stamp + result drop) and refuses a
+            # job that went terminal between the re-check and the stamp, so
+            # the sweep can never overwrite a completed job's result.
+            self.manager.stamp_timed_out(
+                job_id,
+                error=f"job exceeded {limit:.0f}s execution timeout",
+                retry_trace={"timestamp": time.time(), "error": "execution timeout"},
+            )
+            self.manager.enforce_retention(self.retention)
 
     def _external_loop(self) -> None:
         """Consume payloads from the external queue into the bounded queue."""
