@@ -39,7 +39,7 @@ import urllib.parse
 import urllib.request
 import urllib.robotparser
 import zlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from html.parser import HTMLParser
 from typing import Any
 
@@ -736,7 +736,7 @@ def _mediawiki_article(url: str) -> tuple[str, str] | None:
 
 
 def _mediawiki_parse_extract(
-    cfg: BridgeConfig, url: str, canonical: str, title: str, max_chars: int
+    cfg: BridgeConfig, url: str, canonical: str, title: str
 ) -> ScrapeResult | None:
     """FULL article text through the site's ``action=parse`` API.
 
@@ -775,22 +775,20 @@ def _mediawiki_parse_extract(
     text = _clean_text(extractor.text_parts)
     if len(text) < _MAIN_CONTENT_MIN_CHARS:
         return None  # parse produced a stub; let the extracts path try
-    truncated = len(text) > max_chars
-    if truncated:
-        text = text[:max_chars].rstrip()
+    # No caller-budget cut here (#21): the full extraction is returned so the
+    # cache stores full text; scrape_page truncates each caller's view.
     parse_title = parse.get("title") if isinstance(parse, dict) else None
     return ScrapeResult(
         url=url,
         title=str(parse_title or title),
         text=text,
-        truncated=truncated,
         links=_dedupe_links(extractor.links),
         via="mediawiki-api-parse",
         last_modified=None,
     )
 
 
-def _mediawiki_extract(cfg: BridgeConfig, url: str, max_chars: int) -> ScrapeResult | None:
+def _mediawiki_extract(cfg: BridgeConfig, url: str) -> ScrapeResult | None:
     """Fetch a MediaWiki article through the site's own Action API.
 
     Returns None when ``url`` is not a recognized article URL, or when the
@@ -806,7 +804,7 @@ def _mediawiki_extract(cfg: BridgeConfig, url: str, max_chars: int) -> ScrapeRes
     if hit is None:
         return None
     canonical, title = hit
-    full = _mediawiki_parse_extract(cfg, url, canonical, title, max_chars)
+    full = _mediawiki_parse_extract(cfg, url, canonical, title)
     if full is not None:
         return full
     api_url = f"https://{canonical}/w/api.php?" + urllib.parse.urlencode(
@@ -843,15 +841,11 @@ def _mediawiki_extract(cfg: BridgeConfig, url: str, max_chars: int) -> ScrapeRes
     text = (page.get("extract") or "").strip()
     if not text:
         raise ScrapeError(f"MediaWiki API returned an empty extract for {title!r}")
-    truncated = False
-    if len(text) > max_chars:
-        text = text[:max_chars].rstrip()
-        truncated = True
+    # No caller-budget cut here (#21): see _mediawiki_parse_extract.
     return ScrapeResult(
         url=url,
         title=str(page.get("title") or title),
         text=text,
-        truncated=truncated,
         links=[],
         via="mediawiki-api",
         last_modified=response.headers.get("Last-Modified"),
@@ -870,6 +864,19 @@ def _parse_html(cfg: BridgeConfig, url: str, html: str) -> _TextExtractor:
     except Exception as exc:  # malformed markup: keep what was parsed so far
         log(cfg, f"parse truncated by malformed markup: {exc}")
     return extractor
+
+
+def _caller_view(text: str, max_chars: int) -> tuple[str, bool]:
+    """Cut a page's text to ONE caller's budget (#21).
+
+    The cache stores the full extraction; this per-caller cut is applied
+    after the cache write and on every cache hit, so one caller's small
+    ``--max-chars`` can never poison the entry for callers with a bigger
+    budget. Same cut style as the old inline truncation (rstrip tail).
+    """
+    if len(text) > max_chars:
+        return text[:max_chars].rstrip(), True
+    return text, False
 
 
 def scrape_page(
@@ -894,13 +901,18 @@ def scrape_page(
     ``cache`` (a :class:`~freegem.web_research.ResearchCache`) makes the
     result reusable across research AND one-shot scrapes: a hit short-circuits
     the network entirely, ``refresh=True`` refetches and rewrites the entry.
+    The entry always holds the FULL extracted text and every caller truncates
+    its own view (#21) -- a caller's ``max_chars`` is a view, not a write.
     ``headers_override`` replaces the request headers (the smart-fetch
     ladder's browser-identifying retry uses this).
 
     ``smart=True`` engages the :mod:`freegem.smart_fetch` fallback ladder
     when the direct fetch is refused (403/405/401/...): legitimate alternate
     read paths, tried in order, with the working path remembered per host.
-    ``progress`` receives human-readable status lines as the ladder walks.
+    An EMPTY cache entry is never a smart-mode short-circuit: it falls
+    through to a real fetch and, if the page is still unreadable, the
+    ladder (#21). ``progress`` receives human-readable status lines as the
+    ladder walks.
     """
     try:
         url = url_allowed(url)
@@ -913,23 +925,24 @@ def scrape_page(
         cached = cache.get(url)
         if cached is not None:
             text = cached["text"]
-            truncated = len(text) > max_chars
-            if truncated:
-                text = text[:max_chars].rstrip()
-            return ScrapeResult(
-                url=url,
-                title=cached["title"],
-                text=text,
-                truncated=truncated,
-                via="cache",
-                last_modified=cached.get("last_modified"),
-            )
+            if text.strip() or not smart:
+                view, truncated = _caller_view(text, max_chars)
+                return ScrapeResult(
+                    url=url,
+                    title=cached["title"],
+                    text=view,
+                    truncated=truncated,
+                    via="cache",
+                    last_modified=cached.get("last_modified"),
+                )
+            # (#21) Empty entry with smart on: a zero-text page cached by a
+            # --no-smart run must not pose as a successful read. Treat it as
+            # a miss; a successful fetch below rewrites the entry.
 
     try:
         result = _scrape_page_uncached(
             cfg,
             url,
-            max_chars=max_chars,
             headers_override=headers_override,
         )
     except ScrapeError as exc:
@@ -973,21 +986,31 @@ def scrape_page(
             )
 
     if cache is not None:
+        # (#21) Cache the FULL extraction, before any per-caller cut: a
+        # caller with a small --max-chars must not poison the entry for
+        # callers with a bigger budget.
         cache.put(url, result.title, result.text, result.last_modified)
-    return result
+    view, truncated = _caller_view(result.text, max_chars)
+    if not truncated:
+        return result
+    return replace(result, text=view, truncated=True)
 
 
 def _scrape_page_uncached(
     cfg: BridgeConfig,
     url: str,
     *,
-    max_chars: int,
     headers_override: dict[str, str] | None,
 ) -> ScrapeResult:
-    """The direct fetch path: adapter first, then guarded HTML."""
+    """The direct fetch path: adapter first, then guarded HTML.
+
+    Returns the FULL extracted text (#21): cutting to the caller's budget
+    happens in scrape_page AFTER the cache write, so the cache never stores
+    a caller's view.
+    """
     # Structured-source adapters first: when the site offers an official API
     # for this URL, that beats extracting HTML (and honors the same guard).
-    adapted = _mediawiki_extract(cfg, url, max_chars)
+    adapted = _mediawiki_extract(cfg, url)
     if adapted is not None:
         return adapted
 
@@ -1020,15 +1043,10 @@ def _scrape_page_uncached(
         extractor = _parse_html(cfg, url, html)
 
     text = _clean_text(extractor.text_parts)
-    truncated = False
-    if len(text) > max_chars:
-        text = text[:max_chars].rstrip()
-        truncated = True
     return ScrapeResult(
         url=url,
         title=extractor.title,
         text=text,
-        truncated=truncated,
         links=_dedupe_links(extractor.links),
         last_modified=last_modified,
     )

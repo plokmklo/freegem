@@ -1269,6 +1269,59 @@ class ScrapeCacheTests(_FakeSiteTestCase):
                 )
             self.assertTrue(all(item.via == "cache" for item in again))
 
+    def test_full_text_is_cached_not_the_callers_cut(self) -> None:
+        """(#21) A small --max-chars must not poison the entry: the cache
+        holds the full extraction and each caller truncates its own view."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = self._cache(tmp)
+            small = scrape_page(self.cfg, f"{self.base}/big", max_chars=50, cache=cache)
+            self.assertTrue(small.truncated)
+            self.assertEqual(len(small.text), 50)
+            cached_text = cache.get(f"{self.base}/big")["text"]
+            self.assertGreater(
+                len(cached_text), 50, "the entry must hold the full text, not the 50-char cut"
+            )
+            # A later caller with a bigger budget gets the FULL page from the
+            # same entry, with no network.
+            with mock.patch(
+                "freegem.web_scraper._fetch", side_effect=AssertionError("network hit")
+            ):
+                bigger = scrape_page(
+                    self.cfg, f"{self.base}/big", max_chars=10_000, cache=cache
+                )
+                whole = scrape_page(self.cfg, f"{self.base}/big", cache=cache)
+            self.assertEqual(len(bigger.text), 10_000)
+            self.assertTrue(bigger.truncated)
+            self.assertEqual(len(whole.text), len(cached_text))
+            self.assertFalse(whole.truncated)
+
+    def test_empty_cache_entry_does_not_short_circuit_smart(self) -> None:
+        """(#21) A zero-text entry (cached by a --no-smart run) must not pose
+        as a successful read for a later smart run: it is a miss, and a real
+        fetch heals the entry."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = self._cache(tmp)
+            url = f"{self.base}/page"
+            cache.put(url, "Empty", "", None)
+            healed = scrape_page(self.cfg, url, cache=cache, smart=True)
+            self.assertEqual(healed.via, "html", "the empty entry must fall through")
+            self.assertTrue(healed.text.strip())
+            self.assertTrue(cache.get(url)["text"].strip(), "the fetch rewrites the entry")
+
+    def test_empty_cache_entry_still_served_when_smart_off(self) -> None:
+        """(#21) With the ladder off, the cached entry is still what the
+        caller asked for: the dumb direct path, unchanged."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = self._cache(tmp)
+            url = f"{self.base}/page"
+            cache.put(url, "Empty", "", None)
+            with mock.patch(
+                "freegem.web_scraper._fetch", side_effect=AssertionError("network hit")
+            ):
+                result = scrape_page(self.cfg, url, cache=cache, smart=False)
+            self.assertEqual(result.via, "cache")
+            self.assertEqual(result.text, "")
+
 
 class MainRegionAnchorsTests(unittest.TestCase):
     """Site-specific content anchors: Hacker News' hnmain container."""
