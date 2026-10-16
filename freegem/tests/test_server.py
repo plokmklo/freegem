@@ -10,6 +10,7 @@ import http.client
 import inspect
 import io
 import json
+import socket
 import threading
 import time
 import unittest
@@ -935,3 +936,135 @@ class QueueTests(ThreadCapTests):
             release.set()
             first.join(timeout=10)
             queued.join(timeout=10)
+
+
+class HermeticServerTestCase(unittest.TestCase):
+    """Base: one ephemeral server PER TEST (not per class).
+
+    The shared per-class server makes gate-adjacent tests interfere under
+    full-suite load (issue #49); anything that pins a rejection/gate
+    behavior boots its own server here so no other test's traffic can touch
+    the socket or the config it observes.
+    """
+
+    def _make_config(self) -> BridgeConfig:
+        """Hook: tests that need a specific config override this."""
+        return BridgeConfig(log_requests=False)
+
+    def setUp(self) -> None:
+        self.cfg = self._make_config()
+        self.server = ThreadedServer(("127.0.0.1", 0), self.cfg, max_concurrent_requests=8)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.addCleanup(self._teardown)
+
+    def _teardown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+
+
+class PreBodyRejectionKeepAliveTests(HermeticServerTestCase):
+    """#27: a rejection fired BEFORE the request body is read must close the
+    connection and say so.
+
+    On a keep-alive socket the unread POST body is then parsed as the next
+    request line -- the exact hazard _json_body documents for its own
+    too-large path. These tests speak raw sockets so the framing is real.
+    """
+
+    BODY: ClassVar[bytes] = json.dumps(
+        {"model": "gemini-3.6-flash", "messages": [{"role": "user", "content": "hi"}]}
+    ).encode()
+
+    def _make_config(self) -> BridgeConfig:
+        # The API key gates the jobs face (the chat face is auth-free by
+        # design), which is how the 401 site below is reached.
+        return BridgeConfig(log_requests=False, api_key="secret", job_db="memory")
+
+    def _rejected_post(
+        self, extra_headers: list[tuple[str, str]], path: str = "/v1/chat/completions"
+    ) -> tuple[bytes, socket.socket]:
+        """Send one POST-with-body on a raw socket, read the whole response,
+        and return (raw response bytes, the still-open client socket)."""
+        request = (
+            f"POST {path} HTTP/1.1\r\n".encode()
+            + b"".join(f"{k}: {v}\r\n".encode() for k, v in extra_headers)
+            + f"Host: localhost:{self.port}\r\n".encode()
+            + f"Content-Length: {len(self.BODY)}\r\n\r\n".encode()
+            + self.BODY
+        )
+        sock = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        sock.sendall(request)
+        response = b""
+        while b"\r\n\r\n" not in response:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            response += chunk
+        head, _, rest = response.partition(b"\r\n\r\n")
+        marker = b"Content-Length:"
+        if marker in head:
+            length = int(head.lower().split(marker.lower(), 1)[1].split(b"\r\n", 1)[0].strip())
+            while len(rest) < length:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                rest += chunk
+        return head + b"\r\n\r\n" + rest, sock
+
+    def _assert_closed_after_rejection(
+        self,
+        extra_headers: list[tuple[str, str]],
+        expect_status: bytes,
+        path: str = "/v1/chat/completions",
+    ) -> None:
+        response, sock = self._rejected_post(extra_headers, path=path)
+        try:
+            self.assertTrue(response.startswith(b"HTTP/1.1 " + expect_status), response[:80])
+            # The client must be TOLD the connection is going away.
+            self.assertIn(b"connection: close", response.lower().split(b"\r\n\r\n", 1)[0])
+            # The server must close: the follow-up read ends in EOF or a
+            # reset -- never a parseable second response, which would mean
+            # the unread body desynced the keep-alive stream.
+            try:
+                sock.sendall(f"GET /health HTTP/1.1\r\nHost: localhost:{self.port}\r\n\r\n".encode())
+            except OSError:
+                pass  # already reset: closed is exactly what we want
+            sock.settimeout(5)
+            try:
+                data = sock.recv(65536)
+            except OSError:
+                data = b""
+            self.assertEqual(data, b"")
+        finally:
+            sock.close()
+
+    def test_auth_rejection_401_closes_connection(self) -> None:
+        # The API key gates the jobs face (the chat face is auth-free by
+        # design), so the 401 site is reached via POST /v1/jobs.
+        self._assert_closed_after_rejection(
+            [("X-API-Key", "wrong"), ("Content-Type", "application/json")],
+            b"401",
+            path="/v1/jobs",
+        )
+
+    def test_forbidden_host_403_closes_connection(self) -> None:
+        self._assert_closed_after_rejection(
+            [("Host", "evil.example"), ("Content-Type", "application/json")], b"403"
+        )
+
+    def test_cross_origin_403_closes_connection(self) -> None:
+        self._assert_closed_after_rejection(
+            [("Origin", "https://evil.example"), ("Content-Type", "application/json")], b"403"
+        )
+
+    def test_wrong_content_type_415_closes_connection(self) -> None:
+        self._assert_closed_after_rejection([("Content-Type", "text/plain")], b"415")
+
+    def test_unknown_path_404_closes_connection(self) -> None:
+        """The do_POST catch-all also rejects before reading the body."""
+        self._assert_closed_after_rejection(
+            [("Content-Type", "application/json")], b"404", path="/nope"
+        )

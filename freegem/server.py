@@ -146,7 +146,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
             return True
 
         record_audit_event("auth_failure", client_ip, req_id, {"path": self.path})
-        self.send_error_json("Unauthorized: invalid or missing API key", 401)
+        self._reject_request("Unauthorized: invalid or missing API key", 401)
         return False
 
     def _handle_jobs_get(self, path: str) -> None:
@@ -283,6 +283,13 @@ class GeminiHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        # A pre-body rejection (or any path that set close_connection before
+        # answering) must TELL the client (#27): a keep-alive client that is
+        # not told would try to reuse the socket while the unread request
+        # body desyncs the stream. For plain keep-alive responses
+        # close_connection is False here and no header is added.
+        if self.close_connection:
+            self.send_header("Connection", "close")
         request_id = getattr(self, "_request_id", None)
         if request_id:
             self.send_header("X-Request-Id", request_id)
@@ -303,6 +310,18 @@ class GeminiHandler(BaseHTTPRequestHandler):
 
     def send_error_json(self, message: str, status: int) -> None:
         self.send_json({"error": {"message": message, "type": "bridge_error"}}, status)
+
+    def _reject_request(self, message: str, status: int) -> None:
+        """Refuse a request BEFORE its body has been read (#27).
+
+        On a keep-alive connection the unread POST body would then be parsed
+        as the next request line -- the same framing desync _json_body
+        documents for its own too-large path. Every pre-body rejection goes
+        through here so the connection is closed after the answer, and
+        _send echoes ``Connection: close`` so the client is told too.
+        """
+        self.close_connection = True
+        self.send_error_json(message, status)
 
     def _start_sse(self) -> None:
         """Begin an SSE response.
@@ -435,7 +454,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
         allowed = _LOOPBACK_HOSTS | {self.cfg.host.split("%")[0].lower()}
         if hostname not in allowed:
             log(self.cfg, f"rejected request with unexpected Host {hostname!r}")
-            self.send_error_json("forbidden host", 403)
+            self._reject_request("forbidden host", 403)
             return False
         return True
 
@@ -469,17 +488,17 @@ class GeminiHandler(BaseHTTPRequestHandler):
         site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
         if site == "cross-site":
             log(self.cfg, "rejected cross-site POST (Sec-Fetch-Site: cross-site)")
-            self.send_error_json("cross-site POSTs are not allowed", 403)
+            self._reject_request("cross-site POSTs are not allowed", 403)
             return False
         origin = self.headers.get("Origin")
         if origin is not None and not _origin_is_loopback(origin):
             log(self.cfg, f"rejected cross-origin POST from Origin {origin!r}")
-            self.send_error_json("cross-origin POSTs are not allowed", 403)
+            self._reject_request("cross-origin POSTs are not allowed", 403)
             return False
         content_type = (self.headers.get("Content-Type") or "").split(";", 1)[0]
         if content_type.strip().lower() != "application/json":
             log(self.cfg, f"rejected POST with Content-Type {content_type.strip()!r}")
-            self.send_error_json("Content-Type must be application/json", 415)
+            self._reject_request("Content-Type must be application/json", 415)
             return False
         return True
 
@@ -658,7 +677,9 @@ class GeminiHandler(BaseHTTPRequestHandler):
                 # catch-all: clients differ on exact path, treat as chat
                 self._handle_chat()
             else:
-                self.send_error_json("not found", 404)
+                # Rejected before any body read: same keep-alive desync
+                # hazard as the other pre-body rejections (#27).
+                self._reject_request("not found", 404)
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception as exc:
