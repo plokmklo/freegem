@@ -11,6 +11,7 @@ Plus one-shot utilities for checking a setup without starting a server:
     freegem scrape URL1 URL2 URL3 --format jsonl
     freegem research URL1 URL2 -q "question"
     freegem verify "claim one" "claim two" --urls URL1 URL2
+    freegem watch https://example.com/status --interval 30m
     freegem models
     freegem doctor
 """
@@ -78,7 +79,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(
         dest="command",
-        metavar="{serve,mcp,ask,models,scrape,research,verify,crawl,doctor}",
+        metavar="{serve,mcp,ask,models,scrape,research,verify,crawl,watch,doctor}",
     )
 
     serve = sub.add_parser("serve", help="run the HTTP API server", parents=[common])
@@ -453,6 +454,38 @@ def _build_parser() -> argparse.ArgumentParser:
 
     status_p = crawl_sub.add_parser("status", help="show frontier stats for a state file")
     status_p.add_argument("--state", metavar="PATH", required=True, help="frontier SQLite file")
+
+    watch = sub.add_parser(
+        "watch",
+        help="watch a URL and report what changed (simhash + line diff, local state)",
+        parents=[common],
+        epilog="exit codes: 0 baseline/no change (or clean Ctrl-C), 3 changed (--once), "
+        "1 fetch/error, 2 usage",
+    )
+    watch.add_argument("url", metavar="URL", help="the page to watch (http/https)")
+    watch.add_argument(
+        "--interval",
+        metavar="DUR",
+        default=None,
+        help="poll every DUR (seconds, or 30m/1h style) until Ctrl-C; "
+        "omitted = one check and exit (default)",
+    )
+    watch.add_argument(
+        "--once",
+        action="store_true",
+        help="force a single check even with --interval (cron-friendly)",
+    )
+    watch.add_argument(
+        "--delta",
+        action="store_true",
+        help="print every diff block instead of the first few",
+    )
+    watch.add_argument(
+        "--format",
+        choices=("text", "json"),
+        default="text",
+        help="output format (default text)",
+    )
 
     sub.add_parser("models", help="list available models", parents=[common])
 
@@ -1070,6 +1103,49 @@ def cmd_crawl(cfg: BridgeConfig, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_watch(cfg: BridgeConfig, args: argparse.Namespace) -> int:
+    """Watch one URL: baseline on the first run, then simhash + diff reports.
+
+    Default (no --interval, or --once) is a single check so cron can call it
+    once per invocation: exit 0 (baseline/no change), 3 (changed), 1 (fetch
+    failure -- the fetch path is the ordinary guarded scraper, and its
+    ScrapeError comes through here as an honest error line). With --interval
+    the command loops until Ctrl-C and exits 0 on the interrupt.
+    """
+    from .watch import parse_interval, render_text, watch_poll
+
+    interval_sec: float | None = None
+    if args.interval is not None:
+        try:
+            interval_sec = parse_interval(args.interval)
+        except ValueError as exc:
+            print(f"error: --interval {args.interval!r}: {exc}", file=sys.stderr)
+            return 2
+    single_check = args.once or interval_sec is None
+    last = None
+    try:
+        for result in watch_poll(
+            args.url,
+            cfg,
+            interval_sec=interval_sec if interval_sec is not None else 0.0,
+            max_polls=1 if single_check else None,
+        ):
+            last = result
+            if args.format == "json":
+                print(json.dumps(result.to_dict(), ensure_ascii=False), flush=True)
+            else:
+                print(render_text(result, delta=args.delta))
+    except KeyboardInterrupt:
+        print("\nstopped.", file=sys.stderr)
+        return 0
+    except (BridgeError, OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if last is not None and last.changed:
+        return 3  # machine-grep-able "changed" for --once scripts
+    return 0
+
+
 def _force_utf8_stdio() -> None:
     """Make stdout/stderr UTF-8 regardless of the platform locale.
 
@@ -1106,7 +1182,18 @@ def main(argv: list[str] | None = None) -> int:
     # namespace (AttributeError on args.port). When no subcommand is present,
     # parse as if `serve` had been written. --help/--version keep the top-level
     # parser so the full command list stays visible.
-    _commands = {"serve", "mcp", "ask", "models", "scrape", "research", "verify", "crawl", "doctor"}
+    _commands = {
+        "serve",
+        "mcp",
+        "ask",
+        "models",
+        "scrape",
+        "research",
+        "verify",
+        "crawl",
+        "watch",
+        "doctor",
+    }
     if not any(a in _commands for a in raw) and not any(
         a in ("-h", "--help", "--version") for a in raw
     ):
@@ -1149,6 +1236,7 @@ def main(argv: list[str] | None = None) -> int:
         "research": cmd_research,
         "verify": cmd_verify,
         "crawl": cmd_crawl,
+        "watch": cmd_watch,
         "doctor": cmd_doctor,
     }
     return handlers[command](cfg, args)
