@@ -11,8 +11,11 @@ from __future__ import annotations
 
 import contextlib
 import io
+import shutil
+import tempfile
 import time
 import unittest
+from pathlib import Path
 from typing import Any
 from unittest import mock
 
@@ -565,6 +568,131 @@ class BrowserRenderRungTests(unittest.TestCase):
             with self.assertRaises(ScrapeError) as caught:
                 _browser_render_read(self.cfg, _BLOCKED_URL, 2000)
         self.assertIn("HTTP 503", str(caught.exception))
+
+
+class ResearchCacheFullTextTests(unittest.TestCase):
+    """#21 residual: research's fetch loop must not write budget-cut views.
+
+    The shared cache is passed INTO scrape_page, which stores the FULL
+    extraction once; the loop's own fallback write covers only the paths
+    scrape_page does not store (the mocked scrape_page seam the tests
+    drive -- research never enables the smart ladder) and never overwrites
+    a fresh full-text entry with a cut view.
+    """
+
+    def setUp(self) -> None:
+        self.cfg = BridgeConfig(log_requests=False)
+        self.tmp = tempfile.mkdtemp(prefix="freegem-fetchfeat-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def _cache(self) -> Any:
+        from freegem.web_research import ResearchCache
+
+        return ResearchCache(Path(self.tmp) / "cache.json", ttl=9999)
+
+    def _collect(self, urls: list[str], cache: Any, **kwargs: Any) -> Any:
+        from freegem.web_research import _collect_sources
+
+        kwargs.setdefault("max_pages", 5)
+        kwargs.setdefault("max_chars_per_page", 12000)
+        kwargs.setdefault("total_budget", 80000)
+        return _collect_sources(
+            self.cfg, urls, cache=cache, refresh=kwargs.pop("refresh", False), **kwargs
+        )
+
+    def test_research_fetch_caches_full_text_for_bigger_budget_callers(self) -> None:
+        page_html = (
+            "<html><head><title>Long Article</title></head><body><main>"
+            + ("<p>full article body with real words </p>" * 120)
+            + "</main></body></html>"
+        ).encode("utf-8")
+        cache = self._cache()
+        with mock.patch(
+            "freegem.web_scraper._fetch", return_value=_FakeResponse(page_html)
+        ):
+            # A tiny allowance: research fetches with 500 chars of budget.
+            sources, material = self._collect(
+                ["https://long.example/article"],
+                cache,
+                max_chars_per_page=500,
+                total_budget=500,
+            )
+        self.assertTrue(sources[0].ok)
+        # Research still sees exactly its allowance view -- unchanged behavior.
+        self.assertLessEqual(len(material[0][1]), 500)
+        # But the CACHE holds the full extraction, not the allowance view.
+        stored = cache.get("https://long.example/article")
+        self.assertIsNotNone(stored)
+        self.assertGreater(len(stored["text"]), 1000)
+        # A later caller with a bigger budget reads the whole page, no network.
+        with mock.patch(
+            "freegem.web_scraper._fetch",
+            side_effect=AssertionError("a cache hit must not fetch"),
+        ) as fetch:
+            later = scrape_page(
+                self.cfg, "https://long.example/article", max_chars=100_000, cache=cache
+            )
+        fetch.assert_not_called()
+        self.assertEqual(later.text, stored["text"])
+        self.assertFalse(later.truncated)
+        self.assertEqual(later.via, "cache")
+
+    def test_fallback_write_keeps_the_mocked_seam_contract(self) -> None:
+        """When scrape_page could not store (the mocked seam the research
+        tests drive), the loop's fallback write keeps the historical
+        behavior; the point is it never clobbers a real full-text entry."""
+        cache = self._cache()
+        pages = {
+            "https://a.test/1": ScrapeResult(
+                url="https://a.test/1", title="One", text="short body"
+            )
+        }
+
+        def fake(cfg: Any, url: str, **_kwargs: Any) -> ScrapeResult:
+            return pages[url]
+
+        with mock.patch("freegem.web_scraper.scrape_page", side_effect=fake):
+            sources, material = self._collect(["https://a.test/1"], cache)
+        self.assertTrue(sources[0].ok)
+        self.assertEqual([text for _, text in material], ["short body"])
+        self.assertEqual(cache.get("https://a.test/1")["text"], "short body")
+
+    def test_refresh_rewrites_through_scrape_page(self) -> None:
+        cache = self._cache()
+        cache.put("https://a.test/1", "Old", "old body")
+        page_html = (
+            "<html><head><title>New</title></head><body><p>fresh new body</p></body></html>"
+        ).encode("utf-8")
+        with mock.patch(
+            "freegem.web_scraper._fetch", return_value=_FakeResponse(page_html)
+        ):
+            sources, material = self._collect(["https://a.test/1"], cache, refresh=True)
+        self.assertFalse(sources[0].from_cache)
+        self.assertEqual([text for _, text in material], ["fresh new body"])
+        self.assertEqual(cache.get("https://a.test/1")["title"], "New")
+
+    def test_concurrent_fetches_store_full_text_too(self) -> None:
+        cache = self._cache()
+        page_html = (
+            "<html><head><title>T</title></head><body><p>"
+            + ("concurrent body words " * 40)
+            + "</p></body></html>"
+        )
+        urls = ["https://c1.test/1", "https://c2.test/2", "https://c3.test/3"]
+        with mock.patch(
+            "freegem.web_scraper._fetch",
+            side_effect=lambda _cfg, _url, timeout=30, headers=None: _FakeResponse(
+                page_html.encode("utf-8")
+            ),
+        ):
+            sources, _ = self._collect(urls, cache, concurrency=3)
+        self.assertTrue(all(source.ok for source in sources))
+        for url in urls:
+            self.assertGreater(
+                len(cache.get(url)["text"]),
+                500,
+                "the pool path must store full text, not a cut view",
+            )
 
 
 if __name__ == "__main__":
