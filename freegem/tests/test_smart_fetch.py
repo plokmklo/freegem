@@ -448,6 +448,48 @@ class SmartIntegrationTests(unittest.TestCase):
                 scrape_page(self.cfg, "https://blocked.example/")
         self.assertFalse(fallback.called)
 
+    def test_challenge_shaped_direct_200_walks_the_ladder(self) -> None:
+        """(#12) A 200 that is really a bot wall is not a success."""
+        response = _FakeResponse(
+            b"<html><body><p>Just a moment... enable javascript and cookies</p></body></html>"
+        )
+        saved = ScrapeResult(url="u", title="T", text="rescued by the ladder")
+        with (
+            mock.patch("freegem.web_scraper._fetch", return_value=response),
+            mock.patch("freegem.smart_fetch.fallback_scrape", return_value=saved) as fallback,
+        ):
+            result = scrape_page(self.cfg, "https://cloudguarded.example/", smart=True)
+        self.assertEqual(result.text, "rescued by the ladder")
+        self.assertTrue(fallback.called)
+        self.assertIn("bot-challenge", fallback.call_args.kwargs["first_error"])
+
+    def test_long_page_mentioning_challenge_words_is_content(self) -> None:
+        """(#12) The challenge detector only fires on SHORT pages: an article
+        that quotes 'captcha' past the detector's length cap stays content."""
+        body = ("<p>" + "real article content " * 60 + "about the captcha economy</p>").encode()
+        response = _FakeResponse(b"<html><body>" + body + b"</body></html>")
+        with (
+            mock.patch("freegem.web_scraper._fetch", return_value=response),
+            mock.patch("freegem.smart_fetch.fallback_scrape") as fallback,
+        ):
+            result = scrape_page(self.cfg, "https://news.example/captcha-economy", smart=True)
+        self.assertIn("captcha economy", result.text)
+        self.assertFalse(fallback.called)
+
+    def test_challenge_check_only_when_smart(self) -> None:
+        """(#12) With the ladder off, a challenge 200 is returned as-is (the
+        caller asked for the honest direct path, not alternate reads)."""
+        response = _FakeResponse(
+            b"<html><body><p>Just a moment... verify you are human</p></body></html>"
+        )
+        with (
+            mock.patch("freegem.web_scraper._fetch", return_value=response),
+            mock.patch("freegem.smart_fetch.fallback_scrape") as fallback,
+        ):
+            result = scrape_page(self.cfg, "https://cloudguarded.example/", smart=False)
+        self.assertIn("Just a moment", result.text)
+        self.assertFalse(fallback.called)
+
     def test_browser_headers_override_threaded_to_fetch(self) -> None:
         from freegem.smart_fetch import _BROWSER_HEADERS
 

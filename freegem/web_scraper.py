@@ -947,20 +947,30 @@ def scrape_page(
             first_error=str(exc),
             progress=progress,
         )
-    if smart and not result.text.strip() and result.via in ("html", "cache"):
-        # A 200 with zero readable text is a JS shell or a chrome-only
-        # page, not a success. Say what happened and try the ladder;
-        # a page that only LOOKS fetched is worse than an honest error.
-        from .smart_fetch import fallback_scrape
+    if smart and result.via in ("html", "cache"):
+        # Two shapes of "fetched but not readable": a 200 with zero
+        # readable text (a JS shell or a chrome-only page) and (#12) a
+        # SHORT challenge-shaped 200 -- a bot wall served with a 200.
+        # Both engage the ladder; a page that only LOOKS fetched is
+        # worse than an honest error. Lazy import: smart_fetch wraps
+        # this module, so the cycle must be broken at call time.
+        from .smart_fetch import _looks_like_challenge, fallback_scrape
 
-        return fallback_scrape(
-            cfg,
-            url,
-            max_chars=max_chars,
-            ignore_robots=ignore_robots,
-            first_error="direct fetch returned HTTP 200 but zero readable text",
-            progress=progress,
-        )
+        if not result.text.strip():
+            first_error = "direct fetch returned HTTP 200 but zero readable text"
+        elif _looks_like_challenge(result.text):
+            first_error = "direct fetch returned a bot-challenge page, not content"
+        else:
+            first_error = ""
+        if first_error:
+            return fallback_scrape(
+                cfg,
+                url,
+                max_chars=max_chars,
+                ignore_robots=ignore_robots,
+                first_error=first_error,
+                progress=progress,
+            )
 
     if cache is not None:
         cache.put(url, result.title, result.text, result.last_modified)
