@@ -1079,55 +1079,67 @@ class GeminiHandler(BaseHTTPRequestHandler):
 
         base = {"id": response_id, "object": "response", "created_at": created, "model": model_name}
         self._start_sse()
-        emit(
-            "response.created",
-            response={**base, "status": "in_progress", "output": [], "usage": None},
-        )
-        emit(
-            "response.in_progress",
-            response={**base, "status": "in_progress", "output": [], "usage": None},
-        )
+        # Everything after _start_sse() runs with SSE headers already on the
+        # wire: an escaping error would reach the generic handler and call
+        # send_error_json, injecting a second status line into the body
+        # (issue #31). Errors become Responses-API ``error`` events instead;
+        # only client disconnects are silently swallowed.
+        try:
+            emit(
+                "response.created",
+                response={**base, "status": "in_progress", "output": [], "usage": None},
+            )
+            emit(
+                "response.in_progress",
+                response={**base, "status": "in_progress", "output": [], "usage": None},
+            )
 
-        for output_index, item in enumerate(output):
-            if item["type"] == "function_call":
-                pending = {**item, "arguments": "", "status": "in_progress"}
-                emit("response.output_item.added", output_index=output_index, item=pending)
-                emit(
-                    "response.function_call_arguments.delta",
-                    item_id=item["id"],
-                    output_index=output_index,
-                    delta=item["arguments"],
-                )
-                emit(
-                    "response.function_call_arguments.done",
-                    item_id=item["id"],
-                    output_index=output_index,
-                    arguments=item["arguments"],
-                )
-                emit("response.output_item.done", output_index=output_index, item=item)
-            else:
-                pending = {**item, "content": [], "status": "in_progress"}
-                emit("response.output_item.added", output_index=output_index, item=pending)
-                for content_index, part in enumerate(item["content"]):
-                    anchors = {
-                        "item_id": item["id"],
-                        "output_index": output_index,
-                        "content_index": content_index,
-                    }
+            for output_index, item in enumerate(output):
+                if item["type"] == "function_call":
+                    pending = {**item, "arguments": "", "status": "in_progress"}
+                    emit("response.output_item.added", output_index=output_index, item=pending)
                     emit(
-                        "response.content_part.added",
-                        **anchors,
-                        part={"type": "output_text", "text": "", "annotations": []},
+                        "response.function_call_arguments.delta",
+                        item_id=item["id"],
+                        output_index=output_index,
+                        delta=item["arguments"],
                     )
-                    emit("response.output_text.delta", **anchors, delta=part["text"])
-                    emit("response.output_text.done", **anchors, text=part["text"])
-                    emit("response.content_part.done", **anchors, part=part)
-                emit("response.output_item.done", output_index=output_index, item=item)
+                    emit(
+                        "response.function_call_arguments.done",
+                        item_id=item["id"],
+                        output_index=output_index,
+                        arguments=item["arguments"],
+                    )
+                    emit("response.output_item.done", output_index=output_index, item=item)
+                else:
+                    pending = {**item, "content": [], "status": "in_progress"}
+                    emit("response.output_item.added", output_index=output_index, item=pending)
+                    for content_index, part in enumerate(item["content"]):
+                        anchors = {
+                            "item_id": item["id"],
+                            "output_index": output_index,
+                            "content_index": content_index,
+                        }
+                        emit(
+                            "response.content_part.added",
+                            **anchors,
+                            part={"type": "output_text", "text": "", "annotations": []},
+                        )
+                        emit("response.output_text.delta", **anchors, delta=part["text"])
+                        emit("response.output_text.done", **anchors, text=part["text"])
+                        emit("response.content_part.done", **anchors, part=part)
+                    emit("response.output_item.done", output_index=output_index, item=item)
 
-        emit(
-            "response.completed",
-            response={**base, "status": "completed", "output": output, "usage": usage},
-        )
+            emit(
+                "response.completed",
+                response={**base, "status": "completed", "output": output, "usage": usage},
+            )
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as exc:
+            log(self.cfg, f"responses stream error: {exc}")
+            with contextlib.suppress(Exception):
+                emit("error", code="stream_error", message=str(exc), param=None)
 
     # ── /v1beta (Gemini CLI) ─────────────────────────────────────────────────
 
@@ -1268,6 +1280,16 @@ class GeminiHandler(BaseHTTPRequestHandler):
             pass
         except Exception as exc:
             log(self.cfg, f"google stream error: {exc}")
+            # Returning silently hands the client a 200 whose event stream
+            # just stops -- indistinguishable from a completed answer with no
+            # text (issue #31). Emit a Google-style error frame; the Gemini
+            # face has no [DONE] sentinel, so the error frame is the honest
+            # terminator. Never propagate: headers are already on the wire.
+            with contextlib.suppress(Exception):
+                self._sse(
+                    None,
+                    {"error": {"code": 500, "message": str(exc), "status": "INTERNAL"}},
+                )
 
 
 # Refusal-path bounds. _refuse_busy runs on the accept thread, so every wait
