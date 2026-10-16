@@ -712,6 +712,113 @@ class BackoffTests(unittest.TestCase):
             self.assertEqual(generate(cfg, "hi", 1, 0), "recovered")
 
 
+class HttpStatusPolicyTests(unittest.TestCase):
+    """Retry policy: transient statuses only, Retry-After everywhere (#34)."""
+
+    def test_urllib_http_error_retry_after_honored_in_generic_branch(self) -> None:
+        """Non-httpx installs: HTTPError's Retry-After must drive the delay.
+
+        The generic ``except Exception`` branch is where urllib errors land
+        (httpx is absent, so there is no status wrapper). It must extract
+        Retry-After exactly like the streaming branch does.
+        """
+        import urllib.error
+
+        cfg = BridgeConfig(retry_attempts=2, retry_delay_sec=2)
+        error = urllib.error.HTTPError(
+            "https://gemini.google.com/app", 502, "Bad Gateway", {"Retry-After": "9"}, None
+        )
+        with (
+            mock.patch(
+                "freegem.gemini._post",
+                side_effect=[error, make_response(wrb_line("recovered"))],
+            ),
+            mock.patch("freegem.gemini.time.sleep") as sleep,
+        ):
+            self.assertEqual(generate(cfg, "hi", 1, 0), "recovered")
+        sleep.assert_called_once_with(9.0)
+
+    def test_401_fails_fast_without_retry(self) -> None:
+        """An auth rejection reproduces identically on retry; do not hammer."""
+        cfg = BridgeConfig(retry_attempts=3, retry_delay_sec=0)
+        with mock.patch("freegem.gemini._post", side_effect=[_StatusResponse(401)]) as post:
+            with self.assertRaises(BridgeError) as ctx:
+                generate(cfg, "hi", 1, 0)
+        self.assertEqual(post.call_count, 1)
+        self.assertIn("401", str(ctx.exception))
+
+    def test_403_fails_fast_without_retry(self) -> None:
+        cfg = BridgeConfig(retry_attempts=3, retry_delay_sec=0)
+        with mock.patch("freegem.gemini._post", side_effect=[_StatusResponse(403)]) as post:
+            with self.assertRaises(BridgeError) as ctx:
+                generate(cfg, "hi", 1, 0)
+        self.assertEqual(post.call_count, 1)
+        self.assertIn("403", str(ctx.exception))
+
+    def test_400_fails_fast_without_retry(self) -> None:
+        cfg = BridgeConfig(retry_attempts=3, retry_delay_sec=0)
+        with mock.patch("freegem.gemini._post", side_effect=[_StatusResponse(400)]) as post:
+            with self.assertRaises(BridgeError) as ctx:
+                generate(cfg, "hi", 1, 0)
+        self.assertEqual(post.call_count, 1)
+        self.assertIn("400", str(ctx.exception))
+
+    def test_429_retries_and_recovers(self) -> None:
+        cfg = BridgeConfig(retry_attempts=2, retry_delay_sec=0)
+        with (
+            mock.patch(
+                "freegem.gemini._post",
+                side_effect=[_StatusResponse(429), make_response(wrb_line("recovered"))],
+            ) as post,
+            mock.patch("freegem.gemini.time.sleep"),
+        ):
+            self.assertEqual(generate(cfg, "hi", 1, 0), "recovered")
+        self.assertEqual(post.call_count, 2)
+
+    def test_502_retries_and_recovers(self) -> None:
+        cfg = BridgeConfig(retry_attempts=2, retry_delay_sec=0)
+        with (
+            mock.patch(
+                "freegem.gemini._post",
+                side_effect=[_StatusResponse(502), make_response(wrb_line("recovered"))],
+            ) as post,
+            mock.patch("freegem.gemini.time.sleep"),
+        ):
+            self.assertEqual(generate(cfg, "hi", 1, 0), "recovered")
+        self.assertEqual(post.call_count, 2)
+
+    def test_408_retries_as_transient(self) -> None:
+        cfg = BridgeConfig(retry_attempts=2, retry_delay_sec=0)
+        with (
+            mock.patch(
+                "freegem.gemini._post",
+                side_effect=[_StatusResponse(408), make_response(wrb_line("recovered"))],
+            ) as post,
+            mock.patch("freegem.gemini.time.sleep"),
+        ):
+            self.assertEqual(generate(cfg, "hi", 1, 0), "recovered")
+        self.assertEqual(post.call_count, 2)
+
+    def test_stream_403_fails_fast_without_retry(self) -> None:
+        """The streaming raise_for_status path must not retry auth rejections."""
+        import freegem.gemini as gem
+
+        response = mock.MagicMock()
+        response.status_code = 403
+        client = mock.MagicMock()
+        client.stream.return_value.__enter__.return_value = response
+        client.stream.return_value.__exit__.return_value = False
+        cfg = BridgeConfig(retry_attempts=3, retry_delay_sec=0)
+        with (
+            mock.patch.object(gem, "HAS_HTTPX", True),
+            mock.patch.object(gem, "_httpx_client", return_value=client),
+        ):
+            with self.assertRaises(BridgeError) as ctx:
+                list(gem.generate_stream(cfg, "hi", 1, 0))
+        self.assertIn("403", str(ctx.exception))
+        self.assertEqual(client.stream.call_count, 1)
+
+
 class HttpxPoolTests(unittest.TestCase):
     """The pooled httpx client is shared, and shared by the RIGHT settings."""
 

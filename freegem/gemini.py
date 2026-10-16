@@ -163,6 +163,20 @@ def _exc_retry_after(exc: Exception) -> float | None:
     return _retry_after_seconds(headers)
 
 
+def _is_retryable_status(status: int) -> bool:
+    """Only transient upstream statuses are worth a retry.
+
+    429 (rate limit), 408 (request timeout) and the whole 5xx class are
+    transient by nature. Every other 4xx -- 400 bad request, 401/403 auth
+    failures -- reproduces identically on every attempt: the retry loop
+    rebuilds neither the payload nor the headers, so hammering the endpoint
+    only adds latency to an already-failed request.
+    """
+    if status == 429 or status == 408:
+        return True
+    return 500 <= status <= 599
+
+
 def _backoff_delay(base: float, attempt: int, retry_after: float | None = None) -> float:
     """How long attempt N's failure should wait before retrying.
 
@@ -504,8 +518,16 @@ def generate(
                 if isinstance(status, int) and status >= 400:
                     # Retryable on purpose: 429/5xx are transient, and without
                     # this a rate-limit page streamed back as HTTP 200 with
-                    # content: null while the retry loop never engaged.
-                    raise _UpstreamHTTPStatus(int(status), _retry_after_seconds(response.headers))
+                    # content: null while the retry loop never engaged. Other
+                    # 4xx codes fail fast -- see _is_retryable_status.
+                    if _is_retryable_status(status):
+                        raise _UpstreamHTTPStatus(
+                            int(status), _retry_after_seconds(response.headers)
+                        )
+                    raise BridgeError(
+                        f"upstream returned HTTP {status} (client error; not retried)",
+                        code=int(status),
+                    )
                 raw = response.read().decode("utf-8", errors="replace")
             text = extract_response_text(raw)
             if not text.strip():
@@ -543,9 +565,11 @@ def generate(
                 )
                 time.sleep(delay)
         except Exception as exc:
+            # urllib's fallback path lands here (no status wrapper): extract
+            # Retry-After exactly like the streaming branch does.
             last_error = exc
             if attempt < cfg.retry_attempts:
-                delay = _backoff_delay(cfg.retry_delay_sec, attempt)
+                delay = _backoff_delay(cfg.retry_delay_sec, attempt, _exc_retry_after(exc))
                 note_gemini_retry()
                 log(
                     cfg,
@@ -595,6 +619,19 @@ def generate_stream(
         emitted = ""
         try:
             with client.stream("POST", url, content=body, headers=headers) as response:
+                # Same policy as the non-streaming path: raise_for_status()
+                # alone would retry every 4xx (httpx raises through the
+                # generic except branch), so auth rejections fail fast here.
+                stream_status = getattr(response, "status_code", None)
+                if (
+                    isinstance(stream_status, int)
+                    and stream_status >= 400
+                    and not _is_retryable_status(stream_status)
+                ):
+                    raise BridgeError(
+                        f"upstream returned HTTP {stream_status} (client error; not retried)",
+                        code=stream_status,
+                    )
                 response.raise_for_status()
                 buffer = ""
                 for chunk in response.iter_text():
