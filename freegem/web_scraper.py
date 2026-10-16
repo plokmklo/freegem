@@ -156,13 +156,24 @@ class ScrapeResult:
 #: content.
 _MIN_CONTENT_CHARS = 80
 
-#: Minimum share of letters + whitespace in labeled text. Real writing in
-#: any language is overwhelmingly letters and separating whitespace, while
-#: boilerplate -- status dumps, base64 blobs, JSON payloads, separator
-#: walls, copyright footers -- leans hard on digits and punctuation.
-#: Deliberately coarse (a word-only link menu can still pass; this labeler
-#: is not a content classifier) but free and deterministic.
+#: Minimum share of letters + digits + whitespace in labeled text. Real
+#: writing in any language is overwhelmingly characters and separating
+#: whitespace, while boilerplate -- base64 blobs, JSON payloads, separator
+#: walls, punctuation confetti -- leans hard on punctuation and symbols.
+#: Digits COUNT as prose (issue #24): sports box scores, itineraries, and
+#: timetables are digit-heavy real content, and the old letters-only ratio
+#: mislabeled them nav_only. Deliberately coarse (a word-only link menu can
+#: still pass; this labeler is not a content classifier) but free and
+#: deterministic.
 _MIN_PROSE_RATIO = 0.75
+
+#: Minimum ABSOLUTE count of letters for text that clears the ratio on the
+#: strength of its digits. Counting digits as prose would let a raw number
+#: dump ("1 2 3 4 5 ...") sail through as content; real digit-heavy pages
+#: carry words (team names, stations, days, column headers), so 40 letters
+#: is a cheap discriminator that makes pure-number junk lose without
+#: punishing real tables of numbers.
+_MIN_PROSE_LETTERS = 40
 
 
 def extraction_quality(text: str) -> str:
@@ -175,10 +186,13 @@ def extraction_quality(text: str) -> str:
     a content classifier.
 
     Two gates: an absolute floor (very short text is a stub by definition)
-    and a content ratio (the letters+whitespace share -- prose in any
-    language is mostly letters and spaces, so a low share means the page is
-    chrome even though it cleared the floor). Short-but-real pages that the
-    old 200-char floor labeled nav_only now pass.
+    and a content ratio (the letters+digits+whitespace share -- prose in any
+    language is mostly characters and spaces, so a low share means the page
+    is chrome even though it cleared the floor). Short-but-real pages that
+    the old 200-char floor labeled nav_only now pass, and digit-heavy real
+    content (box scores, itineraries) counts as prose (#24) as long as it
+    carries a minimum number of actual words -- a raw number dump still
+    loses.
     """
     stripped = text.strip()
     if not stripped:
@@ -187,10 +201,17 @@ def extraction_quality(text: str) -> str:
         # Too little to be an article: nav links, "Jump to content", a
         # paywall notice. Navigation-only pages land here.
         return "nav_only"
-    prose_chars = sum(ch.isalpha() or ch.isspace() for ch in stripped)
+    letters = sum(ch.isalpha() for ch in stripped)
+    prose_chars = sum(
+        ch.isalpha() or ch.isdigit() or ch.isspace() for ch in stripped
+    )
     if prose_chars / len(stripped) < _MIN_PROSE_RATIO:
         # Long enough to dodge the floor, but not shaped like prose:
-        # status dumps, base64, JSON payloads, separator walls.
+        # JSON payloads, base64, separator walls, punctuation confetti.
+        return "nav_only"
+    if letters < _MIN_PROSE_LETTERS:
+        # The ratio was cleared on the strength of digits alone: a raw
+        # number dump, not a box score (which carries words too).
         return "nav_only"
     return "ok"
 

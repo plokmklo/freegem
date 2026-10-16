@@ -1025,6 +1025,32 @@ class ExtractionQualityTests(unittest.TestCase):
         self.assertGreaterEqual(len(payload), 80)
         self.assertEqual(extraction_quality(payload), "nav_only")
 
+    def test_digit_heavy_real_content_is_ok(self) -> None:
+        """#24: a sports box score / timetable is digit-heavy REAL content.
+        The old letters-only prose ratio labeled it nav_only."""
+        box_score = (
+            "SCORES FROM LAST NIGHT\n"
+            "LIONS 102 34 12\nTIGERS 98 30 15\nBEARS 88 27 09\n"
+            "WOLVES 77 25 08\nHAWKS 74 22 11\nOTTERS 71 21 14\n"
+        )
+        self.assertGreaterEqual(len(box_score), 80)
+        self.assertEqual(extraction_quality(box_score), "ok")
+
+        itinerary = (
+            "DAY 1: Arrive Paris 09:15, transfer to hotel 11:00. "
+            "DAY 2: Louvre 09:00, Seine cruise 19:30. "
+            "DAY 3: Train to Lyon 07:45."
+        )
+        self.assertGreaterEqual(len(itinerary), 80)
+        self.assertEqual(extraction_quality(itinerary), "ok")
+
+    def test_pure_number_dump_is_still_nav_only(self) -> None:
+        """#24's escape hatch: digits count as prose, so an absolute letters
+        floor keeps a raw number dump from passing as content."""
+        dump = "1 2 3 4 5 6 7 8 9 0 " * 12
+        self.assertGreaterEqual(len(dump), 80)
+        self.assertEqual(extraction_quality(dump), "nav_only")
+
 
 class VoidElementSkipTests(unittest.TestCase):
     """A void <input> in a page header must not suppress the whole article.
