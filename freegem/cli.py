@@ -21,6 +21,7 @@ import argparse
 import contextlib
 import json
 import os
+import re
 import signal
 import sys
 from typing import Any
@@ -534,6 +535,32 @@ def cmd_mcp(cfg: BridgeConfig, args: argparse.Namespace) -> int:
     return 0
 
 
+#: Gemini's chat-flavored refusal scripts: phrasings the upstream serves as a
+#: "successful" answer when a request cannot be fulfilled. smart_fetch's
+#: _looks_like_ai_nonanswer already covers the page-reading family ("could not
+#: access ..."); these are the generic request refusals observed on
+#: `ask --search` ("Sorry, I'm having a hard time fulfilling your request",
+#: "something went wrong"). Like the detector there, the match is capped at
+#: SHORT answers only: a long reply that happens to CONTAIN the phrase is
+#: content, not a refusal.
+_ASK_NONANSWER_RE = re.compile(r"having a hard time|something went wrong", re.IGNORECASE)
+_ASK_NONANSWER_MAX_CHARS = 2000
+
+
+def _looks_like_soft_failure(text: str) -> bool:
+    """True when a 'successful' answer is actually the upstream's soft-failure."""
+    # Lazy import: smart_fetch pulls in the scraper stack; the CLI should not
+    # pay for it at startup, and the cycle stays broken at call time.
+    from .smart_fetch import _looks_like_ai_nonanswer
+
+    stripped = text.strip()
+    if _looks_like_ai_nonanswer(stripped):
+        return True
+    if len(stripped) > _ASK_NONANSWER_MAX_CHARS:
+        return False
+    return bool(_ASK_NONANSWER_RE.search(stripped))
+
+
 def cmd_ask(cfg: BridgeConfig, args: argparse.Namespace) -> int:
     question = " ".join(args.prompt).strip()
     if not question:
@@ -545,6 +572,17 @@ def cmd_ask(cfg: BridgeConfig, args: argparse.Namespace) -> int:
             # streamable single request. Say something instead of silence.
             print("searching the web...", file=sys.stderr)
             answer = run_tool(cfg, "gemini_search", {"query": question})
+            if _looks_like_soft_failure(answer):
+                # The upstream served a refusal script as a "successful"
+                # answer. stdout stays EMPTY so a pipeline never mistakes the
+                # failure for an answer; the raw text goes to stderr for the
+                # human, and the exit code says something went wrong.
+                print(answer, file=sys.stderr)
+                print(
+                    "ask: upstream soft-failure (non-answer); retry or rephrase",
+                    file=sys.stderr,
+                )
+                return 1
         else:
             _stream_answer(cfg, question)
             return 0
