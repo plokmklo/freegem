@@ -18,8 +18,9 @@ The policy here is deliberately boring and inspectable:
 * conditional validation first: a recrawl sends ``If-None-Match`` /
   ``If-Modified-Since`` from the stored validators, so an unchanged page
   costs a 304 and no body bytes;
-* ``plan_recrawls()`` mutates ONLY ``next_attempt_at``/``priority`` of
-  ``fetched`` rows -- it never re-enqueues into the live pending queue
+* ``apply_recrawl_plan()`` mutates ONLY ``next_attempt_at``/``priority`` of
+  done rows (``Frontier.DONE`` -- what ``Frontier.mark_done`` writes when a
+  fetch succeeds) -- it never re-enqueues into the live pending queue
   behind the caller's back, and never touches rows still mid-retry.
 """
 
@@ -29,6 +30,8 @@ import sqlite3
 import time
 from dataclasses import dataclass, field
 from typing import Any
+
+from .frontier import DONE
 
 __all__ = [
     "ChangePolicy",
@@ -191,17 +194,19 @@ def recrawl_candidates(
 ) -> list[RecrawlCandidate]:
     """Fetched URLs due for a freshness decision, with their planned interval.
 
-    Reads ``frontier`` (fetched rows carry etag/last_modified/content_hash)
-    and ``content_history`` (change counts). Does NOT mutate anything -- the
-    caller inspects the plan, then calls :func:`apply_recrawl_plan`.
+    Reads ``frontier`` (successfully fetched rows -- status ``done``, the
+    value :meth:`freegem.crawler.frontier.Frontier.mark_done` writes -- carry
+    etag/last_modified/content_hash) and ``content_history`` (change counts).
+    Does NOT mutate anything -- the caller inspects the plan, then calls
+    :func:`apply_recrawl_plan`.
     """
     p = policy or ChangePolicy()
     now_ts = now if now is not None else time.time()
     ensure_history_schema(conn)
     rows = conn.execute(
         "SELECT url, etag, last_modified, content_hash FROM frontier"
-        " WHERE status = 'fetched' ORDER BY fetched_at ASC LIMIT ?",
-        (limit,),
+        " WHERE status = ? ORDER BY fetched_at ASC LIMIT ?",
+        (DONE, limit),
     ).fetchall()
     out: list[RecrawlCandidate] = []
     for url, etag, last_modified, _current_hash in rows:
@@ -232,7 +237,7 @@ def apply_recrawl_plan(
     conn: sqlite3.Connection,
     candidates: list[RecrawlCandidate],
 ) -> int:
-    """Persist the planned due-times for ``fetched`` rows.
+    """Persist the planned due-times for done rows (``Frontier.DONE``).
 
     ``attempts`` is left alone (a freshness probe is not a failure and must
     not poison the retry budget). The caller fetches when the row comes due
@@ -243,8 +248,8 @@ def apply_recrawl_plan(
     touched = 0
     for c in candidates:
         cur = conn.execute(
-            "UPDATE frontier SET next_attempt_at = ? WHERE url = ? AND status = 'fetched'",
-            (c.next_attempt_at, c.url),
+            "UPDATE frontier SET next_attempt_at = ? WHERE url = ? AND status = ?",
+            (c.next_attempt_at, c.url, DONE),
         )
         touched += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
     conn.commit()

@@ -15,7 +15,8 @@ POLICY = ChangePolicy(base_interval_sec=100.0, min_interval_sec=10.0, max_interv
 
 def _state_db(path: str, urls_with_age: dict[str, float]) -> None:
     """Build a crawl-state DB the way the runner leaves it: frontier rows in
-    status='fetched' plus content_history observations."""
+    status='done' (Frontier.mark_done's value) plus content_history
+    observations."""
     conn = sqlite3.connect(path)
     conn.executescript(
         """
@@ -35,7 +36,7 @@ def _state_db(path: str, urls_with_age: dict[str, float]) -> None:
         conn.execute(
             "INSERT OR REPLACE INTO frontier(url, host, status, fetched_at, content_hash, etag)"
             " VALUES(?,?,?,?,?,?)",
-            (url, host, "fetched", now - age, "h1", f"etag-{url}"),
+            (url, host, "done", now - age, "h1", f"etag-{url}"),
         )
         record_fetch(conn, url, content_hash="h1", observed_at=now - age)
     conn.commit()

@@ -32,6 +32,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from .crawler.frontier import DONE
 from .crawler.scheduling import (
     ChangePolicy,
     RecrawlCandidate,
@@ -55,10 +56,11 @@ def run_once(
 ) -> dict[str, Any]:
     """One tick: due candidates -> optional runner -> persist next due times.
 
-    ``recrawl_candidates`` plans EVERY fetched row; "due" is this module's
-    call: a row is due when its persisted ``next_attempt_at`` has passed
-    (never-planned rows -- ``next_attempt_at = 0`` -- are due immediately).
-    Returns a small summary (counts only, no page data) suitable for logs.
+    ``recrawl_candidates`` plans EVERY fetched row (frontier status ``done``,
+    what ``Frontier.mark_done`` writes); "due" is this module's call: a row
+    is due when its persisted ``next_attempt_at`` has passed (never-planned
+    rows -- ``next_attempt_at = 0`` -- are due immediately). Returns a small
+    summary (counts only, no page data) suitable for logs.
     """
     now_ts = now if now is not None else time.time()
     conn = sqlite3.connect(state_path)
@@ -67,7 +69,7 @@ def run_once(
         planned = recrawl_candidates(conn, policy=policy, now=now_ts, limit=limit * 2)
         due_rows = dict(
             conn.execute(
-                "SELECT url, next_attempt_at FROM frontier WHERE status = 'fetched'"
+                "SELECT url, next_attempt_at FROM frontier WHERE status = ?", (DONE,)
             ).fetchall()
         )
         candidates = [c for c in planned if due_rows.get(c.url, 0.0) <= now_ts][:limit]
