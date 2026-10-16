@@ -213,6 +213,24 @@ freegem ask "hi" --model gemini-3.6-flash   # after it — the same thing
 freegem crawl run --model gemini-3.6-flash --seeds https://example.com/docs/ --max-pages 5
 ```
 
+#### Windows notes
+
+**Git Bash / MSYS rewrites flag values that start with `/` before a native
+Windows executable sees them.** A forward-slash argument is converted to a
+Windows path under the Git installation, which silently changes its meaning:
+
+```bash
+# intended: allow the /docs path prefix
+freegem crawl plan --seeds https://example.com/docs/ --allow-path /docs
+# under Git Bash the plan rejects every URL with out_of_scope_path, because
+# MSYS delivered --allow-path as C:/Program Files/Git/docs. The scope logic
+# itself is correct — the shell mangled the argument before freegem ran.
+```
+
+Workarounds: disable the conversion for one command with
+`MSYS_NO_PATHCONV=1 freegem crawl plan ...`, or run the same command from
+PowerShell or cmd, which pass arguments through untouched.
+
 ---
 
 ## Web scraping
