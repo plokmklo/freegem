@@ -71,7 +71,50 @@ class RateLimitError(BridgeError):
     short backoff usually clears the anonymous limit), and after the
     retries run out it is re-raised as itself -- not wrapped in a generic
     :class:`BridgeError` -- so ``except RateLimitError`` keeps working.
+
+    ``kind`` records the best-effort classification of the empty answer:
+    ``"rate_limit"`` (back off and retry) or ``"login_wall"`` (the session
+    needs re-auth; retrying will not help). It defaults to
+    ``"rate_limit"`` when the body gives no signal -- see
+    :func:`_classify_empty_answer` for the exact signals used.
     """
+
+    def __init__(self, message: str, code: int | None = None, kind: str = "rate_limit"):
+        super().__init__(message, code)
+        self.kind = kind
+
+
+#: Body fragments that identify the sign-in page Gemini serves instead of an
+#: answer when the session is dead. Matched case-insensitively against the
+#: whole response body.
+_LOGIN_WALL_MARKERS = (
+    "accounts.google.com/servicelogin",
+    "accounts.google.com/signin",
+    "accounts.google.com/v3/signin",
+    "sign in to continue",
+    "sign in with your google account",
+)
+
+_KIND_TEXT = {"rate_limit": "rate limit", "login_wall": "login wall"}
+
+
+def _classify_empty_answer(body: str) -> str:
+    """Best-effort kind for an empty-200: ``"login_wall"`` or ``"rate_limit"``.
+
+    A login wall is recognizable only by content markers: a sign-in page
+    carries identifiable fragments while a rate-limit page is empty. Whether
+    the request carried session cookies was considered as a second signal
+    and rejected -- an authenticated request can still be served a bare
+    login page (expired cookies) and an anonymous one a bare rate limit, so
+    cookie presence cannot discriminate. Undeterminable falls back to the
+    documented default ``"rate_limit"``: back off and retry, which is also
+    the safe action when the guess is wrong.
+    """
+    lowered = (body or "").lower()
+    for marker in _LOGIN_WALL_MARKERS:
+        if marker in lowered:
+            return "login_wall"
+    return "rate_limit"
 
 
 class _StaleBuildTagError(BridgeError):
@@ -638,8 +681,10 @@ def generate(
                 # A 200 login-wall or rate-limit page carries no BardErrorInfo
                 # marker; returning "" made a failed request look like a model
                 # that chose silence.
+                kind = _classify_empty_answer(raw)
                 raise RateLimitError(
-                    "upstream returned an empty answer (rate limit or login wall?)"
+                    f"upstream returned an empty answer (kind={kind}; {_KIND_TEXT[kind]})",
+                    kind=kind,
                 )
             return text
         except RateLimitError as exc:
@@ -691,9 +736,11 @@ def generate(
     if isinstance(last_error, RateLimitError):
         # Surface the typed error, not a generic BridgeError: callers poll
         # for exactly this shape to decide "back off for minutes" vs "give up".
+        kind = last_error.kind
         raise RateLimitError(
             f"Gemini returned no answer after {cfg.retry_attempts} attempts "
-            "(rate limit or login wall?)"
+            f"(kind={kind}; {_KIND_TEXT[kind]})",
+            kind=kind,
         ) from last_error
     raise BridgeError(
         f"Gemini request failed after {cfg.retry_attempts} attempts: "
@@ -731,6 +778,7 @@ def generate_stream(
     last_error: Exception | None = None
     for attempt in range(1, cfg.retry_attempts + 1):
         emitted = ""
+        streamed = ""
         try:
             with client.stream("POST", url, content=body, headers=headers) as response:
                 # Same policy as the non-streaming path: raise_for_status()
@@ -750,6 +798,7 @@ def generate_stream(
                 buffer = ""
                 for chunk in response.iter_text():
                     buffer += chunk
+                    streamed += chunk
                     if "BardErrorInfo" in buffer:
                         match = re.search(r"BardErrorInfo\s*\[(\d+)\]", buffer)
                         if match:
@@ -792,8 +841,10 @@ def generate_stream(
                 # Same failure shape as the non-streaming path: a 200 whose
                 # body never yields an answer is the rate limit or a login
                 # wall. Nothing was emitted, so a retry cannot duplicate.
+                kind = _classify_empty_answer(streamed)
                 raise RateLimitError(
-                    "upstream returned an empty answer (rate limit or login wall?)"
+                    f"upstream returned an empty answer (kind={kind}; {_KIND_TEXT[kind]})",
+                    kind=kind,
                 )
             return
         except RateLimitError as exc:
@@ -836,9 +887,11 @@ def generate_stream(
                 )
                 time.sleep(delay)
     if isinstance(last_error, RateLimitError):
+        kind = last_error.kind
         raise RateLimitError(
             f"Gemini stream returned no answer after {cfg.retry_attempts} attempts "
-            "(rate limit or login wall?)"
+            f"(kind={kind}; {_KIND_TEXT[kind]})",
+            kind=kind,
         ) from last_error
     raise BridgeError(
         f"Gemini stream failed after {cfg.retry_attempts} attempts: "

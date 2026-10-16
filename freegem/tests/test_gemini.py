@@ -193,9 +193,7 @@ class CookieLoadingTests(unittest.TestCase):
     def setUp(self) -> None:
         from freegem import gemini as gem
 
-        gem._COOKIE_CACHE.update(
-            {"key": None, "cookie": "", "sapisid": None, "xsrf": None}
-        )
+        gem._COOKIE_CACHE.update({"key": None, "cookie": "", "sapisid": None, "xsrf": None})
 
     def test_json_shape(self) -> None:
         import os
@@ -239,8 +237,6 @@ class CookieLoadingTests(unittest.TestCase):
         """A half-written session file must not silently go anonymous."""
         import os
         import tempfile
-
-        from freegem import gemini as gem
 
         good = json.dumps({"cookie": "SID=good", "sapisid": "s"})
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
@@ -1172,6 +1168,97 @@ class BuildTagRecoveryTests(unittest.TestCase):
             with self.assertRaises(BridgeError):
                 list(generate_stream(cfg, "hi", 1, 0))
         fetch.assert_called_once()
+
+
+class RateLimitKindTests(unittest.TestCase):
+    """Empty-200 answers carry a best-effort ``kind`` classification (#16)."""
+
+    LOGIN_PAGE = (
+        '<html><body><a href="https://accounts.google.com/ServiceLogin">'
+        "Sign in to continue</a></body></html>"
+    )
+
+    def setUp(self) -> None:
+        from freegem import gemini as gem
+
+        gem._COOKIE_CACHE.update({"key": None, "cookie": "", "sapisid": None, "xsrf": None})
+        self.addCleanup(
+            gem._COOKIE_CACHE.update,
+            {"key": None, "cookie": "", "sapisid": None, "xsrf": None},
+        )
+        self.cfg = BridgeConfig(retry_attempts=2, retry_delay_sec=0, log_requests=False)
+
+    def test_default_kind_is_rate_limit(self) -> None:
+        with mock.patch("freegem.gemini._post", side_effect=lambda *a, **k: make_response("")):
+            with self.assertRaises(RateLimitError) as ctx:
+                generate(self.cfg, "hi", 1, 4)
+        self.assertEqual(ctx.exception.kind, "rate_limit")
+        self.assertIn("rate_limit", str(ctx.exception))
+
+    def test_login_markers_classify_login_wall(self) -> None:
+        with mock.patch(
+            "freegem.gemini._post", side_effect=lambda *a, **k: make_response(self.LOGIN_PAGE)
+        ):
+            with self.assertRaises(RateLimitError) as ctx:
+                generate(self.cfg, "hi", 1, 4)
+        self.assertEqual(ctx.exception.kind, "login_wall")
+        self.assertIn("login_wall", str(ctx.exception))
+
+    def test_kind_survives_the_final_typed_error(self) -> None:
+        """After retries exhaust, the re-raised error keeps the kind."""
+        with mock.patch(
+            "freegem.gemini._post", side_effect=lambda *a, **k: make_response(self.LOGIN_PAGE)
+        ):
+            with self.assertRaises(RateLimitError) as ctx:
+                generate(self.cfg, "hi", 1, 4)
+        self.assertEqual(ctx.exception.kind, "login_wall")
+        self.assertIn("login_wall", str(ctx.exception))
+
+    def test_still_a_bridge_error_and_retried_unchanged(self) -> None:
+        with mock.patch(
+            "freegem.gemini._post", side_effect=lambda *a, **k: make_response("")
+        ) as post:
+            with self.assertRaises(RateLimitError) as ctx:
+                generate(self.cfg, "hi", 1, 4)
+        self.assertIsInstance(ctx.exception, BridgeError)
+        self.assertEqual(post.call_count, self.cfg.retry_attempts)
+
+    def test_stream_default_kind_is_rate_limit(self) -> None:
+        import freegem.gemini as gem
+
+        # Fresh response per attempt: a fake client's iter_text iterator is
+        # exhausted by the first retry (same shared-response lesson as the
+        # shared-BytesIO note in GenerateTests), which would classify the
+        # retried attempt from an empty body instead of the real chunks.
+        client = mock.MagicMock()
+        client.stream.side_effect = [
+            StreamTests._fake_client([""]).stream.return_value,
+            StreamTests._fake_client([""]).stream.return_value,
+        ]
+        with (
+            mock.patch.object(gem, "HAS_HTTPX", True),
+            mock.patch.object(gem, "_httpx_client", return_value=client),
+        ):
+            with self.assertRaises(RateLimitError) as ctx:
+                list(generate_stream(self.cfg, "hi", 1, 4))
+        self.assertEqual(ctx.exception.kind, "rate_limit")
+
+    def test_stream_login_markers_classify_login_wall(self) -> None:
+        import freegem.gemini as gem
+
+        marker = "Sign in to continue at https://accounts.google.com/ServiceLogin"
+        client = mock.MagicMock()
+        client.stream.side_effect = [
+            StreamTests._fake_client([marker]).stream.return_value,
+            StreamTests._fake_client([marker]).stream.return_value,
+        ]
+        with (
+            mock.patch.object(gem, "HAS_HTTPX", True),
+            mock.patch.object(gem, "_httpx_client", return_value=client),
+        ):
+            with self.assertRaises(RateLimitError) as ctx:
+                list(generate_stream(self.cfg, "hi", 1, 4))
+        self.assertEqual(ctx.exception.kind, "login_wall")
 
 
 class HttpxPoolTests(unittest.TestCase):
