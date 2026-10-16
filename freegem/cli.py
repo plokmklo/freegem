@@ -109,9 +109,10 @@ def _build_parser() -> argparse.ArgumentParser:
     scrape.add_argument("--links", action="store_true", help="also list the page's links")
     scrape.add_argument(
         "--format",
-        choices=("text", "jsonl"),
+        choices=("text", "jsonl", "markdown"),
         default="text",
-        help="output format; jsonl writes one object per URL (default text)",
+        help="output format; markdown renders the page as a markdown document, "
+        "jsonl writes one object per URL (default text)",
     )
     scrape.add_argument(
         "--max-chars",
@@ -638,6 +639,39 @@ def cmd_models(cfg: BridgeConfig, args: argparse.Namespace) -> int:
     return 0
 
 
+def _scrape_markdown(
+    *,
+    url: str,
+    title: str,
+    text: str,
+    truncated: bool = False,
+    links: list[tuple[str, str]] | None = None,
+) -> str:
+    """Render one scraped page as a minimal markdown document.
+
+    Mirrors the markdown shapes the repo's other renderers emit: the title
+    becomes the H1 (article.py), and links become a ``## Links`` section of
+    real ``[label](href)`` links (research's linked source table). Page-
+    controlled strings (title, text, link labels) go through the same
+    marker defusing ``format_page`` applies, and multi-line titles are
+    flattened so a page cannot open headings of its own.
+    """
+    from .web_scraper import _defuse_untrusted_markers
+
+    heading = " ".join(_defuse_untrusted_markers(title or url).split()) or url
+    lines = [f"# {heading}", ""]
+    if text:
+        lines.append(_defuse_untrusted_markers(text).rstrip())
+    if truncated:
+        lines += ["", "*[content truncated at the max_chars limit]*"]
+    if links:
+        lines += ["", "## Links", ""]
+        for label, href in links:
+            flat_href = " ".join(_defuse_untrusted_markers(href).split())
+            lines.append(f"- [{_defuse_untrusted_markers(label or flat_href)}]({flat_href})")
+    return "\n".join(lines)
+
+
 def cmd_scrape(cfg: BridgeConfig, args: argparse.Namespace) -> int:
     """Fetch page(s) (SSRF-guarded, no robots.txt) and print text, JSONL, or an answer.
 
@@ -676,6 +710,33 @@ def cmd_scrape(cfg: BridgeConfig, args: argparse.Namespace) -> int:
         if args.ask:
             print("error: --ask works with a single URL only", file=sys.stderr)
             return 2
+
+        if len(args.url) == 1 and args.format == "markdown":
+            # Single-URL markdown: render the extracted page as a document
+            # (H1 title, body, optional link list) instead of the plain-text
+            # wrapper. Same fetch path, guards, cache, and ladder as text.
+            from .web_scraper import scrape_page
+
+            page = scrape_page(
+                cfg,
+                args.url[0],
+                max_chars=max_chars,
+                ignore_robots=not args.respect_robots,
+                smart=smart,
+                cache=cache,
+                refresh=args.refresh,
+            )
+            print(
+                _scrape_markdown(
+                    url=page.url,
+                    title=page.title,
+                    text=page.text,
+                    truncated=page.truncated,
+                    links=page.links if args.links else None,
+                )
+            )
+            return 0
+
         items = scrape_many(
             cfg,
             list(args.url),
@@ -693,6 +754,22 @@ def cmd_scrape(cfg: BridgeConfig, args: argparse.Namespace) -> int:
     if args.format == "jsonl":
         for item in items:
             print(json.dumps(item.as_dict(), ensure_ascii=False))
+    elif args.format == "markdown":
+        for index, item in enumerate(items, 1):
+            if index > 1:
+                print()
+                print("---")
+                print()
+            if not item.ok:
+                # BatchItem carries no link list, so batch markdown is
+                # title + body; failures stay honest, one block per URL.
+                print(f"# {item.url}\n\n**error:** {item.error}")
+                continue
+            print(
+                _scrape_markdown(
+                    url=item.url, title=item.title, text=item.text, truncated=item.truncated
+                )
+            )
     else:
         for index, item in enumerate(items, 1):
             if index > 1:
