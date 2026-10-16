@@ -98,7 +98,11 @@ class _CsvWriter:
             self._writer.writerow(columns)
 
     def write(self, item: dict[str, Any]) -> None:
-        self._writer.writerow([_flatten(item.get(col)) for col in self._columns])
+        # Same contract as the JSONL/JSON writers: every record passes
+        # through redact_secrets before hitting disk (issue #43 -- CSV rows
+        # used to skip it, so crawled secrets landed verbatim in exports).
+        redacted = redact_secrets_json(item)
+        self._writer.writerow([_flatten(redacted.get(col)) for col in self._columns])
 
     def close(self) -> None:
         self._sink.handle.close()

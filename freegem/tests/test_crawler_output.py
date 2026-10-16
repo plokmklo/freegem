@@ -83,6 +83,33 @@ class WriterTests(unittest.TestCase):
         self.assertIn("[REDACTED:bearer]", content)
         self.assertNotIn("a1b2c3d4e5f6g7h8", content)
 
+    def test_all_three_writers_redact_secrets(self) -> None:
+        """Module contract: EVERY record passes through redact_secrets before
+        hitting disk, whichever format it lands in (issue #43 -- the CSV
+        writer skipped it, so crawled secrets landed verbatim in exports)."""
+        secret = {
+            "url": "https://e.com/page",
+            "title": "leaky page",
+            "config": 'api_key = "a1b2c3d4e5f6g7h8"',
+            "note": "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4",
+            "tags": ["x", "Bearer a1b2c3d4e5f6g7h8i9j0"],
+        }
+        raw_fragments = (
+            "a1b2c3d4e5f6g7h8",
+            "A1b2C3d4E5f6G7h8I9j0K1l2M3n4",
+            "a1b2c3d4e5f6g7h8i9j0",
+        )
+        for fmt in ("jsonl", "json", "csv"):
+            path = self.path + "." + fmt
+            writer = make_writer(path, fmt, ["title", "config", "note", "tags"])
+            writer.write(dict(secret))
+            writer.close()
+            with open(path, encoding="utf-8") as fh:
+                content = fh.read()
+            for fragment in raw_fragments:
+                self.assertNotIn(fragment, content, f"{fmt} leaked a raw secret")
+            self.assertIn("[REDACTED:", content, f"{fmt} did not redact")
+
     def test_unknown_format_rejected(self) -> None:
         with self.assertRaises(ValueError):
             make_writer(self.path, "parquet")
