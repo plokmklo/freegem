@@ -701,15 +701,27 @@ class JobRunner:
             self._running[job.id] = time.monotonic() + self._timeout_for(job)
         self.manager.update_job_status(job.id, "processing")
         self.manager.bump_attempts(job.id)
+        failure: Exception | None = None
         try:
             self._body(job)
         except Exception as exc:
-            self._handle_failure(job, exc)
+            failure = exc
         finally:
             with self._lock:
                 self._running.pop(job.id, None)
                 cancelled = job.id in self._cancel_requested
                 self._cancel_requested.discard(job.id)
+        # The job is no longer registered as running: the watchdog owns no
+        # deadline for it from here on. Failure handling -- including the
+        # retry backoff sleep -- therefore happens AFTER the pop (#28): the
+        # old code slept up to 30s inside the except, still holding the
+        # slot, so the watchdog could mark a sleeping job ``timed_out`` and
+        # the retry then resurrected it -- and the sleeping worker stalled
+        # the pool either way.
+        if failure is not None:
+            self._handle_failure(job, failure, cancelled=cancelled)
+            self.manager.enforce_retention(self.retention)
+            return
         if cancelled:
             # Cooperative cancel landed while the body ran: the worker's
             # completion is overridden -- cancelled results are not trusted.
@@ -718,14 +730,11 @@ class JobRunner:
             self.manager.mark_cancelled(job.id, error="cancelled during run", override=True)
         self.manager.enforce_retention(self.retention)
 
-    def _handle_failure(self, job: Job, exc: Exception) -> None:
+    def _handle_failure(self, job: Job, exc: Exception, *, cancelled: bool = False) -> None:
         trace = {"timestamp": time.time(), "attempt": job.attempts, "error": str(exc)}
         current = self.manager.get_job(job.id)
         if current is None:
             return
-        with self._lock:
-            cancelled = job.id in self._cancel_requested
-            self._cancel_requested.discard(job.id)
         if cancelled:
             # The cancel flag was set while this run executed: cancelled wins
             # over the failure (result dropped, atomic), but a watchdog
@@ -740,12 +749,20 @@ class JobRunner:
             return
         if current.attempts <= self._max_retries_for(current):
             delay = min(30.0, 2.0 ** (current.attempts - 1))
-            self.manager.update_job_status(
+            # The re-queue stamp is terminal-guarded (#26a): if a cancel or a
+            # timeout won the race for this job, the write is refused and the
+            # job is NOT resurrected out of a terminal state.
+            if not self.manager.update_job_status(
                 job.id,
                 "queued",
                 error=f"attempt {current.attempts} failed: {exc}; retrying in {delay:.0f}s",
                 retry_trace=trace,
-            )
+            ):
+                return
+            # Backoff happens with the job already popped from _running (the
+            # caller's finally ran before this method), so the watchdog
+            # cannot stamp the sleeper mid-backoff (#28) and the pool slot is
+            # free while we wait.
             time.sleep(delay)
             if self._stop.is_set():
                 return

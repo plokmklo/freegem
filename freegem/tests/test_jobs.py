@@ -290,5 +290,89 @@ class CancelRaceTests(unittest.TestCase):
         self.assertIsNone(current.result)
 
 
+# ---------------------------------------------------------------------------
+# Issue #28: the retry backoff must not sleep inside the running slot.
+# ---------------------------------------------------------------------------
+
+
+class RetryBackoffTests(unittest.TestCase):
+    def test_near_deadline_failure_is_not_resurrected(self) -> None:
+        """A failure whose retry backoff outlives the job's timeout must end
+        ``failed`` -- never ``timed_out`` (the old code slept INSIDE the
+        ``_running`` entry, so the watchdog marked the sleeping job
+        ``timed_out`` and the retry machinery resurrected/re-queued it), and
+        never stuck ``queued``. The retry itself must still happen."""
+        mgr = JobManager(artifact_dir=ART_DIR)
+        calls = {"n": 0}
+        lock = threading.Lock()
+
+        def failing(job: Job) -> None:
+            with lock:
+                calls["n"] += 1
+            raise RuntimeError("transient boom")
+
+        # timeout 0.3s, first backoff 1s (2**0): the sleep used to cover the
+        # whole deadline while the slot was still registered as running.
+        runner = JobRunner(
+            mgr,
+            failing,
+            max_workers=1,
+            max_pending=5,
+            job_timeout_sec=0.3,
+            default_max_retries=1,
+        )
+        self.addCleanup(runner.close)
+        job = runner.submit("scrape", {})
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            current = mgr.get_job(job.id)
+            if current is not None and current.status in ("failed", "timed_out"):
+                break
+            time.sleep(0.02)
+        # Settle: a wrong resurrection (timed_out or queued) would land here.
+        time.sleep(0.5)
+        current = mgr.get_job(job.id)
+        assert current is not None
+        self.assertEqual(current.status, "failed")
+        self.assertEqual(current.attempts, 2)
+        self.assertEqual(calls["n"], 2)
+
+    def test_retry_eligible_job_still_retries(self) -> None:
+        """Guard the backoff restructure: a retryable failure still runs a
+        second attempt and completes."""
+        mgr = JobManager(artifact_dir=ART_DIR)
+        calls = {"n": 0}
+
+        def flaky(job: Job) -> None:
+            calls["n"] += 1
+            if calls["n"] < 2:
+                raise RuntimeError("once")
+            mgr.update_job_status(job.id, "completed", result={"attempt": calls["n"]})
+
+        runner = JobRunner(
+            mgr,
+            flaky,
+            max_workers=1,
+            max_pending=5,
+            job_timeout_sec=30,
+            default_max_retries=2,
+        )
+        self.addCleanup(runner.close)
+        job = runner.submit("scrape", {})
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            current = mgr.get_job(job.id)
+            if current is not None and current.status == "completed":
+                break
+            time.sleep(0.02)
+        current = mgr.get_job(job.id)
+        assert current is not None
+        self.assertEqual(current.status, "completed")
+        self.assertEqual(current.attempts, 2)
+        self.assertGreaterEqual(len(current.retry_traces), 1)
+        assert current.result is not None
+        self.assertEqual(current.result["attempt"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()
