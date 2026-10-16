@@ -117,6 +117,11 @@ _BACKOFF_BASE_SEC = 1.5
 _BACKOFF_CAP_SEC = 20.0
 _RETRY_AFTER_CAP_SEC = 60.0
 _TIMEOUT_CAP_SEC = 90.0
+#: How many times the ladder will DOUBLE the timeout and re-dial a URL that
+#: keeps timing out (issue #45: it used to escalate forever, so a persistently
+#: timing-out URL burned the whole attempt budget at up to 90s a dial and
+#: could never reach the wayback last resort).
+_MAX_TIMEOUT_ESCALATIONS = 2
 #: The Internet Archive's raw-capture view: timestamp "2" redirects to the
 #: newest snapshot, ``id_`` serves the original bytes without the toolbar.
 _WAYBACK_PREFIX = "https://web.archive.org/web/2id_/"
@@ -201,6 +206,10 @@ class _LadderState:
     #: IP-keyed) is not fixable in-run -- stop early and leave the rest to a
     #: later --retry-failed pass, when the limit window has likely reset.
     seen_429: int = 0
+    #: Timeout escalations used so far; capped at ``_MAX_TIMEOUT_ESCALATIONS``
+    #: so a wall of silence falls through to the remaining rungs instead of
+    #: consuming the entire attempt budget (issue #45).
+    timeout_escalations: int = 0
     #: Caller-supplied headers that must ride along on every attempt
     #: (conditional validators); profile headers merge OVER these.
     caller_headers: dict[str, str] = field(default_factory=dict)
@@ -390,9 +399,14 @@ def _next_action(
         if step is not None:
             return step
 
-    if kind == "timeout":
+    if kind == "timeout" and state.timeout_escalations < _MAX_TIMEOUT_ESCALATIONS:
+        state.timeout_escalations += 1
         state.timeout_sec = min(_TIMEOUT_CAP_SEC, max(state.timeout_sec * 2, 30.0))
         return ("timeout_up", original_url, None, False)
+    # A timeout past its escalation cap falls through from here (issue #45):
+    # two escalations are the honest budget -- a URL that still times out at
+    # the doubled timeout must not burn the remaining attempts on identical
+    # dials. The remaining rungs below decide (the archive decides last).
 
     if status in (404, 410) and not state.tried_root and _has_path(original_url):
         state.tried_root = True
@@ -424,9 +438,15 @@ def _next_action(
             return step
 
     if kind in ("network", "timeout"):
-        step = _sleep_step(state, original_url)
-        if step is not None:
-            return step
+        # A timeout past its escalation cap gains nothing from another
+        # identical dial after a nap (the escalation WAS that retry, at a
+        # bigger timeout); the rungs below decide instead. Network errors
+        # and pre-cap timeouts keep the backoff semantics.
+        timeout_walled = kind == "timeout" and state.timeout_escalations >= _MAX_TIMEOUT_ESCALATIONS
+        if not timeout_walled:
+            step = _sleep_step(state, original_url)
+            if step is not None:
+                return step
 
     if status in (301, 302, 303, 307, 308):
         # A final 3xx means urllib declined to follow (usually a loop where
