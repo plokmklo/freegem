@@ -5,6 +5,77 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.9.1] — 2026-10-16
+
+The external-review backlog round: all 46 open issues triaged and closed.
+Every fix ships with regression tests; the full suite ran green after each
+merge wave.
+
+### Fixed
+
+- **gemini**: urllib fallback now honors `Retry-After` (previously httpx-only)
+  and retries only 429/5xx/408 — 4xx auth failures fail fast instead of
+  burning 3 pointless retries (#34). The cookie cache is lock-guarded, never
+  serves another path's session on failure (cross-account leak), and no
+  longer caches partial reads (#35). A cookie file's own `xsrf_token` is used
+  when the config has none (#37). Proxy credentials are redacted from
+  transport-error messages, and a stale build tag triggers one
+  session-authenticated re-fetch mid-run (#38). `RateLimitError` gained a
+  `kind` attribute (`rate_limit` vs `login_wall`, #16).
+- **jobs/server**: JobRunner terminal statuses are final — the watchdog, the
+  completing body, and `cancel()` can no longer overwrite each other or
+  deliver untrusted results (#26). Pre-body rejections close the connection
+  instead of desyncing keep-alive framing (#27). Retry backoff releases the
+  running slot before sleeping, so timed-out jobs are never resurrected
+  (#28). `_google_stream` emits a Google-style error frame instead of
+  stopping silently; `_responses_stream` surfaces post-header errors as SSE
+  error events instead of injecting a second status line (#31). Retention
+  eviction purges evicted jobs' artifact records and files (#39, closes #32).
+  `crawl run --model` parses (crawl_common inherits the common parser).
+- **crawler**: adaptive recrawl now matches the Frontier's real `done`
+  status — the feature actually runs on production databases (#42). The CSV
+  writer redacts secrets like the JSONL/JSON writers (#43). Spilled >16 MB
+  body temp files are unlinked on every non-artifact path (#44). Timeout
+  escalations are capped at 2, so persistently timing-out URLs fall through
+  to origin-root/wayback within minutes instead of burning the whole ladder
+  (#45). Campaign `--distill` no longer self-deadlocks on ≥2 MB pages (RLock,
+  #41).
+- **scrape/smart-fetch**: challenge-shaped direct 200s (thin bot-wall
+  interstitials) now engage the ladder (#12). Batch jsonl marks zero-text
+  HTTP 200s as `ok:false` with an honest error (#11). The scrape cache stores
+  full text and truncates per caller — no more silently-short hits with a
+  false `truncated` flag — and empty entries no longer poison smart mode;
+  research's own budget-cut cache writes are gone too (#21). The reader rung
+  re-truncates to the caller's `max_chars` (#22). Wayback snapshots are
+  verified against the requested URL before acceptance (#23). The
+  prose-ratio gate counts digits as prose with an absolute letters floor, so
+  box scores and itineraries are no longer mislabeled `nav_only` (#24). The
+  ladder has a wall-clock budget (60s), the ai-search rung a 30s bound, and
+  batch waits are bounded so one slow host cannot stall a whole batch (#25).
+
+### Added
+
+- `freegem watch URL` — change monitoring atop simhash diffing: local state
+  under `~/.config/freegem/watch/`, `--once`/`--interval`, text/json output,
+  exit-code contract for cron (0 unchanged, 3 changed, 1 error) (#30).
+- `scrape --format markdown` (#33) and library-level
+  `include_tags`/`exclude_tags` content selection in `scrape_page` (#29).
+- Optional `browser-render` (Playwright) ladder rung between reader and
+  wayback, default off, budget-aware, clean-failure when Playwright is
+  absent (#14). Configurable `batch_max_concurrency` with a stderr warning
+  on clamp (#15).
+- `ask` streams tokens as they arrive (machine modes stay buffered; #10),
+  and `ask --search` refuses to serve upstream soft-failures as exit-0
+  answers (#46).
+
+### Tests / docs
+
+- Hermetic browser-fetcher tests (no real DNS; #47) and per-test servers for
+  the cross-origin POST tests (#49). README body-cap default corrected to
+  5 MiB (#40); `config.example.json` regenerated from `DEFAULT_CONFIG` with
+  the auth claim fixed (#36); new "Global flags" and "Windows notes (MSYS
+  path rewriting)" README sections (#20, #19).
+
 ## [2.9.0] — 2026-10-12
 
 Release gate, browser/proxy security, bounded background jobs, and a
