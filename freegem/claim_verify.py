@@ -928,8 +928,10 @@ def verify(
                 "urls": normalized,
             }
             if not normalized:
+                # "on <wiki host>" is a lie when the serp backend ran.
+                where = f"on {host}" if backend == "wiki" else f"via {backend}"
                 raise VerifyError(
-                    f"discovery found no sources for {query!r} on {host}; supply URLs explicitly"
+                    f"discovery found no sources for {query!r} {where}; supply URLs explicitly"
                 )
         else:
             raise VerifyError("verify needs URLs or discovery: pass urls=[...] or discover=True")
@@ -1097,7 +1099,12 @@ def _meta_line(result: VerifyResult) -> str:
     parts.append(f"{result.metrics.elapsed_sec:.1f}s")
     line = "verify: " + ", ".join(parts)
     if result.discovery:
-        line += f" | discovered via {result.discovery['wiki']} ({result.discovery['found']} urls)"
+        # Name the backend that actually discovered: the wiki host is only
+        # the right label for the wiki backend. A serp run used to print
+        # "discovered via en.wikipedia.org" while DuckDuckGo did the work.
+        backend = str(result.discovery.get("backend") or "wiki")
+        via = result.discovery.get("wiki") if backend == "wiki" else backend
+        line += f" | discovered via {via or backend} ({result.discovery['found']} urls)"
     return f"{line} [req {result.metrics.request_id}]"
 
 

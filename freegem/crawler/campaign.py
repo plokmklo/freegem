@@ -267,7 +267,10 @@ def run_campaign(
 
     result = CampaignResult()
     distill_counters: dict[str, int] = {}
-    lock = threading.Lock()
+    # RLock, not Lock: work() holds this while calling _distill_if_large,
+    # whose distilled-row write re-acquires the same lock (issue #41 — a plain
+    # Lock self-deadlocked on the first page at/above the distill threshold).
+    lock = threading.RLock()
     cancel = threading.Event()
     # One shared jar: cookies an origin itself grants (anonymous entitlement
     # tokens, consent marks) ride along on retries and later seeds, exactly

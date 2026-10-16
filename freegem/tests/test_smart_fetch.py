@@ -171,6 +171,48 @@ class FallbackLadderTests(unittest.TestCase):
         self.assertEqual(order, ["wayback"])
         self.assertEqual(result.text, "content from wayback")
 
+    def test_second_fetch_on_same_host_reuses_first_fetch_winner(self) -> None:
+        """The memory's whole point, end to end: fetch 1's winner is written
+        by fetch 1 itself (no pre-seeding), and fetch 2 on the same host
+        tries that strategy FIRST — the losing rungs are never touched."""
+        ok_page = ScrapeResult(url="u", title="T", text="the article body")
+        scripted = {
+            "browser-headers": ScrapeError("HTTP 403 fetching 'x'"),
+            "reader": ok_page,
+            "wayback": ScrapeError("HTTP 403"),
+            "ai-search": ScrapeError("bridge unavailable"),
+        }
+        first_order: list[str] = []
+        second_order: list[str] = []
+        with (
+            mock.patch(
+                "freegem.smart_fetch._try_strategy",
+                side_effect=self._ladder(scripted, first_order),
+            ),
+            mock.patch("freegem.smart_fetch.time.sleep"),
+        ):
+            result1 = fallback_scrape(
+                self.cfg, "https://remembered.example/a", max_chars=200, first_error="HTTP 403"
+            )
+        self.assertEqual(result1.text, "the article body")
+        self.assertEqual(first_order, ["browser-headers", "reader"])
+        # Written to DISK by fetch 1 — fetch 2 reads it back with no seeding.
+        self.assertEqual(
+            StrategyMemory(default_memory_path()).get("remembered.example"), "reader"
+        )
+        with (
+            mock.patch(
+                "freegem.smart_fetch._try_strategy",
+                side_effect=self._ladder(scripted, second_order),
+            ),
+            mock.patch("freegem.smart_fetch.time.sleep"),
+        ):
+            result2 = fallback_scrape(
+                self.cfg, "https://remembered.example/b", max_chars=200, first_error="HTTP 403"
+            )
+        self.assertEqual(result2.text, "the article body")
+        self.assertEqual(second_order, ["reader"])
+
     def test_our_refusal_is_reraised_untouched(self) -> None:
         with mock.patch("freegem.smart_fetch._try_strategy") as try_strategy:
             with self.assertRaises(ScrapeError) as caught:
