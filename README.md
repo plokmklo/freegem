@@ -72,6 +72,9 @@ pip install freegem        # or: pip install "freegem[full]"
 freegem serve
 ```
 
+Global flags (`--model`, `--proxy`, `--quiet`, …) work before or after the
+subcommand — see [Global flags](#global-flags).
+
 The server starts on `http://127.0.0.1:8081` — loopback only. Point any
 OpenAI-compatible client at it:
 
@@ -187,6 +190,27 @@ freegem verify "claim one" "claim two" --urls URL1 URL2   # per-claim verdicts
 freegem crawl plan --seeds https://example.com --max-pages 20   # dry run
 freegem models                                  # registry + session state
 freegem doctor                                  # diagnostics, no generation
+```
+
+#### Global flags
+
+The global flags are accepted in BOTH positions — before or after the
+subcommand — because every subcommand re-declares them (`crawl status` is
+the only exception; it takes just `--state`). `--version` is top-level only.
+
+| Flag | Meaning |
+| --- | --- |
+| `--config PATH` | Config file (default: search `./config.json`, `./gemini-auth.json`, `~/.config/freegem/config.json`, `$FREEGEM_CONFIG`) |
+| `--model ID` | Default model id |
+| `--cookie-file PATH` | Session cookie file |
+| `--proxy URL` | HTTP proxy, e.g. `http://127.0.0.1:7890` |
+| `--quiet` | Suppress request logging |
+| `--version` | Print the version and exit (top level) |
+
+```bash
+freegem --model gemini-3.6-flash ask "hi"   # before the subcommand
+freegem ask "hi" --model gemini-3.6-flash   # after it — the same thing
+freegem crawl run --model gemini-3.6-flash --seeds https://example.com/docs/ --max-pages 5
 ```
 
 ---
