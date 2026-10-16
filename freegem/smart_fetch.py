@@ -342,6 +342,35 @@ def _parse_reader_output(result: ScrapeResult, original_url: str, max_chars: int
     )
 
 
+_WAYBACK_PATH_RE = re.compile(r"^/web/\d{4,14}[a-z_]*/(?:https?://)?(.+)$", re.IGNORECASE)
+
+
+def _snapshot_matches(snapshot: str, url: str) -> bool:
+    """True when the Wayback snapshot URL embeds the SAME page as ``url`` (#23).
+
+    The availability API answers with ``.../web/<stamp>/<target>``; a
+    snapshot whose embedded target points at a different host or path would
+    silently serve the WRONG page as the archived copy of ``url``. Scheme,
+    port, capture timestamp, and query string are deliberately not compared:
+    Wayback normalizes those between capture and replay.
+    """
+    try:
+        snap = urllib.parse.urlsplit(snapshot)
+        orig = urllib.parse.urlsplit(url)
+    except ValueError:
+        return False
+    match = _WAYBACK_PATH_RE.match(snap.path or "")
+    if not match:
+        return False
+    target_host, _, target_path = match.group(1).partition("/")
+    orig_host = (orig.hostname or "").lower()
+    if not orig_host or target_host.lower() != orig_host:
+        return False
+    # strip("/") on both sides: the split above consumes the target's leading
+    # slash, and bare domains have none at all.
+    return target_path.strip("/") == (orig.path or "/").strip("/")
+
+
 def _wayback_snapshot(cfg: BridgeConfig, url: str) -> str:
     """The closest Wayback Machine snapshot URL for ``url``, via the
     availability API (fetched through the guarded opener like everything else)."""
@@ -359,6 +388,15 @@ def _wayback_snapshot(cfg: BridgeConfig, url: str) -> str:
         raise ScrapeError(f"no Wayback Machine snapshot exists for {url!r}")
     if snapshot.startswith("http://"):
         snapshot = "https://" + snapshot[len("http://") :]
+    if not _snapshot_matches(snapshot, url):
+        # (#23) The API sometimes answers with a snapshot of a DIFFERENT page
+        # (a redirect target, a close-match). Serving it as the archived copy
+        # of ``url`` would be a lie; refuse the rung and let the ladder move
+        # on to the next one.
+        raise ScrapeError(
+            f"wayback availability API returned a snapshot for a different "
+            f"page than {url!r}"
+        )
     return snapshot
 
 

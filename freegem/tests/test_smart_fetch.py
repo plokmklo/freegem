@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from collections.abc import Mapping
@@ -398,6 +399,103 @@ class ReaderParseTests(unittest.TestCase):
         self.assertEqual(result.url, "https://news.example/a")
         self.assertLessEqual(len(result.text), 250)
         self.assertTrue(result.truncated)
+
+
+class WaybackSnapshotTests(unittest.TestCase):
+    """(#23) The availability API's snapshot must be FOR the requested page."""
+
+    def _snapshot(self, snapshot_url: str) -> Any:
+        from freegem.smart_fetch import _wayback_snapshot
+
+        body = json.dumps({"archived_snapshots": {"closest": {"url": snapshot_url}}}).encode()
+        with mock.patch("freegem.web_scraper._fetch", return_value=_FakeResponse(body)):
+            return _wayback_snapshot(BridgeConfig(log_requests=False), "https://news.example/a")
+
+    def test_matching_snapshot_returned_and_upgraded_to_https(self) -> None:
+        out = self._snapshot("http://web.archive.org/web/20240101000000/https://news.example/a")
+        self.assertEqual(out, "https://web.archive.org/web/20240101000000/https://news.example/a")
+
+    def test_matching_snapshot_with_id_modifier(self) -> None:
+        out = self._snapshot(
+            "https://web.archive.org/web/20240101000000id_/https://news.example/a"
+        )
+        self.assertIn("/a", out)
+
+    def test_bare_domain_snapshot_matches(self) -> None:
+        from freegem.smart_fetch import _wayback_snapshot
+
+        # Bare domains: /web/<stamp>/https://example.com (no path) and the
+        # trailing-slash variant must both verify.
+        for snap in (
+            "https://web.archive.org/web/20240101/https://example.com",
+            "https://web.archive.org/web/20240101/https://example.com/",
+        ):
+            body = json.dumps({"archived_snapshots": {"closest": {"url": snap}}}).encode()
+            with mock.patch("freegem.web_scraper._fetch", return_value=_FakeResponse(body)):
+                out = _wayback_snapshot(
+                    BridgeConfig(log_requests=False), "https://example.com"
+                )
+            self.assertEqual(out, snap)
+
+    def test_snapshot_for_a_different_host_is_rejected(self) -> None:
+        with self.assertRaises(ScrapeError) as caught:
+            self._snapshot(
+                "https://web.archive.org/web/20240101000000/https://OTHER.example/a"
+            )
+        self.assertIn("different page", str(caught.exception))
+
+    def test_snapshot_for_a_different_path_is_rejected(self) -> None:
+        with self.assertRaises(ScrapeError) as caught:
+            self._snapshot(
+                "https://web.archive.org/web/20240101000000/https://news.example/OTHER"
+            )
+        self.assertIn("different page", str(caught.exception))
+
+    def test_snapshot_without_a_web_prefix_is_rejected(self) -> None:
+        with self.assertRaises(ScrapeError) as caught:
+            self._snapshot("https://elsewhere.example/mirror/news.example/a")
+        self.assertIn("different page", str(caught.exception))
+
+    def test_rejection_engages_the_ladder(self) -> None:
+        """(#23) The mismatch refusal classifies as the site's failure, not
+        ours, so the ladder records it and moves on to the next rung."""
+        from freegem.smart_fetch import classify_failure
+
+        kind = classify_failure(
+            "wayback availability API returned a snapshot for a different page than 'u'"
+        )
+        self.assertEqual(kind, "network")
+
+    def test_mismatched_snapshot_continues_to_the_next_rung(self) -> None:
+        """(#23) End to end: wayback refuses the wrong-page snapshot, the
+        ladder proceeds and the next rung rescues the fetch."""
+        order: list[str] = []
+        refusal = ScrapeError("HTTP 403 fetching 'x'")
+        ok_page = ScrapeResult(url="u", title="T", text="rescued after wayback")
+        scripted = {
+            "browser-headers": refusal,
+            "reader": refusal,
+            "wayback": ScrapeError(
+                "wayback availability API returned a snapshot for a different page"
+            ),
+            "ai-search": ok_page,
+        }
+
+        def try_strategy(cfg, url, strategy, max_chars, ignore_robots):
+            order.append(strategy)
+            outcome = scripted[strategy]
+            if isinstance(outcome, ScrapeError):
+                raise outcome
+            return outcome
+
+        cfg = BridgeConfig(log_requests=False)
+        with (
+            mock.patch("freegem.smart_fetch._try_strategy", side_effect=try_strategy),
+            mock.patch("freegem.smart_fetch.time.sleep"),
+        ):
+            result = fallback_scrape(cfg, "https://w.example/", max_chars=100, first_error="403")
+        self.assertEqual(order, ["browser-headers", "reader", "wayback", "ai-search"])
+        self.assertEqual(result.text, "rescued after wayback")
 
 
 class SmartIntegrationTests(unittest.TestCase):
