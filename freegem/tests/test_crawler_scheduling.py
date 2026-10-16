@@ -8,6 +8,7 @@ from collections.abc import Generator
 
 import pytest
 
+from freegem.crawler.frontier import DONE, Frontier
 from freegem.crawler.scheduling import (
     ChangePolicy,
     RecrawlCandidate,
@@ -39,9 +40,11 @@ def db() -> Generator[sqlite3.Connection, None, None]:
 
 
 def _seed_fetched(conn: sqlite3.Connection, url: str, etag: str | None = None) -> None:
+    """Seed a row the way the runner leaves it after a successful fetch:
+    ``Frontier.mark_done`` writes status 'done' (NOT 'fetched')."""
     conn.execute(
         "INSERT INTO frontier(url, host, status, fetched_at, etag) VALUES(?,?,?,?,?)",
-        (url, "example.org", "fetched", time.time(), etag),
+        (url, "example.org", DONE, time.time(), etag),
     )
     conn.commit()
 
@@ -92,18 +95,22 @@ def test_record_fetch_and_candidates_roundtrip(db: sqlite3.Connection) -> None:
     assert c.next_attempt_at >= now
 
 
-def test_candidates_only_cover_fetched_rows(db: sqlite3.Connection) -> None:
+def test_candidates_only_cover_done_rows(db: sqlite3.Connection) -> None:
     _seed_fetched(db, "https://example.org/fetched")
     db.execute(
         "INSERT INTO frontier(url, host, status) VALUES(?,?,?)",
         ("https://example.org/pending", "example.org", "pending"),
+    )
+    db.execute(
+        "INSERT INTO frontier(url, host, status) VALUES(?,?,?)",
+        ("https://example.org/errored", "example.org", "error"),
     )
     db.commit()
     cands = recrawl_candidates(db, limit=10)
     assert [c.url for c in cands] == ["https://example.org/fetched"]
 
 
-def test_apply_recrawl_plan_updates_due_time_only_for_fetched(db: sqlite3.Connection) -> None:
+def test_apply_recrawl_plan_updates_due_time_only_for_done(db: sqlite3.Connection) -> None:
     _seed_fetched(db, "https://example.org/a")
     db.execute(
         "INSERT INTO frontier(url, host, status) VALUES(?,?,?)",
@@ -132,3 +139,34 @@ def test_limit_bounds_candidate_scan(db: sqlite3.Connection) -> None:
     for i in range(12):
         _seed_fetched(db, f"https://example.org/p{i}")
     assert len(recrawl_candidates(db, limit=5)) == 5
+
+
+def test_recrawl_candidates_see_rows_written_by_frontier_mark_done(tmp_path) -> None:
+    """Regression (issue #42): the recrawl pipeline queried status 'fetched',
+    but ``Frontier.mark_done`` writes 'done' -- so on REAL crawl databases
+    ``recrawl_candidates`` always returned [] and adaptive recrawl never
+    fired. This test writes through the Frontier itself, the way the runner
+    does, and the plan must see the row and be able to apply to it."""
+    state = str(tmp_path / "state.db")
+    frontier = Frontier(state)
+    try:
+        frontier.push("https://example.org/a", host="example.org")
+        claimed = frontier.claim(1)
+        assert claimed, "frontier claim failed"
+        frontier.mark_done("https://example.org/a", http_status=200, etag='W/"v1"')
+    finally:
+        frontier.close()
+
+    conn = sqlite3.connect(state)
+    try:
+        assert conn.execute("SELECT DISTINCT status FROM frontier").fetchall() == [("done",)]
+        cands = recrawl_candidates(conn, limit=10)
+        assert [c.url for c in cands] == ["https://example.org/a"]
+        assert cands[0].validators == {"If-None-Match": 'W/"v1"'}
+        assert apply_recrawl_plan(conn, cands) == 1
+        stored = conn.execute(
+            "SELECT next_attempt_at FROM frontier WHERE url = 'https://example.org/a'"
+        ).fetchone()[0]
+        assert stored == cands[0].next_attempt_at
+    finally:
+        conn.close()

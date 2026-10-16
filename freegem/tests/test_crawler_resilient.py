@@ -223,6 +223,30 @@ class BrowserProfileTests(LadderTestCase):
         self.assertTrue(outcome.ok, outcome.error)
         self.assertEqual(outcome.fallback, "doh")
 
+    def test_persistent_timeout_reaches_wayback_within_bounded_attempts(self) -> None:
+        """Issue #45: a URL that ALWAYS times out must reach the wayback
+        last resort after the two escalation dials, not burn the whole
+        16-attempt budget on timeout_up retries at up to 90s each."""
+        dials: list[str] = []
+
+        def always_times_out(cfg: BridgeConfig, url: str, **kwargs: Any) -> FetchOutcome:
+            dials.append(url)
+            if "/wb2id_/" in url:
+                return FetchOutcome(
+                    url=url, kind="ok", status=200, body=b"archived copy", body_size=13
+                )
+            return FetchOutcome(url=url, kind="timeout", error="timed out")
+
+        with mock.patch.object(resilient, "crawl_fetch", side_effect=always_times_out):
+            outcome = self.fetch(f"{self.base}/walled-by-silence")
+        self.assertTrue(outcome.ok, outcome.error)
+        self.assertEqual(outcome.via, "wayback")
+        self.assertEqual(outcome.fallback, "wayback")
+        # initial dial + 2 capped escalations + 1 wayback read
+        self.assertEqual(outcome.attempts, 4)
+        self.assertEqual(len(dials), 4)
+        self.assertIn("/wb2id_/", dials[-1])
+
 
 class LadderUnitTests(unittest.TestCase):
     """Pure decisions over fabricated outcomes: no network, no sleeps."""
@@ -242,7 +266,7 @@ class LadderUnitTests(unittest.TestCase):
         assert step is not None, "expected a ladder step, got None"
         return step
 
-    def test_timeout_escalates(self) -> None:
+    def test_timeout_escalates_then_falls_through_to_wayback(self) -> None:
         state = self._state()
         outcome = FetchOutcome(url="https://x.test/", kind="timeout", error="timed out")
         action = self._decide("https://x.test/", outcome, state)
@@ -252,6 +276,16 @@ class LadderUnitTests(unittest.TestCase):
         action2 = self._decide("https://x.test/", outcome2, state)
         self.assertEqual(action2[0], "timeout_up")
         self.assertGreaterEqual(state.timeout_sec, 60.0)  # capped
+        # Issue #45: past the escalation cap the ladder must STOP returning
+        # timeout_up (which used to consume all 16 attempts at up to 90s a
+        # dial) and fall through to the remaining rungs -- here, the wayback
+        # last resort. It must not burn a backoff sleep on another identical
+        # dial either.
+        outcome3 = FetchOutcome(url="https://x.test/", kind="timeout", error="timed out")
+        action3 = self._decide("https://x.test/", outcome3, state)
+        self.assertEqual(action3[0], "wayback")
+        self.assertEqual(state.timeout_sec, 60.0)  # no further escalation
+        self.assertEqual(state.sleeps_used, 0)
 
     def test_connection_refused_swaps_scheme(self) -> None:
         state = self._state()

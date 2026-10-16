@@ -37,6 +37,7 @@ stopped and the report is reproducible from the recorded outcomes.
 
 from __future__ import annotations
 
+import contextlib
 import http.cookiejar
 import json
 import os
@@ -285,13 +286,23 @@ def run_campaign(
         outcome = fetch_resilient(
             cfg, url, limits=limits, pacer=pacer, spill_dir=spill_dir, cookie_jar=jar
         )
-        _persist(db, lock, url, category, outcome)
-        with lock:
-            result.record(url, category, outcome)
-            if distill:
-                _distill_if_large(cfg, db, lock, url, outcome, distill_counters)
-        if on_event is not None:
-            on_event({"event": "fetched", **outcome.summary(), "category": category})
+        # The campaign keeps no artifact store: a body that spilled to a temp
+        # file (> spill_bytes) is read for distillation below and must not
+        # outlive this outcome (issue #44 -- every oversized page used to
+        # leak a spill file permanently).
+        spill_tmp = outcome.body_path
+        try:
+            _persist(db, lock, url, category, outcome)
+            with lock:
+                result.record(url, category, outcome)
+                if distill:
+                    _distill_if_large(cfg, db, lock, url, outcome, distill_counters)
+            if on_event is not None:
+                on_event({"event": "fetched", **outcome.summary(), "category": category})
+        finally:
+            if spill_tmp and os.path.exists(spill_tmp):
+                with contextlib.suppress(OSError):
+                    os.unlink(spill_tmp)
 
     if retry_failed:
         rows = db.execute(
