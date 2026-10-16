@@ -192,7 +192,9 @@ class CookieLoadingTests(unittest.TestCase):
     def setUp(self) -> None:
         from freegem import gemini as gem
 
-        gem._COOKIE_CACHE.update({"mtime": None, "cookie": "", "sapisid": None})
+        gem._COOKIE_CACHE.update(
+            {"key": None, "cookie": "", "sapisid": None, "xsrf": None}
+        )
 
     def test_json_shape(self) -> None:
         import os
@@ -250,11 +252,161 @@ class CookieLoadingTests(unittest.TestCase):
             with open(path, "w") as fh:
                 fh.write("{ truncated")
             os.utime(path, (0, 0))
-            gem._COOKIE_CACHE["mtime"] = -1
             second, _ = load_cookie(BridgeConfig(cookie_file=path))
             self.assertEqual(second, "SID=good")  # kept, not dropped
         finally:
             os.unlink(path)
+
+
+class CookieCacheGuardTests(unittest.TestCase):
+    """The cookie cache must never serve one account's session for another (#35)."""
+
+    def setUp(self) -> None:
+        from freegem import gemini as gem
+
+        self.gem = gem
+        gem._COOKIE_CACHE.update({"key": None, "cookie": "", "sapisid": None, "xsrf": None})
+        self.addCleanup(
+            gem._COOKIE_CACHE.update,
+            {"key": None, "cookie": "", "sapisid": None, "xsrf": None},
+        )
+
+    @staticmethod
+    def _write(path: str, content: str) -> None:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(content)
+
+    def test_failure_on_other_file_does_not_leak_cached_session(self) -> None:
+        """A failure on cookie file B returns anonymous, not file A's session."""
+        import os
+        import tempfile
+
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps({"cookie": "SID=account-a", "sapisid": "sa"}))
+            path_a = fh.name
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write("{ truncated")
+            path_b = fh.name
+        try:
+            self.assertEqual(load_cookie(BridgeConfig(cookie_file=path_a)), ("SID=account-a", "sa"))
+            # Parse failure on B: the cache holds A under A's key only.
+            self.assertEqual(load_cookie(BridgeConfig(cookie_file=path_b)), ("", None))
+            # A hard read failure on B behaves the same.
+            with mock.patch("builtins.open", side_effect=PermissionError("denied")):
+                self.assertEqual(load_cookie(BridgeConfig(cookie_file=path_b)), ("", None))
+            # And A's session is still intact afterwards.
+            self.assertEqual(load_cookie(BridgeConfig(cookie_file=path_a)), ("SID=account-a", "sa"))
+        finally:
+            os.unlink(path_a)
+            os.unlink(path_b)
+
+    def test_read_failure_on_same_path_keeps_last_good_value(self) -> None:
+        """Mid-write files must not downgrade the session for the SAME file."""
+        import os
+        import tempfile
+
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps({"cookie": "SID=good", "sapisid": "s"}))
+            path = fh.name
+        try:
+            cfg = BridgeConfig(cookie_file=path)
+            self.assertEqual(load_cookie(cfg), ("SID=good", "s"))
+            os.utime(path, (0, 0))  # force a cache miss on the same path
+            with mock.patch("builtins.open", side_effect=PermissionError("denied")):
+                self.assertEqual(load_cookie(cfg), ("SID=good", "s"))
+        finally:
+            os.unlink(path)
+
+    def test_cache_hit_is_served_without_reopening_the_file(self) -> None:
+        import os
+        import tempfile
+
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps({"cookie": "SID=account-a", "sapisid": "sa"}))
+            path = fh.name
+        try:
+            cfg = BridgeConfig(cookie_file=path)
+            self.assertEqual(load_cookie(cfg), ("SID=account-a", "sa"))
+            with mock.patch("builtins.open", wraps=open) as opener:
+                self.assertEqual(load_cookie(cfg), ("SID=account-a", "sa"))
+            self.assertEqual(opener.call_count, 0)
+        finally:
+            os.unlink(path)
+
+    def test_partial_read_is_never_cached_as_valid(self) -> None:
+        """A size mismatch between read and stat must not poison the cache."""
+        import os
+        import tempfile
+
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps({"cookie": "SID=full", "sapisid": "s"}))
+            path = fh.name
+        try:
+            cfg = BridgeConfig(cookie_file=path)
+            self.assertEqual(load_cookie(cfg), ("SID=full", "s"))
+            key_before = self.gem._COOKIE_CACHE["key"]
+            real_size = os.path.getsize(path)
+            # Simulate a writer landing between our read and our stat: the
+            # pre-read stat sees the old size, the post-read stat a bigger
+            # one. The loader must treat the snapshot as suspect.
+            sizes = iter([real_size - 1, real_size + 13])
+            with mock.patch.object(os.path, "getsize", lambda p: next(sizes)):
+                self.assertEqual(load_cookie(cfg), ("SID=full", "s"))
+            self.assertEqual(self.gem._COOKIE_CACHE["key"], key_before)
+            self.assertEqual(self.gem._COOKIE_CACHE["cookie"], "SID=full")
+        finally:
+            os.unlink(path)
+
+    def test_concurrent_loaders_do_not_corrupt_cache(self) -> None:
+        """Race smoke: hammering the loader never yields a torn session."""
+        import os
+        import tempfile
+        import threading
+
+        # Deliberately different lengths so a mid-write read is detectable
+        # by the size check instead of parsing as plausible garbage.
+        variants = [
+            json.dumps({"cookie": "SID=one; SAPISID=s1", "sapisid": "s1"}),
+            json.dumps({"cookie": "SID=two-two; SAPISID=s2", "sapisid": "s2"}),
+        ]
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(variants[0])
+            path = fh.name
+        allowed = {"SID=one; SAPISID=s1", "SID=two-two; SAPISID=s2", ""}
+        errors: list[str] = []
+
+        def reader() -> None:
+            cfg = BridgeConfig(cookie_file=path)
+            for _ in range(120):
+                try:
+                    cookie, sapisid = load_cookie(cfg)
+                except Exception as exc:  # pragma: no cover - reported below
+                    errors.append(f"loader raised: {exc!r}")
+                    return
+                if cookie not in allowed:
+                    errors.append(f"torn result: {(cookie, sapisid)!r}")
+                    return
+                if cookie == "SID=one; SAPISID=s1" and sapisid != "s1":
+                    errors.append(f"mismatched sapisid: {(cookie, sapisid)!r}")
+                    return
+                if cookie == "SID=two-two; SAPISID=s2" and sapisid != "s2":
+                    errors.append(f"mismatched sapisid: {(cookie, sapisid)!r}")
+                    return
+
+        def writer() -> None:
+            for i in range(80):
+                self._write(path, variants[i % 2])
+                os.utime(path, None)
+
+        threads = [threading.Thread(target=reader) for _ in range(6)]
+        threads.append(threading.Thread(target=writer))
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+            self.assertFalse(thread.is_alive())
+        os.unlink(path)
+        self.assertEqual(errors, [])
 
 
 class ResponseParsingTests(unittest.TestCase):

@@ -75,11 +75,15 @@ class RateLimitError(BridgeError):
 
 
 _SSL_CTX: ssl.SSLContext | None = None
-# (abspath, mtime, size) -> (cookie_str, sapisid) cache so a hot loop does not
-# re-read the file. The path and size are part of the key: mtime alone let two
-# cookie files with identical mtimes share one session (cross-account leak) and
-# missed same-tick rewrites.
-_COOKIE_CACHE: dict[str, Any] = {"key": None, "cookie": "", "sapisid": None}
+# (abspath, mtime, size) -> (cookie_str, sapisid, xsrf) cache so a hot loop does
+# not re-read the file. The path and size are part of the key: mtime alone let
+# two cookie files with identical mtimes share one session (cross-account leak)
+# and missed same-tick rewrites. The server handles requests on threads, so
+# every read AND write of the dict goes through _COOKIE_CACHE_LOCK: unlocked,
+# a miss->parse->update sequence can publish a torn entry (new key, old
+# cookie) that briefly pairs one account's path with another's session.
+_COOKIE_CACHE: dict[str, Any] = {"key": None, "cookie": "", "sapisid": None, "xsrf": None}
+_COOKIE_CACHE_LOCK = threading.Lock()
 
 
 def log(cfg: BridgeConfig, message: str) -> None:
@@ -199,37 +203,57 @@ def account_prefix(cfg: BridgeConfig) -> str:
     return f"/u/{cfg.auth_user}"
 
 
-def load_cookie(cfg: BridgeConfig) -> tuple[str, str | None]:
-    """Read the session file, cached by mtime.
+def _read_session(cfg: BridgeConfig) -> tuple[str, str | None, str | None]:
+    """Read the session file; return ``(cookie, sapisid, xsrf_token)``.
 
-    Accepts both shapes the cookie-sync extension exports:
-    a JSON object with ``cookie``/``sapisid``, or a bare cookie string.
-    On parse failure the last good value is kept rather than failing open to
-    anonymous: a mid-write file should not silently downgrade the session.
+    Accepts both shapes the cookie-sync extension exports: a JSON object with
+    ``cookie``/``sapisid`` (and optionally ``xsrf_token``), or a bare cookie
+    string. Results are cached by ``(abspath, mtime, size)``.
+
+    Two hard rules, both learned from production incidents:
+
+    - A failure (unreadable, unparsable) may only fall back to the last good
+      value cached for THE SAME PATH. A parse failure while reading cookie
+      file B must never serve file A's session -- that is a cross-account
+      leak. Any other case degrades to anonymous.
+    - The content is read FIRST and the cache key is computed after, with a
+      byte-count check against the post-read stat. The old stat-then-read
+      order could cache a half-written snapshot under a key that later
+      requests would consider current.
     """
     path = cfg.cookie_file
     if not path:
-        return "", None
+        return "", None, None
     import os
 
     if not os.path.exists(path):
-        return "", None
+        return "", None, None
+    abspath = os.path.abspath(path)
     try:
-        mtime = os.path.getmtime(path)
-        key = (os.path.abspath(path), mtime, os.path.getsize(path))
-        if _COOKIE_CACHE["key"] == key and _COOKIE_CACHE["cookie"]:
-            return _COOKIE_CACHE["cookie"], _COOKIE_CACHE["sapisid"]
+        probe = (abspath, os.path.getmtime(path), os.path.getsize(path))
+        with _COOKIE_CACHE_LOCK:
+            if _COOKIE_CACHE["key"] == probe and _COOKIE_CACHE["cookie"]:
+                return _COOKIE_CACHE["cookie"], _COOKIE_CACHE["sapisid"], _COOKIE_CACHE["xsrf"]
 
-        with open(path, encoding="utf-8") as fh:
-            content = fh.read().strip()
-
+        with open(path, "rb") as fh:
+            raw = fh.read()
+        size_after = os.path.getsize(path)
+        key = (abspath, os.path.getmtime(path), size_after)
+        if len(raw) != size_after:
+            raise OSError(
+                f"session file changed while reading "
+                f"({len(raw)} of {size_after} bytes); refusing a partial read"
+            )
+        content = raw.decode("utf-8").strip()
         if content.startswith("{"):
             data = json.loads(content)
             cookie_str = str(data.get("cookie", "") or "")
             sapisid = data.get("sapisid") or None
+            xsrf = data.get("xsrf_token") or None
         else:
             cookie_str = content
             sapisid = None
+            xsrf = None
             for pair in cookie_str.split(";"):
                 if "=" not in pair:
                     continue
@@ -238,11 +262,35 @@ def load_cookie(cfg: BridgeConfig) -> tuple[str, str | None]:
                     sapisid = v or None
                     break
 
-        _COOKIE_CACHE.update({"key": key, "cookie": cookie_str, "sapisid": sapisid})
-        return cookie_str, sapisid
+        with _COOKIE_CACHE_LOCK:
+            _COOKIE_CACHE.update(
+                {"key": key, "cookie": cookie_str, "sapisid": sapisid, "xsrf": xsrf}
+            )
+        return cookie_str, sapisid, xsrf
     except Exception as exc:
         log(cfg, f"cookie load failed, using cached value: {exc}")
-        return _COOKIE_CACHE["cookie"], _COOKIE_CACHE["sapisid"]
+        with _COOKIE_CACHE_LOCK:
+            cached_key = _COOKIE_CACHE["key"]
+            # Same-path guard: the cache may only serve the file that
+            # produced it. Another file's key (or no cache at all) must
+            # degrade to anonymous instead of leaking a session.
+            if cached_key is not None and cached_key[0] == abspath and _COOKIE_CACHE["cookie"]:
+                return _COOKIE_CACHE["cookie"], _COOKIE_CACHE["sapisid"], _COOKIE_CACHE["xsrf"]
+        return "", None, None
+
+
+def load_cookie(cfg: BridgeConfig) -> tuple[str, str | None]:
+    """Read the session file, cached by (path, mtime, size).
+
+    Accepts both shapes the cookie-sync extension exports: a JSON object with
+    ``cookie``/``sapisid``, or a bare cookie string.
+    On parse failure the last good value is kept rather than failing open to
+    anonymous: a mid-write file should not silently downgrade the session.
+    A failure on a *different* file never returns this file's session -- see
+    :func:`_read_session` for the exact guard.
+    """
+    cookie, sapisid, _xsrf = _read_session(cfg)
+    return cookie, sapisid
 
 
 def make_sapisidhash(sapisid: str) -> str:
