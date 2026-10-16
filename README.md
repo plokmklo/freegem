@@ -552,7 +552,9 @@ url, title, readable text. Formats: `--format jsonl` (default), `json`,
 `csv`.
 
 **Hardening** — every response body is capped on the wire AND after
-decompression (default 100 MiB, `--max-bytes`), with bodies over 16 MiB
+decompression — default 5 MiB per page (`--max-bytes`); a body past the cap
+is refused `too_large`, never read forever (the hardening layer's own
+ceiling is 100 MiB, which campaign runs read at) — with bodies over 16 MiB
 spilled to disk instead of held in RAM; the DOM is capped in nodes
 and depth; XML (sitemaps, feeds) is parsed with DTD/ENTITY refused outright;
 every log line and output row passes a secret-redaction pass (API-key and
