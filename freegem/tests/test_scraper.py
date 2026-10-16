@@ -162,6 +162,12 @@ class _FakeSite(BaseHTTPRequestHandler):
             )
             self._send(html.encode(), "text/html")
             return
+        if path == "/empty":
+            # A 200 with no readable text at all: the JS-shell shape.
+            self._send(
+                b"<html><head><title>Empty</title></head><body></body></html>", "text/html"
+            )
+            return
         if path == "/page" or path == "/private-page":
             self._send(PAGE_HTML.encode(), "text/html; charset=utf-8")
             return
@@ -1121,6 +1127,32 @@ class BatchScrapeTests(_FakeSiteTestCase):
 
         items = scrape_many(self.cfg, [f"{self.base}/no-such-page"], concurrency=1, smart=False)
         self.assertFalse(items[0].ok)
+
+    def test_zero_text_200_is_not_ok(self) -> None:
+        """(#11) A 200 whose extraction is empty is a failure with an honest
+        error, not an ok:true row with an empty text field."""
+        from freegem.web_scraper import scrape_many
+
+        items = scrape_many(
+            self.cfg,
+            [f"{self.base}/empty", f"{self.base}/page"],
+            concurrency=2,
+            smart=False,
+        )
+        self.assertFalse(items[0].ok)
+        self.assertIn("zero readable text", items[0].error)
+        row = items[0].as_dict()  # exactly what the jsonl writer emits
+        self.assertFalse(row["ok"])
+        self.assertIn("error", row)
+        self.assertNotIn("text", row)
+        self.assertTrue(items[1].ok)
+
+    def test_zero_text_200_fails_in_sequential_mode_too(self) -> None:
+        from freegem.web_scraper import scrape_many
+
+        items = scrape_many(self.cfg, [f"{self.base}/empty"], concurrency=1, smart=False)
+        self.assertFalse(items[0].ok)
+        self.assertIn("zero readable text", items[0].error)
 
     def test_batch_over_cap_refused(self) -> None:
         from freegem.web_scraper import scrape_many

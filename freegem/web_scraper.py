@@ -1214,6 +1214,12 @@ def scrape_many(
                 return BatchItem(url=url, ok=False, error=str(exc))
             except Exception as exc:  # a hostile page must not kill the batch
                 return BatchItem(url=url, ok=False, error=f"{type(exc).__name__}: {exc}")
+            if not page.text.strip():
+                # (#11) A zero-text 200 is not a success. It slips past the
+                # ladder when smart is off (or a cache entry is empty), and
+                # the jsonl row must say what happened instead of shipping
+                # ok:true with an empty text field.
+                return BatchItem(url=url, ok=False, error="HTTP 200 but zero readable text")
             return BatchItem(
                 url=url,
                 ok=True,
