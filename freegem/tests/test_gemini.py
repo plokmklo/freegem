@@ -409,6 +409,59 @@ class CookieCacheGuardTests(unittest.TestCase):
         self.assertEqual(errors, [])
 
 
+class XsrfFallbackTests(unittest.TestCase):
+    """The refresh script writes xsrf_token into the session JSON; read it (#37)."""
+
+    def setUp(self) -> None:
+        from freegem import gemini as gem
+
+        gem._COOKIE_CACHE.update({"key": None, "cookie": "", "sapisid": None, "xsrf": None})
+        self.addCleanup(
+            gem._COOKIE_CACHE.update,
+            {"key": None, "cookie": "", "sapisid": None, "xsrf": None},
+        )
+
+    def test_cfg_xsrf_missing_falls_back_to_cookie_file(self) -> None:
+        import os
+        import tempfile
+
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps({"cookie": "SID=a", "sapisid": "b", "xsrf_token": "ATFILE"}))
+            path = fh.name
+        try:
+            payload = build_payload("hi", 1, 4, BridgeConfig(cookie_file=path))
+            self.assertEqual(parse_qs(payload)["at"], ["ATFILE"])
+        finally:
+            os.unlink(path)
+
+    def test_cfg_xsrf_wins_over_cookie_file(self) -> None:
+        import os
+        import tempfile
+
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps({"cookie": "SID=a", "sapisid": "b", "xsrf_token": "ATFILE"}))
+            path = fh.name
+        try:
+            cfg = BridgeConfig(cookie_file=path, xsrf_token="ATCFG")
+            payload = build_payload("hi", 1, 4, cfg)
+            self.assertEqual(parse_qs(payload)["at"], ["ATCFG"])
+        finally:
+            os.unlink(path)
+
+    def test_bare_cookie_string_carries_no_xsrf(self) -> None:
+        import os
+        import tempfile
+
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as fh:
+            fh.write("SID=a; SAPISID=b")
+            path = fh.name
+        try:
+            payload = build_payload("hi", 1, 4, BridgeConfig(cookie_file=path))
+            self.assertNotIn("at", parse_qs(payload))
+        finally:
+            os.unlink(path)
+
+
 class ResponseParsingTests(unittest.TestCase):
     def test_longest_text_wins(self) -> None:
         """Gemini streams progressively longer snapshots of one answer."""

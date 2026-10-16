@@ -311,6 +311,20 @@ def make_sapisidhash(sapisid: str) -> str:
 _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
 
+def _load_xsrf(cfg: BridgeConfig) -> str | None:
+    """The xsrf token for the payload: config first, then the cookie file.
+
+    The cookie-sync refresh script writes ``xsrf_token`` into the session JSON
+    next to ``cookie``/``sapisid``, but the loader used to drop that field, so
+    a config that never set the separate ``xsrf_token`` key silently sent its
+    requests without the ``at`` parameter (and Google rejected or degraded
+    them). Both sources are honored here; the explicit config wins.
+    """
+    if cfg.xsrf_token:
+        return cfg.xsrf_token
+    return _read_session(cfg)[2]
+
+
 def build_headers(cfg: BridgeConfig) -> dict[str, str]:
     prefix = account_prefix(cfg)
     headers = {
@@ -390,8 +404,9 @@ def build_payload(
 
     outer = [None, json.dumps(inner)]
     params = {"f.req": json.dumps(outer)}
-    if cfg.xsrf_token:
-        params["at"] = cfg.xsrf_token
+    xsrf = _load_xsrf(cfg)
+    if xsrf:
+        params["at"] = xsrf
     return urllib.parse.urlencode(params)
 
 
