@@ -713,6 +713,12 @@ def cmd_scrape(cfg: BridgeConfig, args: argparse.Namespace) -> int:
     one result line per URL, failures recorded per URL instead of killing
     the run. ``--ask`` implies the 200k character budget when no explicit
     ``--max-chars`` was given -- a question deserves the whole page.
+
+    Targets may be URLs or LOCAL FILES (#50): an existing path (``./notes.html``),
+    a Windows drive path (``C:\\...``), or a ``file:`` URI reads from disk with
+    the same cap and extractor as the wire path -- the quota-free local-batch
+    path. The operator typed the target here, so local reads are enabled for
+    the whole command; MCP/server surfaces keep them off.
     """
     from .web_research import ResearchCache
     from .web_scraper import scrape_cli, scrape_many
@@ -736,6 +742,7 @@ def cmd_scrape(cfg: BridgeConfig, args: argparse.Namespace) -> int:
                 smart=smart,
                 cache=cache,
                 refresh=args.refresh,
+                allow_local=True,
             )
             print(output)
             return 0
@@ -758,6 +765,7 @@ def cmd_scrape(cfg: BridgeConfig, args: argparse.Namespace) -> int:
                 smart=smart,
                 cache=cache,
                 refresh=args.refresh,
+                allow_local=True,
             )
             print(
                 _scrape_markdown(
@@ -779,6 +787,7 @@ def cmd_scrape(cfg: BridgeConfig, args: argparse.Namespace) -> int:
             cache=cache,
             refresh=args.refresh,
             concurrency=args.concurrency,
+            allow_local=True,
         )
     except (BridgeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)

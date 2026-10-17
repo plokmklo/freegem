@@ -250,6 +250,24 @@ freegem scrape https://example.com --respect-robots    # opt into legacy robots 
 freegem scrape https://example.com --no-smart          # direct fetch only, no fallbacks
 ```
 
+**Local files are first-class targets** (issue #50). The operator-typed
+`scrape` command also reads files from disk — the quota-free local-batch
+path — through the same cap and extractor as the wire path:
+
+```bash
+freegem scrape ./notes.html                            # relative or absolute path
+freegem scrape "C:/Users/hp/notes/report.html"         # Windows drive paths work
+freegem scrape "file:///C:/Users/hp/notes/report.html" # file: URIs work too
+freegem scrape ./a.html ./b.html ./c.html --format jsonl   # local batch, no network
+```
+
+A local read touches no network, so the SSRF guard's IP checks do not apply
+to it — but the guard itself is unchanged: `file://server/share` (a UNC/SMB
+fetch in disguise) is still refused, the 100 MB body cap still applies, and
+`web_scrape`/server tool surfaces stay http(s)-only (a prompt-injected agent
+must not become an arbitrary-file-read primitive; local reads are a CLI
+feature because the human typed the path).
+
 **Smart fetching** — the first request to every site is the honest one: a
 self-identifying freegem client. When the origin refuses it (403/405/401/
 407/429/5xx, a timeout, a connection reset), freegem walks a ladder of

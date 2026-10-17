@@ -18,6 +18,8 @@ from __future__ import annotations
 import gzip
 import io
 import json
+import os
+import shutil
 import socket
 import ssl
 import tempfile
@@ -1465,3 +1467,201 @@ class AskBudgetTests(unittest.TestCase):
         ) as scrape_page_mock:
             scrape_cli(self.cfg, url="https://x.example/")
         self.assertEqual(scrape_page_mock.call_args.kwargs["max_chars"], DEFAULT_MAX_CHARS)
+
+
+class LocalFileScrapeTests(unittest.TestCase):
+    """Local file targets read like their remote twins (#50).
+
+    The SSRF guard parsed ``C:\\...`` as scheme ``c`` and refused ``file:``
+    outright, killing the documented quota-free local-batch path on Windows
+    (plokmklo/freegem#50). The fix routes local-file INTENT to a disk read
+    through the SAME extraction pipeline, while every network target keeps
+    the guard fully in force: ``allow_local=True`` must loosen exactly one
+    gate -- the local one -- and nothing else.
+    """
+
+    PROBE_HTML = (
+        "<html><head><title>Probe</title></head><body>"
+        "<h1>FREEGEM PROBE MARKER-7f3a</h1>"
+        "<p>local scrape sanity check.</p></body></html>"
+    )
+
+    def setUp(self) -> None:
+        self.cfg = BridgeConfig(log_requests=False)
+        tmp = tempfile.mkdtemp(prefix="freegem-local-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        self.tmp = Path(tmp)
+        self.probe = self.tmp / "probe.html"
+        self.probe.write_text(self.PROBE_HTML, encoding="utf-8")
+
+    def test_existing_path_reads(self) -> None:
+        from freegem.web_scraper import scrape_page
+
+        result = scrape_page(self.cfg, str(self.probe), allow_local=True)
+        self.assertIn("FREEGEM PROBE MARKER-7f3a", result.text)
+        self.assertEqual(result.via, "local-file")
+        self.assertEqual(result.title, "Probe")
+
+    def test_file_uri_reads(self) -> None:
+        from freegem.web_scraper import scrape_page
+
+        result = scrape_page(self.cfg, self.probe.resolve().as_uri(), allow_local=True)
+        self.assertIn("FREEGEM PROBE MARKER-7f3a", result.text)
+        self.assertEqual(result.via, "local-file")
+
+    def test_missing_drive_path_is_local_error_not_scheme_refusal(self) -> None:
+        # The #50 symptom: C:/... was refused as scheme 'c'. It must route
+        # to the local-file path and honestly report the file as missing.
+        from freegem.web_scraper import ScrapeError, scrape_page
+
+        with self.assertRaises(ScrapeError) as ctx:
+            scrape_page(
+                self.cfg,
+                "C:/Users/hp/AppData/Local/Temp/definitely-missing.html",
+                allow_local=True,
+            )
+        self.assertIn("not found", str(ctx.exception))
+        self.assertNotIn("scheme", str(ctx.exception))
+
+    @unittest.skipIf(os.name != "nt", "exercises a real Windows drive path")
+    def test_windows_drive_path_reads_real_file(self) -> None:
+        from freegem.web_scraper import scrape_page
+
+        win_path = self.probe.resolve()
+        self.assertTrue(win_path.drive, "expected a drive-letter path on Windows")
+        result = scrape_page(self.cfg, str(win_path), allow_local=True)
+        self.assertIn("FREEGEM PROBE MARKER-7f3a", result.text)
+
+    def test_file_uri_windows_drive_missing_is_local_error(self) -> None:
+        # Cross-platform form of the issue's second repro: file:///C:/...
+        # must reach the local-file path (url2pathname -> C:\...), not the
+        # scheme refusal.
+        from freegem.web_scraper import ScrapeError, scrape_page
+
+        with self.assertRaises(ScrapeError) as ctx:
+            scrape_page(
+                self.cfg,
+                "file:///C:/Users/hp/definitely-missing.html",
+                allow_local=True,
+            )
+        self.assertIn("not found", str(ctx.exception))
+        self.assertNotIn("scheme", str(ctx.exception))
+
+    def test_file_uri_two_slash_drive_form_normalizes(self) -> None:
+        # file://C:/... (two slashes) is a common Windows habit: the drive
+        # letter lands in the netloc. It is normalized, not refused as a
+        # "remote host" -- the error is the local not-found error.
+        from freegem.web_scraper import ScrapeError, scrape_page
+
+        with self.assertRaises(ScrapeError) as ctx:
+            scrape_page(self.cfg, "file://C:/missing-file.html", allow_local=True)
+        self.assertIn("not found", str(ctx.exception))
+        self.assertNotIn("remote host", str(ctx.exception))
+
+    def test_unc_file_uri_refused_even_with_allow_local(self) -> None:
+        # file://server/share/... is a network (SMB/UNC) fetch in disguise;
+        # allow_local never turns the scraper into an SMB client.
+        from freegem.web_scraper import ScrapeError, scrape_page
+
+        with self.assertRaises(ScrapeError) as ctx:
+            scrape_page(self.cfg, "file://server/share/secret.html", allow_local=True)
+        self.assertIn("remote host", str(ctx.exception))
+
+    def test_directory_is_an_honest_error(self) -> None:
+        from freegem.web_scraper import ScrapeError, scrape_page
+
+        with self.assertRaises(ScrapeError) as ctx:
+            scrape_page(self.cfg, str(self.tmp), allow_local=True)
+        self.assertIn("directory", str(ctx.exception))
+
+    def test_default_refuses_file_uri_with_cli_pointer(self) -> None:
+        # The default stays closed: MCP/server surfaces must not become
+        # arbitrary-file-read primitives for a prompt-injected agent.
+        from freegem.web_scraper import ScrapeError, scrape_page
+
+        with self.assertRaises(ScrapeError) as ctx:
+            scrape_page(self.cfg, self.probe.resolve().as_uri())
+        self.assertIn("CLI", str(ctx.exception))
+
+    def test_default_refuses_drive_letter_path(self) -> None:
+        from freegem.web_scraper import ScrapeError, scrape_page
+
+        with self.assertRaises(ScrapeError) as ctx:
+            scrape_page(self.cfg, "C:/Users/hp/probe.html")
+        self.assertIn("local file", str(ctx.exception))
+        # Not the old confusing shape refusal either.
+        self.assertNotIn("scheme", str(ctx.exception))
+
+    def test_oversized_local_file_refused_before_read(self) -> None:
+        from freegem.web_scraper import ScrapeError, scrape_page
+
+        big = self.tmp / "big.html"
+        big.write_text("x" * 64, encoding="utf-8")
+        with mock.patch("freegem.web_scraper._MAX_BYTES", 16):
+            with self.assertRaises(ScrapeError) as ctx:
+                scrape_page(self.cfg, str(big), allow_local=True)
+        self.assertIn("cap", str(ctx.exception))
+
+    def test_metadata_ip_still_refused_with_allow_local(self) -> None:
+        # The requested #50 regression: loosening the LOCAL gate must not
+        # loosen the NETWORK gate. 169.254.169.254 stays refused.
+        from freegem.web_scraper import ScrapeError, scrape_page
+
+        with self.assertRaises(ScrapeError) as ctx:
+            scrape_page(
+                self.cfg,
+                "http://169.254.169.254/latest/meta-data/",
+                allow_local=True,
+            )
+        self.assertIn("non-public", str(ctx.exception))
+
+    def test_local_file_batch_rows(self) -> None:
+        # The documented quota-free local-BATCH path: files ride the same
+        # bounded pool, and a missing file is one honest failed row.
+        from freegem.web_scraper import scrape_many
+
+        # The missing row uses the file: URI form: a MISSING plain POSIX
+        # path carries no scheme marker and stays on the network path (the
+        # issue's os.path.exists gate), while a file: URI is unambiguous
+        # local-file intent and gets the local not-found error.
+        missing_uri = (self.tmp / "missing.html").as_uri()
+        items = scrape_many(
+            self.cfg,
+            [str(self.probe), missing_uri],
+            allow_local=True,
+            smart=False,
+        )
+        self.assertTrue(items[0].ok)
+        self.assertEqual(items[0].via, "local-file")
+        self.assertIn("FREEGEM PROBE MARKER-7f3a", items[0].text)
+        self.assertFalse(items[1].ok)
+        self.assertIn("not found", items[1].error)
+
+    def test_mcp_tool_refuses_local_target(self) -> None:
+        from freegem.web_scraper import ScrapeError, run_scrape_tool
+
+        with self.assertRaises(ScrapeError) as ctx:
+            run_scrape_tool(self.cfg, {"url": self.probe.resolve().as_uri()})
+        self.assertIn("CLI", str(ctx.exception))
+
+    def test_cli_scrape_reads_local_file(self) -> None:
+        # End-to-end through the parser + cmd_scrape: the operator surface
+        # enables local reads, no extra flag needed (the #50 repro command).
+        from freegem.cli import cmd_scrape
+
+        parser = _build_parser()
+        args = parser.parse_args(
+            [
+                "scrape",
+                str(self.probe),
+                "--max-chars",
+                "2000",
+                "--no-cache",
+                "--no-smart",
+            ]
+        )
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = cmd_scrape(self.cfg, args)
+        self.assertEqual(code, 0)
+        self.assertIn("FREEGEM PROBE MARKER-7f3a", buf.getvalue())

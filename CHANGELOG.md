@@ -5,6 +5,33 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.9.3] — 2026-10-18
+
+### Fixed
+
+- **local file scraping is dead no more (#50)**: `freegem scrape` refused
+  every local target — a Windows drive path (`C:\...`) was parsed as URL
+  scheme `c` ("refusing scheme 'c'"), and an explicit `file:` URI was
+  refused outright, killing the documented quota-free local-batch path on
+  Windows. Local targets are now routed to a disk read through the SAME
+  extraction pipeline as the wire path: existing paths (POSIX and Windows),
+  drive-letter paths even when missing (honest "local file not found"
+  instead of a scheme refusal), `file:` URIs (`file:///C:/...`, and the
+  two-slash `file://C:/...` habit normalizes), plus the two-slash drive
+  form. The local path skips robots.txt (an HTTP concept) and the cache (a
+  disk read needs no de-dup); the 100 MB body cap and the extraction
+  pipeline are exactly the wire path's.
+- **the loosening loosens exactly one gate**: only the CLI — where the
+  operator typed the target — enables local reads (`allow_local=True`).
+  MCP `web_scrape` and server tool surfaces keep refusing local targets so
+  a prompt-injected agent cannot read arbitrary local files through them,
+  and `http://169.254.169.254/` stays refused even with local reads on
+  (pinned by test). `file://server/share` (a UNC/SMB fetch in disguise)
+  stays refused, and classic MS-DOS device names (`con`, `nul`, `com1`,
+  ...) are refused as targets on Windows — `con` would hang the read.
+- **version alignment**: `pyproject.toml` had drifted (`2.9.0`) behind
+  `freegem.__version__` (`2.9.2`); both now read 2.9.3.
+
 ## [2.9.2] — 2026-10-18
 
 Restore CI green: every `test` matrix leg (3 OSes × 4 Pythons) had been red

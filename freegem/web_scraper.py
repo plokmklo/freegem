@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import re
 import sys
 import threading
@@ -649,6 +650,122 @@ def _decode_body(raw: bytes, content_type: str) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
+# ─── local file targets (#50) ─────────────────────────────────────────────────
+#
+# ``freegem scrape`` documents a quota-free local-batch path: point the CLI at
+# files on disk instead of URLs. The SSRF guard made that path dead in two
+# ways -- a Windows drive path (``C:\...``) parses as scheme ``c`` and an
+# explicit ``file:`` URI is refused outright. The fix treats LOCAL targets as
+# what they are (a disk read, not a network fetch) while keeping every
+# network-facing surface strict: only the CLI passes ``allow_local=True``;
+# MCP and server tools keep refusing local targets so a prompt-injected
+# agent cannot read arbitrary local files through them.
+
+#: ``C:\...`` / ``C:/...`` — a Windows drive-letter path. This is a file
+#: path on ANY platform (the string form is unambiguous); without this
+#: check the URL parser read ``C:`` as scheme ``c`` and refused (#50).
+_WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
+
+#: Classic MS-DOS device names resolve as DEVICES even when used as a path
+#: (``con`` reads the console and can hang a fetch; ``nul`` "succeeds"
+#: empty). Checked on Windows only -- on POSIX these are legal file names.
+_WINDOWS_DEVICE_RE = re.compile(
+    r"^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\.[^\\/]*)?$", re.IGNORECASE
+)
+
+
+def _file_url_to_path(url: str) -> str:
+    """Resolve a ``file:`` URI to a filesystem path; refuse anything remote.
+
+    ``file:///C:/...``, ``file:/tmp/...``, and ``file://localhost/...`` name
+    THIS machine. ``file://server/share/...`` names a network share (an
+    SMB/UNC fetch in disguise on Windows), so it is refused like any other
+    remote target. Query and fragment are dropped the way every file URI
+    consumer does; a trailing ``#section`` is a viewer concept, not part
+    of the path.
+    """
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme.lower() != "file":
+        raise ScrapeError(f"not a file URL: {url!r}")
+    if parsed.username or parsed.password:
+        raise ScrapeError(f"refusing file URL with embedded credentials: {url!r}")
+    if re.fullmatch(r"[A-Za-z]:", parsed.netloc):
+        # ``file://C:/...`` (two slashes): a common Windows habit. The "host"
+        # is the drive letter -- still this machine -- so normalize instead
+        # of refusing: reconstruct the path the three-slash form would have.
+        return urllib.request.url2pathname(f"/{parsed.netloc}{parsed.path}")
+    host = (parsed.hostname or "").strip()
+    if host not in ("", "localhost"):
+        raise ScrapeError(
+            f"refusing file URL with a remote host ({host!r}); only local file: URLs are read"
+        )
+    return urllib.request.url2pathname(parsed.path)
+
+
+def _local_target(target: str) -> str | None:
+    """A filesystem path when ``target`` names a local file, else None (#50).
+
+    Three shapes count as local-file intent:
+
+    - an explicit ``file:`` URI (resolved by :func:`_file_url_to_path`,
+      which refuses remote-host forms),
+    - a Windows drive-letter path on any platform (``C:\\...`` is never a
+      URL), and
+    - anything that already exists on this filesystem (POSIX absolute and
+      relative paths).
+
+    Everything else -- http/https and every other scheme -- returns None
+    and stays on the network path with the SSRF guard fully in force.
+    """
+    if target.lower().startswith("file:"):
+        return _file_url_to_path(target)
+    if _WINDOWS_DRIVE_RE.match(target):
+        return target
+    if os.path.exists(target):
+        return target
+    return None
+
+
+def _scrape_local_file(
+    cfg: BridgeConfig,
+    path: str,
+    url: str,
+    *,
+    include_tags: list[str] | None = None,
+    exclude_tags: list[str] | None = None,
+) -> ScrapeResult:
+    """Read one local file through the SAME extraction pipeline as the wire path.
+
+    No network is involved, so the SSRF guard's resolve-and-pin machinery does
+    not apply (#50): the path was resolved and bounded by :func:`_local_target`
+    and the caller's ``allow_local`` decision. The body cap matches the wire
+    path (``_MAX_BYTES``) and is checked BEFORE reading, so a huge file dies
+    with an honest error instead of in swap. robots.txt does not apply (it is
+    an HTTP concept) and the research cache is not consulted (a disk read
+    needs no de-duplication).
+    """
+    if not os.path.exists(path):
+        raise ScrapeError(f"local file not found: {path!r}")
+    if os.path.isdir(path):
+        raise ScrapeError(f"local path {path!r} is a directory, not a readable file")
+    if os.name == "nt":
+        tail = os.path.basename(path)
+        if _WINDOWS_DEVICE_RE.match(tail):
+            raise ScrapeError(f"refusing Windows device name {tail!r} as a scrape target")
+    try:
+        if os.path.getsize(path) > _MAX_BYTES:
+            raise ScrapeError(f"local file exceeds the {_MAX_BYTES}-byte scrape cap")
+        with open(path, "rb") as fh:
+            raw = fh.read(_MAX_BYTES + 1)
+    except OSError as exc:
+        raise ScrapeError(f"cannot read local file {path!r}: {exc}") from exc
+    if len(raw) > _MAX_BYTES:
+        raise ScrapeError(f"local file exceeds the {_MAX_BYTES}-byte scrape cap")
+    html = _decode_body(raw, "")
+    result = _extract_html(cfg, url, html, include_tags=include_tags, exclude_tags=exclude_tags)
+    return replace(result, via="local-file")
+
+
 def _dedupe_links(links: list[tuple[str, str]], cap: int = 200) -> list[tuple[str, str]]:
     seen: set[str] = set()
     out: list[tuple[str, str]] = []
@@ -1133,6 +1250,7 @@ def scrape_page(
     refresh: bool = False,
     smart: bool = False,
     progress: Any | None = None,
+    allow_local: bool = False,
 ) -> ScrapeResult:
     """Fetch one page and extract readable text. Raises ScrapeError when refused.
 
@@ -1140,6 +1258,19 @@ def scrape_page(
     attacker-controlled text from the same origin as the pages being read and
     a documented prompt-injection/policy-poisoning vector against scrapers
     and AI agents. Pass ``ignore_robots=False`` to opt back into honoring it.
+
+    ``allow_local`` (#50) admits LOCAL targets -- existing filesystem paths,
+    Windows drive letters (``C:\\...``, previously misparsed as scheme ``c``),
+    and ``file:`` URIs (remote-host forms like ``file://server/share`` stay
+    refused; a UNC/SMB fetch is a network fetch in disguise). A local target
+    is a disk read, not a network fetch, so the SSRF guard's resolve-and-pin
+    machinery does not apply to it, robots.txt does not apply (an HTTP
+    concept), the cache is not consulted (a disk read needs no de-dup), and
+    the smart-fetch ladder has no alternate read paths to offer. The cap and
+    the extraction pipeline are exactly the wire path's. DEFAULT IS OFF: only
+    surfaces where the OPERATOR typed the target (the ``freegem scrape`` CLI)
+    pass True -- MCP and server tools keep refusing local targets so a
+    prompt-injected agent cannot read arbitrary local files through them.
 
     ``include_tags`` / ``exclude_tags`` (#29) are CSS-selector lists in the
     simple forms ``tag``, ``.class``, ``#id``, ``tag.class#id`` and comma
@@ -1166,6 +1297,17 @@ def scrape_page(
     ladder (#21). ``progress`` receives human-readable status lines as the
     ladder walks.
     """
+    local_path = _local_target(url)
+    if local_path is not None:
+        if not allow_local:
+            raise ScrapeError(
+                f"refusing local file target {url!r}: local file reads are a "
+                "'freegem scrape' CLI feature; network-facing tool surfaces "
+                "stay http(s)-only"
+            )
+        return _scrape_local_file(
+            cfg, local_path, url, include_tags=include_tags, exclude_tags=exclude_tags
+        )
     try:
         url = url_allowed(url)
     except SSRFRefused as exc:
@@ -1252,34 +1394,22 @@ def scrape_page(
     return replace(result, text=view, truncated=True)
 
 
-def _scrape_page_uncached(
+def _extract_html(
     cfg: BridgeConfig,
     url: str,
+    html: str,
     *,
-    headers_override: dict[str, str] | None,
     include_tags: list[str] | None = None,
     exclude_tags: list[str] | None = None,
+    last_modified: str | None = None,
 ) -> ScrapeResult:
-    """The direct fetch path: adapter first, then guarded HTML.
+    """Run one decoded HTML document through the shared extraction pipeline.
 
-    Returns the FULL extracted text (#21): cutting to the caller's budget
-    happens in scrape_page AFTER the cache write, so the cache never stores
-    a caller's view.
+    The tail both fetch paths share (#50): tag selection (#29), main-content
+    anchoring, extraction, and link de-duplication. The wire path and the
+    local-file path feed the same extractor, so a local file reads exactly
+    like its remote twin.
     """
-    # Structured-source adapters first: when the site offers an official API
-    # for this URL, that beats extracting HTML (and honors the same guard).
-    adapted = _mediawiki_extract(cfg, url)
-    if adapted is not None:
-        return adapted
-
-    response = _fetch(cfg, url, headers=headers_override)
-    content_type = (response.headers.get("Content-Type") or "").strip()
-    mime = content_type.split(";")[0].strip().lower()
-    if mime and mime not in _ALLOWED_TYPES:
-        raise ScrapeError(f"refusing content type {mime!r}; only HTML and text are fetched")
-    last_modified = response.headers.get("Last-Modified")
-
-    html = _decode_body(_read_capped(response), content_type)
     title_source = html
 
     # (#29) Tag-level content selection, before any extraction: include
@@ -1321,6 +1451,44 @@ def _scrape_page_uncached(
         title=extractor.title,
         text=text,
         links=_dedupe_links(extractor.links),
+        last_modified=last_modified,
+    )
+
+
+def _scrape_page_uncached(
+    cfg: BridgeConfig,
+    url: str,
+    *,
+    headers_override: dict[str, str] | None,
+    include_tags: list[str] | None = None,
+    exclude_tags: list[str] | None = None,
+) -> ScrapeResult:
+    """The direct fetch path: adapter first, then guarded HTML.
+
+    Returns the FULL extracted text (#21): cutting to the caller's budget
+    happens in scrape_page AFTER the cache write, so the cache never stores
+    a caller's view.
+    """
+    # Structured-source adapters first: when the site offers an official API
+    # for this URL, that beats extracting HTML (and honors the same guard).
+    adapted = _mediawiki_extract(cfg, url)
+    if adapted is not None:
+        return adapted
+
+    response = _fetch(cfg, url, headers=headers_override)
+    content_type = (response.headers.get("Content-Type") or "").strip()
+    mime = content_type.split(";")[0].strip().lower()
+    if mime and mime not in _ALLOWED_TYPES:
+        raise ScrapeError(f"refusing content type {mime!r}; only HTML and text are fetched")
+    last_modified = response.headers.get("Last-Modified")
+
+    html = _decode_body(_read_capped(response), content_type)
+    return _extract_html(
+        cfg,
+        url,
+        html,
+        include_tags=include_tags,
+        exclude_tags=exclude_tags,
         last_modified=last_modified,
     )
 
@@ -1384,6 +1552,7 @@ def scrape_cli(
     cache: Any | None = None,
     refresh: bool = False,
     progress: Any | None = None,
+    allow_local: bool = False,
 ) -> str:
     """One-shot scrape for the CLI: formatted page, or an answer to ``question``.
 
@@ -1403,6 +1572,7 @@ def scrape_cli(
         cache=cache,
         refresh=refresh,
         progress=progress,
+        allow_local=allow_local,
     )
     page = format_page(result, include_links=include_links)
     if question:
@@ -1503,6 +1673,7 @@ def scrape_many(
     refresh: bool = False,
     concurrency: int = 4,
     progress: Any | None = None,
+    allow_local: bool = False,
 ) -> list[BatchItem]:
     """Fetch several URLs through a bounded pool, one result per URL, in order.
 
@@ -1510,6 +1681,9 @@ def scrape_many(
     across distinct hosts, per-host locks serializing same-origin fetches,
     one failed URL recorded (with its error) instead of killing the batch.
     Results keep the caller's URL order regardless of completion order.
+    Local file targets (#50) ride the same pool when ``allow_local`` is set
+    (the CLI batch path sets it): they have no host, so no per-host lock
+    applies, and a missing file is one honest failed row, not a batch abort.
 
     ``concurrency`` is clamped to the ``batch_max_concurrency`` config
     ceiling (#15, default 16); a clamped request is announced once on
@@ -1537,6 +1711,7 @@ def scrape_many(
                     cache=cache,
                     refresh=refresh,
                     progress=progress,
+                    allow_local=allow_local,
                 )
             except ScrapeError as exc:
                 return BatchItem(url=url, ok=False, error=str(exc))
@@ -1613,7 +1788,10 @@ def run_scrape_tool(cfg: BridgeConfig, arguments: dict[str, Any]) -> str:
     """MCP ``web_scrape`` dispatch. robots.txt is not consulted here either:
     it is attacker-controlled text and a prompt-injection vector against the
     agent itself (see the module docstring). The smart-fetch ladder is on:
-    a refusal from the honest first attempt walks the alternate read paths."""
+    a refusal from the honest first attempt walks the alternate read paths.
+    Local file targets are REFUSED here (#50): the caller is an agent, and a
+    prompt-injected agent must not read arbitrary local files through this
+    tool -- humans read local files through the ``freegem scrape`` CLI."""
     url = str(arguments.get("url") or "").strip()
     if not url:
         raise ValueError("web_scrape requires a 'url' argument")
