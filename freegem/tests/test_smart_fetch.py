@@ -274,7 +274,9 @@ class FallbackLadderTests(unittest.TestCase):
         scripted = {
             "browser-headers": refusal,
             "reader": refusal,
-            "browser-render": ScrapeError("browser-render disabled (smart_fetch_browser_render=false)"),
+            "browser-render": ScrapeError(
+                "browser-render disabled (smart_fetch_browser_render=false)"
+            ),
             "wayback": refusal,
             "ai-search": no_session,
         }
@@ -314,7 +316,7 @@ class FallbackLadderTests(unittest.TestCase):
         model call to finish."""
         from freegem.smart_fetch import _ai_read
 
-        def wedged_run_tool(cfg, name, kwargs):
+        def wedged_run_tool(cfg: Any, name: Any, kwargs: Any) -> str:
             time.sleep(1.0)
             return "a late answer that will be discarded"
 
@@ -459,7 +461,7 @@ class ReaderParseTests(unittest.TestCase):
         body = "word " * 200
         envelope = f"Title: T\nURL Source: https://news.example/a\nMarkdown Content:\n{body}"
 
-        def fake_scrape_page(cfg, url, **kwargs):
+        def fake_scrape_page(cfg: Any, url: str, **kwargs: Any) -> ScrapeResult:
             # The reader rung must ask for parse headroom, not caller budget.
             assert kwargs["max_chars"] == 500, "reader rung fetches with 2x headroom"
             return ScrapeResult(url=url, title="T", text=envelope)
@@ -539,14 +541,18 @@ class WaybackSnapshotTests(unittest.TestCase):
         scripted = {
             "browser-headers": refusal,
             "reader": refusal,
-            "browser-render": ScrapeError("browser-render disabled (smart_fetch_browser_render=false)"),
+            "browser-render": ScrapeError(
+                "browser-render disabled (smart_fetch_browser_render=false)"
+            ),
             "wayback": ScrapeError(
                 "wayback availability API returned a snapshot for a different page"
             ),
             "ai-search": ok_page,
         }
 
-        def try_strategy(cfg, url, strategy, max_chars, ignore_robots):
+        def try_strategy(
+            cfg: Any, url: Any, strategy: Any, max_chars: Any, ignore_robots: Any
+        ) -> Any:
             order.append(strategy)
             outcome = scripted[strategy]
             if isinstance(outcome, ScrapeError):

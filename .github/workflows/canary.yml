@@ -45,11 +45,15 @@ jobs:
           grep -q "UNTRUSTED WEB CONTENT" /tmp/scrape.out
           grep -q "Example Domain" /tmp/scrape.out
 
-      - name: Scrape honors robots.txt
+      - name: Scrape honors robots.txt with --respect-robots (opt-in contract)
         run: |
-          # facebook.com disallows all crawlers; the scrape must refuse.
-          if freegem scrape https://www.facebook.com/ >/tmp/robots.out 2>&1; then
-            echo "robots.txt was ignored:"; cat /tmp/robots.out; exit 1
+          # Since c272eac freegem does NOT consult robots.txt by default: it is
+          # attacker-controlled text from the scraped origin and a documented
+          # prompt-injection vector (README "Non-goals"). --respect-robots opts
+          # back into the legacy honoring. facebook.com disallows all crawlers,
+          # so the guarded scrape must refuse BEFORE any page fetch.
+          if freegem scrape --respect-robots https://www.facebook.com/ >/tmp/robots.out 2>&1; then
+            echo "--respect-robots did not refuse:"; cat /tmp/robots.out; exit 1
           fi
           grep -q "robots.txt disallows" /tmp/robots.out
 

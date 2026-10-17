@@ -86,12 +86,8 @@ class BatchConcurrencyClampTests(unittest.TestCase):
     def test_zero_or_negative_cap_floors_at_one_with_warning(self) -> None:
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            self.assertEqual(
-                _clamp_batch_concurrency(BridgeConfig(batch_max_concurrency=0), 20), 1
-            )
-            self.assertEqual(
-                _clamp_batch_concurrency(BridgeConfig(batch_max_concurrency=-3), 5), 1
-            )
+            self.assertEqual(_clamp_batch_concurrency(BridgeConfig(batch_max_concurrency=0), 20), 1)
+            self.assertEqual(_clamp_batch_concurrency(BridgeConfig(batch_max_concurrency=-3), 5), 1)
         self.assertEqual(err.getvalue().count("clamped to 1 (batch_max_concurrency)"), 2)
 
     def test_request_below_floor_is_normalized_silently(self) -> None:
@@ -105,9 +101,7 @@ class BatchConcurrencyClampTests(unittest.TestCase):
 class BatchPoolWidthTests(unittest.TestCase):
     """The clamp feeds the pool: ``max_workers`` honors the config ceiling (#15)."""
 
-    def _run_batch(
-        self, cfg: BridgeConfig, requested: int, count: int = 40
-    ) -> list[int | None]:
+    def _run_batch(self, cfg: BridgeConfig, requested: int, count: int = 40) -> list[int | None]:
         patcher, seen = _recording_pool()
         with patcher, mock.patch("freegem.web_scraper.scrape_page", _ok_scrape):
             items = scrape_many(
@@ -371,8 +365,7 @@ class _FakeLadder:
                 {
                     "archived_snapshots": {
                         "closest": {
-                            "url": "https://web.archive.org/web/20240101000000/"
-                            + _BLOCKED_URL
+                            "url": "https://web.archive.org/web/20240101000000/" + _BLOCKED_URL
                         }
                     }
                 }
@@ -396,9 +389,7 @@ class _FakeLadder:
                 "freegem.playwright_fetcher.is_playwright_available",
                 return_value=self._installed,
             ),
-            mock.patch(
-                "freegem.playwright_fetcher.fetch_with_playwright", side_effect=self.render
-            ),
+            mock.patch("freegem.playwright_fetcher.fetch_with_playwright", side_effect=self.render),
             mock.patch("freegem.smart_fetch.time.sleep"),
         ]
 
@@ -427,7 +418,9 @@ class BrowserRenderRungTests(unittest.TestCase):
     def test_rung_sits_between_reader_and_wayback(self) -> None:
         from freegem.smart_fetch import STRATEGIES
 
-        self.assertEqual(STRATEGIES, ("browser-headers", "reader", "browser-render", "wayback", "ai-search"))
+        self.assertEqual(
+            STRATEGIES, ("browser-headers", "reader", "browser-render", "wayback", "ai-search")
+        )
 
     def test_render_rescues_a_page_the_http_rungs_cannot_read(self) -> None:
         from freegem.smart_fetch import fallback_scrape
@@ -436,9 +429,7 @@ class BrowserRenderRungTests(unittest.TestCase):
         with contextlib.ExitStack() as stack:
             for patcher in ladder.patches():
                 stack.enter_context(patcher)
-            result = fallback_scrape(
-                self.cfg, _BLOCKED_URL, max_chars=2000, first_error="HTTP 403"
-            )
+            result = fallback_scrape(self.cfg, _BLOCKED_URL, max_chars=2000, first_error="HTTP 403")
         self.assertEqual(result.via, "browser-render")
         self.assertIn("Client-side article text", result.text)
         self.assertEqual(result.title, "Rendered Fresh")
@@ -456,14 +447,10 @@ class BrowserRenderRungTests(unittest.TestCase):
         with contextlib.ExitStack() as stack:
             for patcher in ladder.patches():
                 stack.enter_context(patcher)
-            result = fallback_scrape(
-                self.cfg, _BLOCKED_URL, max_chars=2000, first_error="HTTP 403"
-            )
+            result = fallback_scrape(self.cfg, _BLOCKED_URL, max_chars=2000, first_error="HTTP 403")
         self.assertEqual(result.via, "wayback")
         self.assertIn("archived copy text", result.text)
-        wayback_at = next(
-            i for i, (_, url) in enumerate(ladder.events) if "archive.org" in url
-        )
+        wayback_at = next(i for i, (_, url) in enumerate(ladder.events) if "archive.org" in url)
         render_at = next(i for i, (kind, _) in enumerate(ladder.events) if kind == "render")
         self.assertLess(render_at, wayback_at)
 
@@ -475,9 +462,7 @@ class BrowserRenderRungTests(unittest.TestCase):
         with contextlib.ExitStack() as stack:
             for patcher in ladder.patches():
                 stack.enter_context(patcher)
-            result = fallback_scrape(
-                cfg, _BLOCKED_URL, max_chars=2000, first_error="HTTP 403"
-            )
+            result = fallback_scrape(cfg, _BLOCKED_URL, max_chars=2000, first_error="HTTP 403")
         self.assertEqual(result.via, "wayback")
         self.assertNotIn("render", [kind for kind, _ in ladder.events])
 
@@ -488,9 +473,7 @@ class BrowserRenderRungTests(unittest.TestCase):
         with contextlib.ExitStack() as stack:
             for patcher in ladder.patches():
                 stack.enter_context(patcher)
-            result = fallback_scrape(
-                self.cfg, _BLOCKED_URL, max_chars=2000, first_error="HTTP 403"
-            )
+            result = fallback_scrape(self.cfg, _BLOCKED_URL, max_chars=2000, first_error="HTTP 403")
         self.assertEqual(result.via, "wayback")
         self.assertNotIn("render", [kind for kind, _ in ladder.events])
 
@@ -505,9 +488,7 @@ class BrowserRenderRungTests(unittest.TestCase):
                 stack.enter_context(patcher)
             stack.enter_context(mock.patch("freegem.smart_fetch._LADDER_BUDGET_SEC", 0.0))
             with self.assertRaises(ScrapeError) as caught:
-                fallback_scrape(
-                    self.cfg, _BLOCKED_URL, max_chars=2000, first_error="HTTP 403"
-                )
+                fallback_scrape(self.cfg, _BLOCKED_URL, max_chars=2000, first_error="HTTP 403")
         self.assertEqual(
             [kind for kind, _ in ladder.events],
             [],
@@ -530,9 +511,7 @@ class BrowserRenderRungTests(unittest.TestCase):
 
         with (
             mock.patch("freegem.smart_fetch._BROWSER_RENDER_TIMEOUT_SEC", 0.1),
-            mock.patch(
-                "freegem.playwright_fetcher.is_playwright_available", return_value=True
-            ),
+            mock.patch("freegem.playwright_fetcher.is_playwright_available", return_value=True),
             mock.patch("freegem.playwright_fetcher.fetch_with_playwright", side_effect=wedged),
         ):
             started = time.monotonic()
@@ -554,15 +533,12 @@ class BrowserRenderRungTests(unittest.TestCase):
         available.assert_not_called()
 
     def test_http_error_render_is_a_clean_failure(self) -> None:
-        from freegem.smart_fetch import _browser_render_read
-
         from freegem.playwright_fetcher import PlaywrightResult
+        from freegem.smart_fetch import _browser_render_read
 
         bad = PlaywrightResult(url=_BLOCKED_URL, final_url=_BLOCKED_URL, status=503, ok=False)
         with (
-            mock.patch(
-                "freegem.playwright_fetcher.is_playwright_available", return_value=True
-            ),
+            mock.patch("freegem.playwright_fetcher.is_playwright_available", return_value=True),
             mock.patch("freegem.playwright_fetcher.fetch_with_playwright", return_value=bad),
         ):
             with self.assertRaises(ScrapeError) as caught:
@@ -607,9 +583,7 @@ class ResearchCacheFullTextTests(unittest.TestCase):
             + "</main></body></html>"
         ).encode("utf-8")
         cache = self._cache()
-        with mock.patch(
-            "freegem.web_scraper._fetch", return_value=_FakeResponse(page_html)
-        ):
+        with mock.patch("freegem.web_scraper._fetch", return_value=_FakeResponse(page_html)):
             # A tiny allowance: research fetches with 500 chars of budget.
             sources, material = self._collect(
                 ["https://long.example/article"],
@@ -643,9 +617,7 @@ class ResearchCacheFullTextTests(unittest.TestCase):
         behavior; the point is it never clobbers a real full-text entry."""
         cache = self._cache()
         pages = {
-            "https://a.test/1": ScrapeResult(
-                url="https://a.test/1", title="One", text="short body"
-            )
+            "https://a.test/1": ScrapeResult(url="https://a.test/1", title="One", text="short body")
         }
 
         def fake(cfg: Any, url: str, **_kwargs: Any) -> ScrapeResult:
@@ -661,11 +633,9 @@ class ResearchCacheFullTextTests(unittest.TestCase):
         cache = self._cache()
         cache.put("https://a.test/1", "Old", "old body")
         page_html = (
-            "<html><head><title>New</title></head><body><p>fresh new body</p></body></html>"
-        ).encode("utf-8")
-        with mock.patch(
-            "freegem.web_scraper._fetch", return_value=_FakeResponse(page_html)
-        ):
+            b"<html><head><title>New</title></head><body><p>fresh new body</p></body></html>"
+        )
+        with mock.patch("freegem.web_scraper._fetch", return_value=_FakeResponse(page_html)):
             sources, material = self._collect(["https://a.test/1"], cache, refresh=True)
         self.assertFalse(sources[0].from_cache)
         self.assertEqual([text for _, text in material], ["fresh new body"])

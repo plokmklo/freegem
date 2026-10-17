@@ -101,7 +101,7 @@ class CampaignDistillDeadlockTests(unittest.TestCase):
                     timeout_sec=30.0,
                     distill=True,
                 )
-            except BaseException as exc:  # noqa: BLE001 - surfaced via box
+            except BaseException as exc:
                 box["error"] = exc
 
         # Distill is mocked: the test pins the LOCKING contract, not Gemini or
@@ -137,7 +137,9 @@ class CampaignSpillCleanupTests(unittest.TestCase):
         os.makedirs(spill_dir)
         spilled: dict[str, str] = {}
 
-        def fake_fetch(cfg: BridgeConfig, url: str, *, spill_dir: str = "", **kwargs: object):
+        def fake_fetch(
+            cfg: BridgeConfig, url: str, *, spill_dir: str = "", **kwargs: object
+        ) -> FetchOutcome:
             # Mirror the streaming reader: a real temp file inside the
             # campaign's spill dir, referenced via outcome.body_path.
             fd, path = tempfile.mkstemp(prefix="freegem-body-", suffix=".bin", dir=spill_dir)

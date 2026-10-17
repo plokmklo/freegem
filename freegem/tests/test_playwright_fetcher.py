@@ -45,9 +45,7 @@ class TestPlaywrightFetcher(unittest.TestCase):
         side_effect=lambda url: url,
     )
     @patch("freegem.playwright_fetcher.is_playwright_available", return_value=False)
-    def test_fetch_with_playwright_not_installed(
-        self, mock_avail: Any, mock_allowed: Any
-    ) -> None:
+    def test_fetch_with_playwright_not_installed(self, mock_avail: Any, mock_allowed: Any) -> None:
         # The guard is a pass-through here: fetch_with_playwright validates
         # the FULL SSRF policy (strict resolve-and-check, i.e. DNS) before
         # the availability check, and a transient outage made that refusal

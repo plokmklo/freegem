@@ -36,7 +36,7 @@ from freegem.selenium_fetcher import (
 #: Deterministic answers for the hosts these tests fetch; everything else is
 #: refused fail-closed, like a real resolver during an outage. The address is
 #: a checked-public-looking IP; the browser is faked, so nothing dials it.
-_HERMETIC_DNS: ClassVar[dict[str, str]] = {
+_HERMETIC_DNS: dict[str, str] = {
     "example.org": "93.184.216.34",
     "example.com": "93.184.216.34",
 }

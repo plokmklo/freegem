@@ -30,7 +30,7 @@ _CHAT_REFUSALS = [
 _REAL_ANSWER = "The Eiffel Tower is 330 metres tall.\n\nSources:\n- https://example.com/tower"
 
 
-def _ask_search(capsys, answer: str) -> tuple[int, str, str]:
+def _ask_search(capsys: pytest.CaptureFixture[str], answer: str) -> tuple[int, str, str]:
     with mock.patch("freegem.cli.run_tool", return_value=answer):
         code = main(["ask", "--search", "how tall is the eiffel tower"])
     captured = capsys.readouterr()
@@ -38,7 +38,9 @@ def _ask_search(capsys, answer: str) -> tuple[int, str, str]:
 
 
 @pytest.mark.parametrize("refusal", [_AI_NONANSWER, *_CHAT_REFUSALS])
-def test_ask_search_soft_failure_is_not_an_answer(capsys, refusal) -> None:
+def test_ask_search_soft_failure_is_not_an_answer(
+    capsys: pytest.CaptureFixture[str], refusal: str
+) -> None:
     """A soft-failure exits non-zero, keeps stdout empty, explains on stderr."""
     code, out, err = _ask_search(capsys, refusal)
     assert code != 0
@@ -48,14 +50,16 @@ def test_ask_search_soft_failure_is_not_an_answer(capsys, refusal) -> None:
     assert "retry or rephrase" in err
 
 
-def test_ask_search_normal_answer_unchanged(capsys) -> None:
+def test_ask_search_normal_answer_unchanged(capsys: pytest.CaptureFixture[str]) -> None:
     code, out, err = _ask_search(capsys, _REAL_ANSWER)
     assert code == 0
     assert out == _REAL_ANSWER + "\n"
     assert "soft-failure" not in err
 
 
-def test_ask_search_long_answer_containing_refusal_phrase_is_content(capsys) -> None:
+def test_ask_search_long_answer_containing_refusal_phrase_is_content(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     """Past the length cap a refusal phrase is quoted content, not a refusal.
 
     Mirrors smart_fetch's rule: only SHORT answers are checked, so a page
@@ -83,7 +87,7 @@ def _fake_page() -> Any:
     )
 
 
-def test_scrape_markdown_single_url(capsys) -> None:
+def test_scrape_markdown_single_url(capsys: pytest.CaptureFixture[str]) -> None:
     with mock.patch("freegem.web_scraper.scrape_page", return_value=_fake_page()):
         code = main(["scrape", "https://a.example/", "--format", "markdown"])
     out = capsys.readouterr().out
@@ -93,7 +97,7 @@ def test_scrape_markdown_single_url(capsys) -> None:
     assert "## Links" not in out, "links need --links, same contract as text"
 
 
-def test_scrape_markdown_single_url_with_links(capsys) -> None:
+def test_scrape_markdown_single_url_with_links(capsys: pytest.CaptureFixture[str]) -> None:
     with mock.patch("freegem.web_scraper.scrape_page", return_value=_fake_page()):
         code = main(["scrape", "https://a.example/", "--links", "--format", "markdown"])
     out = capsys.readouterr().out
@@ -110,7 +114,9 @@ def test_scrape_markdown_single_url_with_links(capsys) -> None:
     assert unlabeled in out
 
 
-def test_scrape_markdown_single_url_passes_fetch_flags(capsys) -> None:
+def test_scrape_markdown_single_url_passes_fetch_flags(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     """Markdown uses the same fetch path, guards, and cache flags as text."""
     with mock.patch("freegem.web_scraper.scrape_page", return_value=_fake_page()) as scrape_page:
         code = main(
@@ -134,7 +140,7 @@ def test_scrape_markdown_single_url_passes_fetch_flags(capsys) -> None:
     assert kwargs["ignore_robots"] is False
 
 
-def test_scrape_markdown_batch(capsys) -> None:
+def test_scrape_markdown_batch(capsys: pytest.CaptureFixture[str]) -> None:
     from freegem.web_scraper import BatchItem
 
     items = [
@@ -151,7 +157,9 @@ def test_scrape_markdown_batch(capsys) -> None:
     assert "---" in out, "batch pages are separated by a markdown rule"
 
 
-def test_scrape_markdown_batch_all_failed_exits_one(capsys) -> None:
+def test_scrape_markdown_batch_all_failed_exits_one(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     from freegem.web_scraper import BatchItem
 
     dead = [BatchItem(url="https://x.example/", ok=False, error="HTTP 403")]
@@ -160,7 +168,7 @@ def test_scrape_markdown_batch_all_failed_exits_one(capsys) -> None:
     assert code == 1
 
 
-def test_scrape_text_format_unchanged(capsys) -> None:
+def test_scrape_text_format_unchanged(capsys: pytest.CaptureFixture[str]) -> None:
     """The default text path still routes through scrape_cli (format_page)."""
     with (
         mock.patch("freegem.web_scraper.scrape_cli", return_value="WRAPPED PAGE") as scrape_cli,
@@ -174,7 +182,9 @@ def test_scrape_text_format_unchanged(capsys) -> None:
     assert not scrape_page.called
 
 
-def test_scrape_jsonl_rows_unchanged_no_markdown_key(capsys) -> None:
+def test_scrape_jsonl_rows_unchanged_no_markdown_key(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     from freegem.web_scraper import BatchItem
 
     items = [
@@ -201,7 +211,9 @@ def _two_chunk_stream(record: dict) -> Any:
     readouterr() would consume the bytes and hide them from the final check.
     """
 
-    def stream(cfg, prompt, mode_id, think_mode, file_refs, extra_fields):
+    def stream(
+        cfg: Any, prompt: Any, mode_id: Any, think_mode: Any, file_refs: Any, extra_fields: Any
+    ) -> Any:
         yield "chunk one "
         sys.stdout.flush()
         peek = getattr(sys.stdout, "getvalue", None)
@@ -211,7 +223,9 @@ def _two_chunk_stream(record: dict) -> Any:
     return stream
 
 
-def test_ask_stream_prints_before_generator_completes(capsys, monkeypatch) -> None:
+def test_ask_stream_prints_before_generator_completes(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Streaming ask begins printing before the generator completes."""
     record: dict[str, str] = {}
     monkeypatch.setattr("freegem.gemini.HAS_HTTPX", True)
@@ -223,7 +237,9 @@ def test_ask_stream_prints_before_generator_completes(capsys, monkeypatch) -> No
     assert captured.out == "chunk one chunk two\n", "both chunks arrive, one trailing newline"
 
 
-def test_ask_plain_still_consumes_generate_stream(capsys, monkeypatch) -> None:
+def test_ask_plain_still_consumes_generate_stream(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The interactive path must use generate_stream, not buffered generate."""
     calls: list[str] = []
     monkeypatch.setattr("freegem.gemini.HAS_HTTPX", True)
@@ -246,7 +262,9 @@ def test_ask_plain_still_consumes_generate_stream(capsys, monkeypatch) -> None:
     assert "buffered answer" not in captured.out
 
 
-def test_ask_search_is_single_buffered_payload(capsys, monkeypatch) -> None:
+def test_ask_search_is_single_buffered_payload(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The machine-readable mode stays fully buffered: exactly one payload."""
     with mock.patch("freegem.cli.run_tool", return_value="one whole answer") as run_tool:
         code = main(["ask", "--search", "q"])
@@ -256,7 +274,9 @@ def test_ask_search_is_single_buffered_payload(capsys, monkeypatch) -> None:
     assert run_tool.called, "search mode is the buffered pipeline, untouched by streaming"
 
 
-def test_ask_without_httpx_single_buffered_payload(capsys, monkeypatch) -> None:
+def test_ask_without_httpx_single_buffered_payload(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
     """No httpx: one buffered payload with the same shape as streamed output.
 
     The streamed result is the chunks joined plus exactly one trailing

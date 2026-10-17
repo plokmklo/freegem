@@ -518,10 +518,8 @@ class JobManager:
             art = self.artifacts.pop(aid, None)
             if art is None:
                 continue
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(art.file_path)
-            except OSError:
-                pass
 
     def save_artifact(
         self, job_id: str, filename: str, content_type: str, file_path_or_bytes: str | bytes

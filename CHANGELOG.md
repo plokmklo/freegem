@@ -5,6 +5,39 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.9.2] — 2026-10-18
+
+Restore CI green: every `test` matrix leg (3 OSes × 4 Pythons) had been red
+since the 2.9.1 merge wave — the code was fine, the static gates were not.
+
+### Fixed
+
+- **canary**: the "Scrape honors robots.txt" step asserted the pre-`c272eac`
+  contract, where `freegem scrape` refused robots-disallowed URLs by default.
+  The default has been *ignore robots by design* (attacker-controlled text,
+  prompt-injection vector — README "Non-goals") since the smart-fetch landed,
+  so facebook.com kept sailing through and the daily canary stayed red for
+  six consecutive runs. The step now pins the CURRENT contract: `scrape
+  --respect-robots https://www.facebook.com/` must refuse with
+  "robots.txt disallows" before any page fetch.
+
+### Changed
+
+- **lint**: 4 `ruff check` errors cleared — `contextlib.suppress(OSError)` in
+  `jobs.py` instead of try/except/pass, a stale `noqa: BLE001` removed,
+  imports re-sorted and a redundant `.encode("utf-8")` dropped in
+  `test_fetch_features.py`.
+- **format**: 6 test files re-run through `ruff format` (CI's
+  `ruff format --check` was refusing them).
+- **types**: 27 `mypy` errors cleared — `_persist`/`_distill_if_large` in
+  `crawler/campaign.py` now declare the `threading.RLock` they actually
+  receive (the campaign lock is deliberately recursive), the Retry-After test
+  builds its `HTTPError` with a real `email.message.Message` instead of a
+  bare dict, a module-level `ClassVar` misuse in `test_selenium_fetcher.py`,
+  two stale `type: ignore[assignment]` comments dropped in `test_jobs.py`,
+  and full annotations added to 21 mock/parametrized signatures across 6
+  test files.
+
 ## [2.9.1] — 2026-10-16
 
 The external-review backlog round: all 46 open issues triaged and closed.

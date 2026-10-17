@@ -123,8 +123,14 @@ class BrowserRenderConfigTests(unittest.TestCase):
         self.assertFalse(BridgeConfig().smart_fetch_browser_render)
 
     def test_string_values_are_coerced(self) -> None:
-        self.assertTrue(BridgeConfig.from_dict({"smart_fetch_browser_render": "true"}).smart_fetch_browser_render)
-        self.assertFalse(BridgeConfig.from_dict({"smart_fetch_browser_render": "off"}).smart_fetch_browser_render)
+        self.assertTrue(
+            BridgeConfig.from_dict(
+                {"smart_fetch_browser_render": "true"}
+            ).smart_fetch_browser_render
+        )
+        self.assertFalse(
+            BridgeConfig.from_dict({"smart_fetch_browser_render": "off"}).smart_fetch_browser_render
+        )
 
     def test_unsalvageable_value_falls_back_to_the_default(self) -> None:
         cfg = BridgeConfig.from_dict({"smart_fetch_browser_render": "maybe"})

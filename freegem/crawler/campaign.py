@@ -181,7 +181,7 @@ def _migrate(db: sqlite3.Connection) -> None:
 
 def _persist(
     db: sqlite3.Connection,
-    lock: threading.Lock,
+    lock: threading.RLock,
     url: str,
     category: str,
     outcome: FetchOutcome,
@@ -210,7 +210,7 @@ def _persist(
 def _distill_if_large(
     cfg: BridgeConfig,
     db: sqlite3.Connection,
-    lock: threading.Lock,
+    lock: threading.RLock,
     url: str,
     outcome: FetchOutcome,
     counters: dict[str, int],

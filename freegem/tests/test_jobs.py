@@ -75,7 +75,9 @@ class TerminalStatusGuardTests(unittest.TestCase):
         job = mgr.create_job("scrape", {})
         mgr.update_job_status(job.id, "processing")
         self.assertTrue(
-            mgr.stamp_timed_out(job.id, error="deadline", retry_trace={"error": "execution timeout"})
+            mgr.stamp_timed_out(
+                job.id, error="deadline", retry_trace={"error": "execution timeout"}
+            )
         )
         applied = mgr.update_job_status(job.id, "queued", error="retrying")
         self.assertFalse(applied)
@@ -151,9 +153,7 @@ class WatchdogReapTests(unittest.TestCase):
     """#26(b): the watchdog's expired snapshot is stale by the time it acts."""
 
     def _runner(self, mgr: JobManager) -> JobRunner:
-        runner = JobRunner(
-            mgr, lambda job: None, max_workers=1, max_pending=5, job_timeout_sec=30
-        )
+        runner = JobRunner(mgr, lambda job: None, max_workers=1, max_pending=5, job_timeout_sec=30)
         self.addCleanup(runner.close)
         return runner
 
@@ -241,11 +241,11 @@ class CancelRaceTests(unittest.TestCase):
                 mgr.update_job_status(job.id, "completed", result={"kept": True})
                 original_add(item)
 
-        runner._cancel_requested = _CompletingSet()  # type: ignore[assignment]
+        runner._cancel_requested = _CompletingSet()
         try:
             self.assertTrue(runner.cancel(job.id))  # cancel was requested
         finally:
-            runner._cancel_requested = set()  # type: ignore[assignment]
+            runner._cancel_requested = set()
         current = mgr.get_job(job.id)
         assert current is not None
         self.assertEqual(current.status, "completed")

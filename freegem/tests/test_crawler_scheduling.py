@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 import time
 from collections.abc import Generator
+from pathlib import Path
 
 import pytest
 
@@ -141,7 +142,7 @@ def test_limit_bounds_candidate_scan(db: sqlite3.Connection) -> None:
     assert len(recrawl_candidates(db, limit=5)) == 5
 
 
-def test_recrawl_candidates_see_rows_written_by_frontier_mark_done(tmp_path) -> None:
+def test_recrawl_candidates_see_rows_written_by_frontier_mark_done(tmp_path: Path) -> None:
     """Regression (issue #42): the recrawl pipeline queried status 'fetched',
     but ``Frontier.mark_done`` writes 'done' -- so on REAL crawl databases
     ``recrawl_candidates`` always returned [] and adaptive recrawl never

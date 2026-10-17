@@ -153,8 +153,6 @@ class HermeticServerTestCase(unittest.TestCase):
         return self.request("POST", path, body, headers)
 
 
-
-
 class DiscoveryEndpointTests(EndpointTestCase):
     def test_health(self) -> None:
         status, _, raw = self.get("/health")
@@ -526,9 +524,7 @@ class ResponsesApiTests(EndpointTestCase):
             original_sse(handler_self, event, payload)
 
         with mock.patch.object(GeminiHandler, "_sse", flaky_sse):
-            status, _, raw = self.post(
-                "/v1/responses", {"input": "hello", "stream": True}
-            )
+            status, _, raw = self.post("/v1/responses", {"input": "hello", "stream": True})
         self.assertEqual(status, 200)
         text = raw.decode()
         # http.client strips the first status line; any SECOND response (the
@@ -1110,7 +1106,9 @@ class PreBodyRejectionKeepAliveTests(HermeticServerTestCase):
             # reset -- never a parseable second response, which would mean
             # the unread body desynced the keep-alive stream.
             try:
-                sock.sendall(f"GET /health HTTP/1.1\r\nHost: localhost:{self.port}\r\n\r\n".encode())
+                sock.sendall(
+                    f"GET /health HTTP/1.1\r\nHost: localhost:{self.port}\r\n\r\n".encode()
+                )
             except OSError:
                 pass  # already reset: closed is exactly what we want
             sock.settimeout(5)

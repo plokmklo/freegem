@@ -924,11 +924,14 @@ class HttpStatusPolicyTests(unittest.TestCase):
         (httpx is absent, so there is no status wrapper). It must extract
         Retry-After exactly like the streaming branch does.
         """
+        import email.message
         import urllib.error
 
         cfg = BridgeConfig(retry_attempts=2, retry_delay_sec=2)
+        headers = email.message.Message()
+        headers["Retry-After"] = "9"
         error = urllib.error.HTTPError(
-            "https://gemini.google.com/app", 502, "Bad Gateway", {"Retry-After": "9"}, None
+            "https://gemini.google.com/app", 502, "Bad Gateway", headers, None
         )
         with (
             mock.patch(
