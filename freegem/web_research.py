@@ -126,6 +126,16 @@ class ResearchCache:
         #: Called when a cache write fails (full disk, bad path). The research
         #: run continues without persistence; silence would hide that.
         self.on_error = on_error
+        # Guards the whole-file read-modify-write in put()/get(). The fetch
+        # pool runs one worker per host, so two threads can put() in the same
+        # instant; without this, each thread's _load() can miss another's
+        # just-written entry and the last writer clobbers it (lost update).
+        # On Windows there is a second path: a reader holding the file open
+        # makes tmp.replace() fail with a sharing violation and the OSError
+        # handler silently swallows the write. One per-instance lock keeps
+        # readers out of the replace window; cross-process access was never
+        # a contract (one flat file, one process).
+        self._lock = threading.Lock()
 
     @staticmethod
     def default_path() -> Path:
@@ -143,7 +153,8 @@ class ResearchCache:
 
     def get(self, url: str) -> dict[str, Any] | None:
         """A fresh, hash-valid entry, or None (miss, stale, or damaged)."""
-        entry = self._load().get(url)
+        with self._lock:
+            entry = self._load().get(url)
         if not isinstance(entry, dict):
             return None
         text, title = entry.get("text"), entry.get("title")
@@ -169,31 +180,32 @@ class ResearchCache:
         }
 
     def put(self, url: str, title: str, text: str, last_modified: str | None = None) -> None:
-        data = self._load()
-        data[url] = {
-            "title": title,
-            "text": text,
-            "fetched_at": time.time(),
-            "hash": hashlib.sha256(text.encode()).hexdigest(),
-            "last_modified": last_modified,
-        }
-        # Evict the oldest entries when the cache outgrows its cap.
-        if len(data) > _CACHE_MAX_ENTRIES:
+        with self._lock:
+            data = self._load()
+            data[url] = {
+                "title": title,
+                "text": text,
+                "fetched_at": time.time(),
+                "hash": hashlib.sha256(text.encode()).hexdigest(),
+                "last_modified": last_modified,
+            }
+            # Evict the oldest entries when the cache outgrows its cap.
+            if len(data) > _CACHE_MAX_ENTRIES:
 
-            def age(item: tuple[str, Any]) -> float:
-                got = item[1].get("fetched_at") if isinstance(item[1], dict) else None
-                return got if isinstance(got, (int, float)) else 0.0
+                def age(item: tuple[str, Any]) -> float:
+                    got = item[1].get("fetched_at") if isinstance(item[1], dict) else None
+                    return got if isinstance(got, (int, float)) else 0.0
 
-            for key, _ in sorted(data.items(), key=age)[: len(data) - _CACHE_MAX_ENTRIES]:
-                del data[key]
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(data), encoding="utf-8")
-            tmp.replace(self.path)
-        except OSError as exc:  # a full disk must not fail the research run
-            if self.on_error is not None:
-                self.on_error(f"cache write failed ({exc}); continuing without persistence")
+                for key, _ in sorted(data.items(), key=age)[: len(data) - _CACHE_MAX_ENTRIES]:
+                    del data[key]
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = self.path.with_suffix(".tmp")
+                tmp.write_text(json.dumps(data), encoding="utf-8")
+                tmp.replace(self.path)
+            except OSError as exc:  # a full disk must not fail the research run
+                if self.on_error is not None:
+                    self.on_error(f"cache write failed ({exc}); continuing without persistence")
 
 
 # ─── result types ─────────────────────────────────────────────────────────────

@@ -13,6 +13,7 @@ import contextlib
 import io
 import shutil
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -640,6 +641,39 @@ class ResearchCacheFullTextTests(unittest.TestCase):
         self.assertFalse(sources[0].from_cache)
         self.assertEqual([text for _, text in material], ["fresh new body"])
         self.assertEqual(cache.get("https://a.test/1")["title"], "New")
+
+    def test_concurrent_puts_keep_every_entry(self) -> None:
+        """Concurrent put()/get() must not lose entries.
+
+        Regression for the Windows CI failure of
+        test_concurrent_fetches_store_full_text_too: put() is a whole-file
+        read-modify-write, so pool workers on distinct hosts clobbered each
+        other's just-written entries (lost update), and on Windows a reader
+        holding the file open during tmp.replace() made the write fail with
+        a sharing violation that the OSError handler silently swallowed.
+        The per-instance lock closes both paths; this hammer fails without
+        it on Linux too.
+        """
+        cache = self._cache()
+
+        def hammer(worker: int) -> None:
+            for i in range(15):
+                url = f"https://w{worker}.test/{i}"
+                cache.put(url, "T", f"body {worker} {i} " + "x" * 60)
+                cache.get(url)  # a reader inside the replace window
+
+        threads = [threading.Thread(target=hammer, args=(w,)) for w in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        missing = [
+            f"https://w{w}.test/{i}"
+            for w in range(8)
+            for i in range(15)
+            if cache.get(f"https://w{w}.test/{i}") is None
+        ]
+        self.assertEqual(missing, [], "concurrent put() lost cache entries")
 
     def test_concurrent_fetches_store_full_text_too(self) -> None:
         cache = self._cache()

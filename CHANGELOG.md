@@ -12,6 +12,15 @@ since the 2.9.1 merge wave — the code was fine, the static gates were not.
 
 ### Fixed
 
+- **research cache**: `ResearchCache` is now thread-safe. `put()` is a
+  whole-file read-modify-write with no guard, so the concurrent fetch pool
+  (one worker per host) let workers clobber each other's just-written
+  entries — a hammer test loses 111 of 120 entries without the fix. On
+  Windows there was a second path: a concurrent reader holding the file
+  open made `tmp.replace()` fail with a sharing violation that the
+  `OSError` handler silently swallowed. This surfaced as the first
+  Windows-only pytest failure once the lint gates stopped hiding the test
+  step; a per-instance lock closes both paths (#21 residual).
 - **canary**: the "Scrape honors robots.txt" step asserted the pre-`c272eac`
   contract, where `freegem scrape` refused robots-disallowed URLs by default.
   The default has been *ignore robots by design* (attacker-controlled text,
