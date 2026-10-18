@@ -104,7 +104,7 @@ class FallbackLadderTests(unittest.TestCase):
     when enabled] -> wayback -> ai-search."""
 
     def setUp(self) -> None:
-        self.cfg = BridgeConfig(log_requests=False)
+        self.cfg = BridgeConfig(guard=True, log_requests=False)
         clear_memory()
 
     def tearDown(self) -> None:
@@ -297,15 +297,17 @@ class FallbackLadderTests(unittest.TestCase):
     def test_reader_headers_carry_key_only_when_configured(self) -> None:
         from freegem.smart_fetch import _reader_headers
 
-        anon = _reader_headers(BridgeConfig(log_requests=False))
+        anon = _reader_headers(BridgeConfig(guard=True, log_requests=False))
         self.assertNotIn("Authorization", anon)
-        keyed = _reader_headers(BridgeConfig(log_requests=False, reader_api_key="rk_test"))
+        keyed = _reader_headers(
+            BridgeConfig(guard=True, log_requests=False, reader_api_key="rk_test")
+        )
         self.assertEqual(keyed["Authorization"], "Bearer rk_test")
 
     def test_ai_read_disabled_by_config(self) -> None:
         from freegem.smart_fetch import _ai_read
 
-        cfg = BridgeConfig(log_requests=False, smart_fetch_ai=False)
+        cfg = BridgeConfig(guard=True, log_requests=False, smart_fetch_ai=False)
         with self.assertRaises(ScrapeError) as caught:
             _ai_read(cfg, "https://x.example/", 1000)
         self.assertIn("disabled", str(caught.exception))
@@ -326,7 +328,7 @@ class FallbackLadderTests(unittest.TestCase):
         ):
             started = time.monotonic()
             with self.assertRaises(ScrapeError) as caught:
-                _ai_read(BridgeConfig(log_requests=False), "https://x.example/", 1000)
+                _ai_read(BridgeConfig(guard=True, log_requests=False), "https://x.example/", 1000)
         self.assertLess(time.monotonic() - started, 0.9, "the bound held")
         self.assertIn("timed out", str(caught.exception))
 
@@ -335,7 +337,9 @@ class FallbackLadderTests(unittest.TestCase):
         from freegem.smart_fetch import _ai_read
 
         with mock.patch("freegem.mcp_tools.run_tool", return_value="word " * 30):
-            result = _ai_read(BridgeConfig(log_requests=False), "https://x.example/", 1000)
+            result = _ai_read(
+                BridgeConfig(guard=True, log_requests=False), "https://x.example/", 1000
+            )
         self.assertEqual(result.via, "ai-search")
         self.assertIn("word", result.text)
         self.assertFalse(result.truncated)
@@ -468,7 +472,11 @@ class ReaderParseTests(unittest.TestCase):
 
         with mock.patch("freegem.smart_fetch.scrape_page", side_effect=fake_scrape_page):
             result = _try_strategy(
-                BridgeConfig(log_requests=False), "https://news.example/a", "reader", 250, True
+                BridgeConfig(guard=True, log_requests=False),
+                "https://news.example/a",
+                "reader",
+                250,
+                True,
             )
         self.assertEqual(result.url, "https://news.example/a")
         self.assertLessEqual(len(result.text), 250)
@@ -483,7 +491,9 @@ class WaybackSnapshotTests(unittest.TestCase):
 
         body = json.dumps({"archived_snapshots": {"closest": {"url": snapshot_url}}}).encode()
         with mock.patch("freegem.web_scraper._fetch", return_value=_FakeResponse(body)):
-            return _wayback_snapshot(BridgeConfig(log_requests=False), "https://news.example/a")
+            return _wayback_snapshot(
+                BridgeConfig(guard=True, log_requests=False), "https://news.example/a"
+            )
 
     def test_matching_snapshot_returned_and_upgraded_to_https(self) -> None:
         out = self._snapshot("http://web.archive.org/web/20240101000000/https://news.example/a")
@@ -504,7 +514,9 @@ class WaybackSnapshotTests(unittest.TestCase):
         ):
             body = json.dumps({"archived_snapshots": {"closest": {"url": snap}}}).encode()
             with mock.patch("freegem.web_scraper._fetch", return_value=_FakeResponse(body)):
-                out = _wayback_snapshot(BridgeConfig(log_requests=False), "https://example.com")
+                out = _wayback_snapshot(
+                    BridgeConfig(guard=True, log_requests=False), "https://example.com"
+                )
             self.assertEqual(out, snap)
 
     def test_snapshot_for_a_different_host_is_rejected(self) -> None:
@@ -559,7 +571,7 @@ class WaybackSnapshotTests(unittest.TestCase):
                 raise outcome
             return outcome
 
-        cfg = BridgeConfig(log_requests=False)
+        cfg = BridgeConfig(guard=True, log_requests=False)
         with (
             mock.patch("freegem.smart_fetch._try_strategy", side_effect=try_strategy),
             mock.patch("freegem.smart_fetch.time.sleep"),
@@ -576,7 +588,7 @@ class SmartIntegrationTests(unittest.TestCase):
     """scrape_page(smart=True) falls back instead of raising."""
 
     def setUp(self) -> None:
-        self.cfg = BridgeConfig(log_requests=False)
+        self.cfg = BridgeConfig(guard=True, log_requests=False)
         clear_memory()
 
     def tearDown(self) -> None:

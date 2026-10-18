@@ -93,7 +93,7 @@ class CampaignDistillDeadlockTests(unittest.TestCase):
         def run() -> None:
             try:
                 box["result"] = run_campaign(
-                    BridgeConfig(log_requests=False),
+                    BridgeConfig(guard=True, log_requests=False),
                     [{"url": f"{self.base}/big", "category": "t"}],
                     state_path=state,
                     concurrency=2,
@@ -150,7 +150,7 @@ class CampaignSpillCleanupTests(unittest.TestCase):
 
         with mock.patch("freegem.crawler.campaign.fetch_resilient", side_effect=fake_fetch):
             result = run_campaign(
-                BridgeConfig(log_requests=False),
+                BridgeConfig(guard=True, log_requests=False),
                 [{"url": "https://big.test/", "category": "c"}],
                 state_path=state,
                 concurrency=1,

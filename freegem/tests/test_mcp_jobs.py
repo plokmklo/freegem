@@ -9,7 +9,9 @@ from freegem.mcp_tools import run_tool
 
 class TestMcpJobs(unittest.TestCase):
     def test_mcp_submit_and_get_job(self) -> None:
-        cfg = BridgeConfig()
+        cfg = BridgeConfig(
+            guard=True,
+        )
         submit_res = run_tool(
             cfg,
             "freegem_submit_job",
@@ -25,7 +27,12 @@ class TestMcpJobs(unittest.TestCase):
         self.assertEqual(get_data["id"], job_id)
 
     def test_mcp_auth_refusal(self) -> None:
-        cfg = BridgeConfig.replace(BridgeConfig(), api_key="secret-key")
+        cfg = BridgeConfig.replace(
+            BridgeConfig(
+                guard=True,
+            ),
+            api_key="secret-key",
+        )
         with self.assertRaises(PermissionError):
             run_tool(cfg, "freegem_submit_job", {"job_type": "scrape", "params": {}})
 
@@ -43,7 +50,9 @@ class TestMcpJobs(unittest.TestCase):
         self.assertIn("id", job_data)
 
     def test_mcp_profile_management(self) -> None:
-        cfg = BridgeConfig()
+        cfg = BridgeConfig(
+            guard=True,
+        )
         list_res = run_tool(cfg, "freegem_manage_profile", {"action": "list"})
         profiles = json.loads(list_res)
         self.assertIsInstance(profiles, list)

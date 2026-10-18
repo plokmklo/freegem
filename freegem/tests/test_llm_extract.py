@@ -270,7 +270,12 @@ def test_bridge_provider_is_wired_to_generate(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr("freegem.llm_extract.generate", fake_generate)
     from freegem.config import BridgeConfig
 
-    prov = BridgeProvider(BridgeConfig(), model="gemini-x")
+    prov = BridgeProvider(
+        BridgeConfig(
+            guard=True,
+        ),
+        model="gemini-x",
+    )
     clean, _ = extract_structured(PRODUCT_SCHEMA, "page text", prov)
     assert clean["name"] == "W"
     assert "page text" in seen["prompt"]

@@ -63,7 +63,7 @@ class ConfigOverrideTests(unittest.TestCase):
         from freegem.cli import _apply_overrides
 
         args = argparse.Namespace(model="gemini-3.1-pro", cookie_file=None, proxy=None, quiet=True)
-        cfg = BridgeConfig(default_model="gemini-3.6-flash")
+        cfg = BridgeConfig(guard=True, default_model="gemini-3.6-flash")
         result = _apply_overrides(cfg, args)
         self.assertEqual(result.default_model, "gemini-3.1-pro")
         self.assertFalse(result.log_requests)  # --quiet
@@ -74,7 +74,7 @@ class ConfigOverrideTests(unittest.TestCase):
         from freegem.cli import _apply_overrides
 
         args = argparse.Namespace(model="gemini-auto", cookie_file=None, proxy=None, quiet=False)
-        cfg = BridgeConfig(default_model="gemini-3.6-flash")
+        cfg = BridgeConfig(guard=True, default_model="gemini-3.6-flash")
         _apply_overrides(cfg, args)
         self.assertEqual(cfg.default_model, "gemini-3.6-flash")
 
@@ -187,7 +187,7 @@ class ServeCommandTests(unittest.TestCase):
         from freegem.cli import cmd_serve
 
         args = argparse.Namespace(port=None, host="0.0.0.0", no_refresh=True)
-        cfg = BridgeConfig(host="0.0.0.0")
+        cfg = BridgeConfig(guard=True, host="0.0.0.0")
 
         server = mock.MagicMock()
         with (
@@ -206,7 +206,9 @@ class ServeCommandTests(unittest.TestCase):
         from freegem.cli import cmd_serve
 
         args = argparse.Namespace(port=None, host="127.0.0.1", no_refresh=True)
-        cfg = BridgeConfig()
+        cfg = BridgeConfig(
+            guard=True,
+        )
         server = mock.MagicMock()
         with (
             mock.patch("freegem.server.ThreadedServer", return_value=server),
@@ -222,7 +224,9 @@ class McpDispatchTests(unittest.TestCase):
     """``run_tool`` is the pure core of the MCP face; test it without ``mcp``."""
 
     def setUp(self) -> None:
-        self.cfg = BridgeConfig()
+        self.cfg = BridgeConfig(
+            guard=True,
+        )
 
     def test_list_models(self) -> None:
         out = run_tool(self.cfg, "gemini_list_models", {})
@@ -325,7 +329,11 @@ class McpBuildTests(unittest.TestCase):
             ),
         ):
             with self.assertRaises(ImportError) as ctx:
-                mt.build_server(BridgeConfig())
+                mt.build_server(
+                    BridgeConfig(
+                        guard=True,
+                    )
+                )
         self.assertIn("freegem[mcp]", str(ctx.exception))
 
     def test_server_info_reports_our_version_not_sdk(self) -> None:
@@ -339,7 +347,11 @@ class McpBuildTests(unittest.TestCase):
         from freegem.mcp_tools import build_server
 
         try:
-            server = build_server(BridgeConfig())
+            server = build_server(
+                BridgeConfig(
+                    guard=True,
+                )
+            )
             self.assertEqual(server._mcp_server.version, gb.__version__)
         except ImportError:
             self.skipTest("mcp package not installed")

@@ -84,7 +84,9 @@ def wrb_line(text: str) -> str:
 
 class PayloadTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.cfg = BridgeConfig()
+        self.cfg = BridgeConfig(
+            guard=True,
+        )
 
     def _decode(self, payload: str) -> Any:
         outer = json.loads(parse_qs(payload)["f.req"][0])
@@ -147,38 +149,55 @@ class PayloadTests(unittest.TestCase):
 
 class UrlTests(unittest.TestCase):
     def test_bl_and_reqid_present(self) -> None:
-        cfg = BridgeConfig(gemini_bl="boq_test_1.0_p0")
+        cfg = BridgeConfig(guard=True, gemini_bl="boq_test_1.0_p0")
         url = build_url(cfg)
         self.assertIn("bl=boq_test_1.0_p0", url)
         self.assertIn("_reqid=", url)
 
     def test_account_prefix(self) -> None:
-        cfg = BridgeConfig(auth_user="2")
+        cfg = BridgeConfig(guard=True, auth_user="2")
         self.assertIn("/u/2/_/BardChatUi", build_url(cfg))
 
     def test_no_account_prefix_by_default(self) -> None:
-        url = build_url(BridgeConfig())
+        url = build_url(
+            BridgeConfig(
+                guard=True,
+            )
+        )
         self.assertNotIn("/u/", url)
 
     def test_endpoint_path(self) -> None:
         self.assertIn(
-            "assistant.lamda.BardFrontendService/StreamGenerate", build_url(BridgeConfig())
+            "assistant.lamda.BardFrontendService/StreamGenerate",
+            build_url(
+                BridgeConfig(
+                    guard=True,
+                )
+            ),
         )
 
 
 class HeaderTests(unittest.TestCase):
     def test_no_cookie_no_auth_headers(self) -> None:
-        headers = build_headers(BridgeConfig())
+        headers = build_headers(
+            BridgeConfig(
+                guard=True,
+            )
+        )
         self.assertNotIn("Cookie", headers)
         self.assertNotIn("Authorization", headers)
         self.assertEqual(headers["Origin"], "https://gemini.google.com")
 
     def test_auth_user_header_when_set(self) -> None:
-        headers = build_headers(BridgeConfig(auth_user="1"))
+        headers = build_headers(BridgeConfig(guard=True, auth_user="1"))
         self.assertEqual(headers["X-Goog-AuthUser"], "1")
 
     def test_no_auth_user_header_by_default(self) -> None:
-        headers = build_headers(BridgeConfig())
+        headers = build_headers(
+            BridgeConfig(
+                guard=True,
+            )
+        )
         self.assertNotIn("X-Goog-AuthUser", headers)
 
     def test_sapisidhash_format(self) -> None:
@@ -204,7 +223,7 @@ class CookieLoadingTests(unittest.TestCase):
             fh.write(payload)
             path = fh.name
         try:
-            cookie, sapisid = load_cookie(BridgeConfig(cookie_file=path))
+            cookie, sapisid = load_cookie(BridgeConfig(guard=True, cookie_file=path))
             self.assertEqual(cookie, "SID=a; SAPISID=b")
             self.assertEqual(sapisid, "b")
         finally:
@@ -218,19 +237,23 @@ class CookieLoadingTests(unittest.TestCase):
             fh.write("SID=a; SAPISID=thesapisid; HSID=c")
             path = fh.name
         try:
-            cookie, sapisid = load_cookie(BridgeConfig(cookie_file=path))
+            cookie, sapisid = load_cookie(BridgeConfig(guard=True, cookie_file=path))
             self.assertEqual(sapisid, "thesapisid")
             self.assertIn("SID=a", cookie)
         finally:
             os.unlink(path)
 
     def test_missing_file_is_anonymous_not_an_error(self) -> None:
-        cookie, sapisid = load_cookie(BridgeConfig(cookie_file="/no/such/file"))
+        cookie, sapisid = load_cookie(BridgeConfig(guard=True, cookie_file="/no/such/file"))
         self.assertEqual(cookie, "")
         self.assertIsNone(sapisid)
 
     def test_no_file_configured(self) -> None:
-        cookie, sapisid = load_cookie(BridgeConfig())
+        cookie, sapisid = load_cookie(
+            BridgeConfig(
+                guard=True,
+            )
+        )
         self.assertEqual((cookie, sapisid), ("", None))
 
     def test_malformed_json_falls_back_to_last_good(self) -> None:
@@ -243,13 +266,13 @@ class CookieLoadingTests(unittest.TestCase):
             fh.write(good)
             path = fh.name
         try:
-            first, _ = load_cookie(BridgeConfig(cookie_file=path))
+            first, _ = load_cookie(BridgeConfig(guard=True, cookie_file=path))
             self.assertEqual(first, "SID=good")
             # Corrupt it, then bump mtime so the cache misses.
             with open(path, "w") as fh:
                 fh.write("{ truncated")
             os.utime(path, (0, 0))
-            second, _ = load_cookie(BridgeConfig(cookie_file=path))
+            second, _ = load_cookie(BridgeConfig(guard=True, cookie_file=path))
             self.assertEqual(second, "SID=good")  # kept, not dropped
         finally:
             os.unlink(path)
@@ -285,14 +308,20 @@ class CookieCacheGuardTests(unittest.TestCase):
             fh.write("{ truncated")
             path_b = fh.name
         try:
-            self.assertEqual(load_cookie(BridgeConfig(cookie_file=path_a)), ("SID=account-a", "sa"))
+            self.assertEqual(
+                load_cookie(BridgeConfig(guard=True, cookie_file=path_a)), ("SID=account-a", "sa")
+            )
             # Parse failure on B: the cache holds A under A's key only.
-            self.assertEqual(load_cookie(BridgeConfig(cookie_file=path_b)), ("", None))
+            self.assertEqual(load_cookie(BridgeConfig(guard=True, cookie_file=path_b)), ("", None))
             # A hard read failure on B behaves the same.
             with mock.patch("builtins.open", side_effect=PermissionError("denied")):
-                self.assertEqual(load_cookie(BridgeConfig(cookie_file=path_b)), ("", None))
+                self.assertEqual(
+                    load_cookie(BridgeConfig(guard=True, cookie_file=path_b)), ("", None)
+                )
             # And A's session is still intact afterwards.
-            self.assertEqual(load_cookie(BridgeConfig(cookie_file=path_a)), ("SID=account-a", "sa"))
+            self.assertEqual(
+                load_cookie(BridgeConfig(guard=True, cookie_file=path_a)), ("SID=account-a", "sa")
+            )
         finally:
             os.unlink(path_a)
             os.unlink(path_b)
@@ -306,7 +335,7 @@ class CookieCacheGuardTests(unittest.TestCase):
             fh.write(json.dumps({"cookie": "SID=good", "sapisid": "s"}))
             path = fh.name
         try:
-            cfg = BridgeConfig(cookie_file=path)
+            cfg = BridgeConfig(guard=True, cookie_file=path)
             self.assertEqual(load_cookie(cfg), ("SID=good", "s"))
             os.utime(path, (0, 0))  # force a cache miss on the same path
             with mock.patch("builtins.open", side_effect=PermissionError("denied")):
@@ -322,7 +351,7 @@ class CookieCacheGuardTests(unittest.TestCase):
             fh.write(json.dumps({"cookie": "SID=account-a", "sapisid": "sa"}))
             path = fh.name
         try:
-            cfg = BridgeConfig(cookie_file=path)
+            cfg = BridgeConfig(guard=True, cookie_file=path)
             self.assertEqual(load_cookie(cfg), ("SID=account-a", "sa"))
             with mock.patch("builtins.open", wraps=open) as opener:
                 self.assertEqual(load_cookie(cfg), ("SID=account-a", "sa"))
@@ -339,7 +368,7 @@ class CookieCacheGuardTests(unittest.TestCase):
             fh.write(json.dumps({"cookie": "SID=full", "sapisid": "s"}))
             path = fh.name
         try:
-            cfg = BridgeConfig(cookie_file=path)
+            cfg = BridgeConfig(guard=True, cookie_file=path)
             self.assertEqual(load_cookie(cfg), ("SID=full", "s"))
             key_before = self.gem._COOKIE_CACHE["key"]
             real_size = os.path.getsize(path)
@@ -373,7 +402,7 @@ class CookieCacheGuardTests(unittest.TestCase):
         errors: list[str] = []
 
         def reader() -> None:
-            cfg = BridgeConfig(cookie_file=path)
+            cfg = BridgeConfig(guard=True, cookie_file=path)
             for _ in range(120):
                 try:
                     cookie, sapisid = load_cookie(cfg)
@@ -426,7 +455,7 @@ class XsrfFallbackTests(unittest.TestCase):
             fh.write(json.dumps({"cookie": "SID=a", "sapisid": "b", "xsrf_token": "ATFILE"}))
             path = fh.name
         try:
-            payload = build_payload("hi", 1, 4, BridgeConfig(cookie_file=path))
+            payload = build_payload("hi", 1, 4, BridgeConfig(guard=True, cookie_file=path))
             self.assertEqual(parse_qs(payload)["at"], ["ATFILE"])
         finally:
             os.unlink(path)
@@ -439,7 +468,7 @@ class XsrfFallbackTests(unittest.TestCase):
             fh.write(json.dumps({"cookie": "SID=a", "sapisid": "b", "xsrf_token": "ATFILE"}))
             path = fh.name
         try:
-            cfg = BridgeConfig(cookie_file=path, xsrf_token="ATCFG")
+            cfg = BridgeConfig(guard=True, cookie_file=path, xsrf_token="ATCFG")
             payload = build_payload("hi", 1, 4, cfg)
             self.assertEqual(parse_qs(payload)["at"], ["ATCFG"])
         finally:
@@ -453,7 +482,7 @@ class XsrfFallbackTests(unittest.TestCase):
             fh.write("SID=a; SAPISID=b")
             path = fh.name
         try:
-            payload = build_payload("hi", 1, 4, BridgeConfig(cookie_file=path))
+            payload = build_payload("hi", 1, 4, BridgeConfig(guard=True, cookie_file=path))
             self.assertNotIn("at", parse_qs(payload))
         finally:
             os.unlink(path)
@@ -491,7 +520,7 @@ BARD_ERROR = '[["wrb.fr",null,"[null,null,null,null,[[null,[\\"BardErrorInfo [40
 
 class GenerateTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.cfg = BridgeConfig(retry_attempts=2, retry_delay_sec=0)
+        self.cfg = BridgeConfig(guard=True, retry_attempts=2, retry_delay_sec=0)
 
     def test_success(self) -> None:
         with mock.patch("freegem.gemini._post", return_value=make_response(wrb_line("hello"))):
@@ -578,7 +607,7 @@ class GenerateTests(unittest.TestCase):
 
 class StreamTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.cfg = BridgeConfig(retry_attempts=1, retry_delay_sec=0)
+        self.cfg = BridgeConfig(guard=True, retry_attempts=1, retry_delay_sec=0)
 
     @staticmethod
     def _fake_client(chunks: Any) -> Any:
@@ -726,23 +755,35 @@ class BuildTagTests(unittest.TestCase):
         return mock.patch.object(gem.urllib.request, "urlopen", side_effect=exc)
 
     def test_matches_gemini_web_uiserver_format(self) -> None:
-        cfg = BridgeConfig(gemini_bl="stale_value")
+        cfg = BridgeConfig(guard=True, gemini_bl="stale_value")
         with self._patched_urlopen(self.HTML):
             found = fetch_build_tag(cfg)
         self.assertEqual(found, "boq_gemini-web-uiserver_20261008.15_p0")
 
     def test_returns_none_when_not_found(self) -> None:
         with self._patched_urlopen("<html>nothing here</html>"):
-            self.assertIsNone(fetch_build_tag(BridgeConfig()))
+            self.assertIsNone(
+                fetch_build_tag(
+                    BridgeConfig(
+                        guard=True,
+                    )
+                )
+            )
 
     def test_network_failure_returns_none(self) -> None:
         import urllib.error
 
         with self._patched_urlopen_error(urllib.error.URLError("no network")):
-            self.assertIsNone(fetch_build_tag(BridgeConfig()))
+            self.assertIsNone(
+                fetch_build_tag(
+                    BridgeConfig(
+                        guard=True,
+                    )
+                )
+            )
 
     def test_refresh_returns_new_config_not_mutation(self) -> None:
-        cfg = BridgeConfig(gemini_bl="old_tag")
+        cfg = BridgeConfig(guard=True, gemini_bl="old_tag")
         with self._patched_urlopen(self.HTML):
             new_cfg, change = refresh_build_tag(cfg)
         self.assertEqual(cfg.gemini_bl, "old_tag")  # original untouched
@@ -750,7 +791,7 @@ class BuildTagTests(unittest.TestCase):
         self.assertIn("old_tag", change or "")
 
     def test_refresh_is_noop_when_current(self) -> None:
-        cfg = BridgeConfig(gemini_bl="boq_gemini-web-uiserver_20261008.15_p0")
+        cfg = BridgeConfig(guard=True, gemini_bl="boq_gemini-web-uiserver_20261008.15_p0")
         with self._patched_urlopen(self.HTML):
             new_cfg, change = refresh_build_tag(cfg)
         self.assertIsNone(change)
@@ -769,7 +810,9 @@ class ModelResolutionIntegrationTests(unittest.TestCase):
         self.assertEqual(len(set(seen.values())), 3)
 
     def test_think_override_reaches_payload(self) -> None:
-        cfg = BridgeConfig()
+        cfg = BridgeConfig(
+            guard=True,
+        )
         _, mode, think, _, _ = resolve_model("gemini-3.6-flash@think=1")
         assert mode is not None and think is not None, "resolve_model broke its contract"
         payload = build_payload("hi", mode, think, cfg)
@@ -875,7 +918,7 @@ class BackoffTests(unittest.TestCase):
 
     def test_generate_honors_retry_after_header(self) -> None:
         """A 429 with Retry-After sleeps exactly as long as the server said."""
-        cfg = BridgeConfig(retry_attempts=2, retry_delay_sec=2)
+        cfg = BridgeConfig(guard=True, retry_attempts=2, retry_delay_sec=2)
         with (
             mock.patch(
                 "freegem.gemini._post",
@@ -889,7 +932,7 @@ class BackoffTests(unittest.TestCase):
         self.assertIn("upstream HTTP 429", str(ctx.exception))
 
     def test_generate_backs_off_exponentially_without_header(self) -> None:
-        cfg = BridgeConfig(retry_attempts=3, retry_delay_sec=2)
+        cfg = BridgeConfig(guard=True, retry_attempts=3, retry_delay_sec=2)
         with (
             mock.patch(
                 "freegem.gemini._post",
@@ -903,7 +946,7 @@ class BackoffTests(unittest.TestCase):
 
     def test_generate_upstream_http_status_is_retried_not_fatal(self) -> None:
         """A transient 429 recovers on the next attempt instead of failing."""
-        cfg = BridgeConfig(retry_attempts=2, retry_delay_sec=0)
+        cfg = BridgeConfig(guard=True, retry_attempts=2, retry_delay_sec=0)
         with (
             mock.patch(
                 "freegem.gemini._post",
@@ -927,7 +970,7 @@ class HttpStatusPolicyTests(unittest.TestCase):
         import email.message
         import urllib.error
 
-        cfg = BridgeConfig(retry_attempts=2, retry_delay_sec=2)
+        cfg = BridgeConfig(guard=True, retry_attempts=2, retry_delay_sec=2)
         headers = email.message.Message()
         headers["Retry-After"] = "9"
         error = urllib.error.HTTPError(
@@ -945,7 +988,7 @@ class HttpStatusPolicyTests(unittest.TestCase):
 
     def test_401_fails_fast_without_retry(self) -> None:
         """An auth rejection reproduces identically on retry; do not hammer."""
-        cfg = BridgeConfig(retry_attempts=3, retry_delay_sec=0)
+        cfg = BridgeConfig(guard=True, retry_attempts=3, retry_delay_sec=0)
         with mock.patch("freegem.gemini._post", side_effect=[_StatusResponse(401)]) as post:
             with self.assertRaises(BridgeError) as ctx:
                 generate(cfg, "hi", 1, 0)
@@ -953,7 +996,7 @@ class HttpStatusPolicyTests(unittest.TestCase):
         self.assertIn("401", str(ctx.exception))
 
     def test_403_fails_fast_without_retry(self) -> None:
-        cfg = BridgeConfig(retry_attempts=3, retry_delay_sec=0)
+        cfg = BridgeConfig(guard=True, retry_attempts=3, retry_delay_sec=0)
         with mock.patch("freegem.gemini._post", side_effect=[_StatusResponse(403)]) as post:
             with self.assertRaises(BridgeError) as ctx:
                 generate(cfg, "hi", 1, 0)
@@ -961,7 +1004,7 @@ class HttpStatusPolicyTests(unittest.TestCase):
         self.assertIn("403", str(ctx.exception))
 
     def test_400_fails_fast_without_retry(self) -> None:
-        cfg = BridgeConfig(retry_attempts=3, retry_delay_sec=0)
+        cfg = BridgeConfig(guard=True, retry_attempts=3, retry_delay_sec=0)
         with mock.patch("freegem.gemini._post", side_effect=[_StatusResponse(400)]) as post:
             with self.assertRaises(BridgeError) as ctx:
                 generate(cfg, "hi", 1, 0)
@@ -969,7 +1012,7 @@ class HttpStatusPolicyTests(unittest.TestCase):
         self.assertIn("400", str(ctx.exception))
 
     def test_429_retries_and_recovers(self) -> None:
-        cfg = BridgeConfig(retry_attempts=2, retry_delay_sec=0)
+        cfg = BridgeConfig(guard=True, retry_attempts=2, retry_delay_sec=0)
         with (
             mock.patch(
                 "freegem.gemini._post",
@@ -981,7 +1024,7 @@ class HttpStatusPolicyTests(unittest.TestCase):
         self.assertEqual(post.call_count, 2)
 
     def test_502_retries_and_recovers(self) -> None:
-        cfg = BridgeConfig(retry_attempts=2, retry_delay_sec=0)
+        cfg = BridgeConfig(guard=True, retry_attempts=2, retry_delay_sec=0)
         with (
             mock.patch(
                 "freegem.gemini._post",
@@ -993,7 +1036,7 @@ class HttpStatusPolicyTests(unittest.TestCase):
         self.assertEqual(post.call_count, 2)
 
     def test_408_retries_as_transient(self) -> None:
-        cfg = BridgeConfig(retry_attempts=2, retry_delay_sec=0)
+        cfg = BridgeConfig(guard=True, retry_attempts=2, retry_delay_sec=0)
         with (
             mock.patch(
                 "freegem.gemini._post",
@@ -1013,7 +1056,7 @@ class HttpStatusPolicyTests(unittest.TestCase):
         client = mock.MagicMock()
         client.stream.return_value.__enter__.return_value = response
         client.stream.return_value.__exit__.return_value = False
-        cfg = BridgeConfig(retry_attempts=3, retry_delay_sec=0)
+        cfg = BridgeConfig(guard=True, retry_attempts=3, retry_delay_sec=0)
         with (
             mock.patch.object(gem, "HAS_HTTPX", True),
             mock.patch.object(gem, "_httpx_client", return_value=client),
@@ -1030,7 +1073,7 @@ class ProxyRedactionTests(unittest.TestCase):
     PROXY = "http://user:secret@proxy.example:8080"
 
     def setUp(self) -> None:
-        self.cfg = BridgeConfig(retry_attempts=2, retry_delay_sec=0, proxy=self.PROXY)
+        self.cfg = BridgeConfig(guard=True, retry_attempts=2, retry_delay_sec=0, proxy=self.PROXY)
 
     def test_generate_error_message_redacts_proxy_credentials(self) -> None:
         import urllib.error
@@ -1085,7 +1128,7 @@ class BuildTagRecoveryTests(unittest.TestCase):
         with os.fdopen(fd, "w") as fh:
             fh.write(json.dumps({"cookie": "SID=a", "sapisid": "b"}))
         self.addCleanup(os.unlink, path)
-        return BridgeConfig(cookie_file=path, log_requests=False)
+        return BridgeConfig(guard=True, cookie_file=path, log_requests=False)
 
     @staticmethod
     def _bard_post() -> Any:
@@ -1132,7 +1175,7 @@ class BuildTagRecoveryTests(unittest.TestCase):
         self.assertIn(f"bl={self.NEW_TAG}", build_url(cfg))
 
     def test_no_session_skips_the_refresh(self) -> None:
-        cfg = BridgeConfig(log_requests=False)
+        cfg = BridgeConfig(guard=True, log_requests=False)
         with (
             self._bard_post(),
             mock.patch.object(self.gem, "fetch_build_tag", return_value=self.NEW_TAG) as fetch,
@@ -1189,7 +1232,7 @@ class RateLimitKindTests(unittest.TestCase):
             gem._COOKIE_CACHE.update,
             {"key": None, "cookie": "", "sapisid": None, "xsrf": None},
         )
-        self.cfg = BridgeConfig(retry_attempts=2, retry_delay_sec=0, log_requests=False)
+        self.cfg = BridgeConfig(guard=True, retry_attempts=2, retry_delay_sec=0, log_requests=False)
 
     def test_default_kind_is_rate_limit(self) -> None:
         with mock.patch("freegem.gemini._post", side_effect=lambda *a, **k: make_response("")):
@@ -1276,19 +1319,21 @@ class HttpxPoolTests(unittest.TestCase):
     def test_same_settings_share_one_client(self) -> None:
         if not self.gem.HAS_HTTPX:
             self.skipTest("httpx not installed")
-        first = self.gem._httpx_client(BridgeConfig(log_requests=False))
-        second = self.gem._httpx_client(BridgeConfig(log_requests=False))
+        first = self.gem._httpx_client(BridgeConfig(guard=True, log_requests=False))
+        second = self.gem._httpx_client(BridgeConfig(guard=True, log_requests=False))
         self.assertIs(first, second)
 
     def test_different_timeout_gets_its_own_client(self) -> None:
         """A timeout change must not silently ride an old cached client."""
         if not self.gem.HAS_HTTPX:
             self.skipTest("httpx not installed")
-        base = self.gem._httpx_client(BridgeConfig(log_requests=False))
-        slower = self.gem._httpx_client(BridgeConfig(log_requests=False, request_timeout_sec=99))
+        base = self.gem._httpx_client(BridgeConfig(guard=True, log_requests=False))
+        slower = self.gem._httpx_client(
+            BridgeConfig(guard=True, log_requests=False, request_timeout_sec=99)
+        )
         self.assertIsNot(base, slower)
         proxied = self.gem._httpx_client(
-            BridgeConfig(log_requests=False, proxy="http://127.0.0.1:9")
+            BridgeConfig(guard=True, log_requests=False, proxy="http://127.0.0.1:9")
         )
         self.assertIsNot(base, proxied)
 
@@ -1316,7 +1361,10 @@ class HttpxPoolTests(unittest.TestCase):
         fake = FakeClient()
         with mock.patch.object(self.gem, "_httpx_client", return_value=fake):
             response = self.gem._post(
-                BridgeConfig(log_requests=False), b"payload", "http://u.test/x", {"h": "1"}
+                BridgeConfig(guard=True, log_requests=False),
+                b"payload",
+                "http://u.test/x",
+                {"h": "1"},
             )
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["content"], b"payload")

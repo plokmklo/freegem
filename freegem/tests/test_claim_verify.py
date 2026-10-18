@@ -106,7 +106,9 @@ def _run_verify(
         mock.patch("freegem.claim_verify._gemini_complete", _gemini(answer, fail=gemini_fail)),
     ):
         return verify(
-            BridgeConfig(),
+            BridgeConfig(
+                guard=True,
+            ),
             claims if claims is not None else CLAIMS,
             urls if urls is not None else [WIKI_URL],
             **kwargs,
@@ -246,7 +248,13 @@ class FallbackTests(_TmpDirTestCase):
             mock.patch("freegem.web_scraper.scrape_page", _fetcher({}, failures={WIKI_URL})),
             mock.patch("freegem.claim_verify._gemini_complete") as gemini,
         ):
-            result = verify(BridgeConfig(), CLAIMS[:1], [WIKI_URL])
+            result = verify(
+                BridgeConfig(
+                    guard=True,
+                ),
+                CLAIMS[:1],
+                [WIKI_URL],
+            )
         gemini.assert_not_called()
         self.assertEqual(result.claims[0].status, STATUS_UNAVAILABLE)
         self.assertIn("no loadable source", result.claims[0].note or "")
@@ -327,7 +335,13 @@ class DiscoveryTests(_TmpDirTestCase):
                 lambda cfg, url, timeout=30: self._fake_response(payload),
             ),
         ):
-            found = discover_urls(BridgeConfig(), "Alexander the Great", limit=2)
+            found = discover_urls(
+                BridgeConfig(
+                    guard=True,
+                ),
+                "Alexander the Great",
+                limit=2,
+            )
         self.assertEqual(
             found,
             [
@@ -356,7 +370,9 @@ class DiscoveryTests(_TmpDirTestCase):
                 ],
             ]
         ).encode()
-        cfg = BridgeConfig().replace(discover_wiki="wiki.example.org")
+        cfg = BridgeConfig(
+            guard=True,
+        ).replace(discover_wiki="wiki.example.org")
         with (
             mock.patch("freegem.web_scraper._check_robots", lambda cfg2, url: None),
             mock.patch(
@@ -392,7 +408,12 @@ class DiscoveryTests(_TmpDirTestCase):
             ),
         ):
             robots.side_effect = refuse
-            found = discover_urls(BridgeConfig(), "Alexander")
+            found = discover_urls(
+                BridgeConfig(
+                    guard=True,
+                ),
+                "Alexander",
+            )
         self.assertEqual(robots.call_count, 0)
         self.assertEqual(len(found), 1)
         self.assertEqual(found[0]["url"], WIKI_URL)
@@ -408,7 +429,13 @@ class DiscoveryTests(_TmpDirTestCase):
                 lambda cfg, url, timeout=30: self._fake_response(payload),
             ),
         ):
-            found = discover_urls(BridgeConfig(), "Alexander", limit=99)
+            found = discover_urls(
+                BridgeConfig(
+                    guard=True,
+                ),
+                "Alexander",
+                limit=99,
+            )
         self.assertEqual(len(found), 5)  # _DISCOVERY_LIMIT_CAP
 
     def test_verify_with_discovery_end_to_end(self) -> None:
@@ -429,7 +456,9 @@ class DiscoveryTests(_TmpDirTestCase):
             mock.patch("freegem.claim_verify._gemini_complete", _gemini(GOOD_ANSWER)),
         ):
             result = verify(
-                BridgeConfig(),
+                BridgeConfig(
+                    guard=True,
+                ),
                 CLAIMS[:1],
                 None,
                 discover=True,
@@ -473,7 +502,12 @@ class SerpDiscoveryTests(_TmpDirTestCase):
             DuckDuckGoHTMLProvider, "search", return_value=self._hits()
         ) as search:
             found = discover_urls(
-                BridgeConfig(), "python 3.13 free-threading", limit=2, backend="serp"
+                BridgeConfig(
+                    guard=True,
+                ),
+                "python 3.13 free-threading",
+                limit=2,
+                backend="serp",
             )
         self.assertEqual(search.call_args.kwargs["max_results"], 2)
         self.assertEqual([item["url"] for item in found], self._urls())
@@ -489,13 +523,20 @@ class SerpDiscoveryTests(_TmpDirTestCase):
             title="bad", url="javascript:alert(1)", snippet="", position=3, source="duckduckgo"
         )
         with mock.patch.object(DuckDuckGoHTMLProvider, "search", return_value=[junk]):
-            found = discover_urls(BridgeConfig(), "query", limit=3, backend="serp")
+            found = discover_urls(
+                BridgeConfig(
+                    guard=True,
+                ),
+                "query",
+                limit=3,
+                backend="serp",
+            )
         self.assertEqual(found, [])
 
     def test_config_backend_used_when_param_absent(self) -> None:
         from freegem.serp import DuckDuckGoHTMLProvider
 
-        cfg = BridgeConfig(discover_backend="serp")
+        cfg = BridgeConfig(guard=True, discover_backend="serp")
         with mock.patch.object(DuckDuckGoHTMLProvider, "search", return_value=self._hits()):
             found = discover_urls(cfg, "anything", limit=2)
         self.assertEqual(found[0]["via"], "serp-duckduckgo")
@@ -512,7 +553,13 @@ class SerpDiscoveryTests(_TmpDirTestCase):
                 lambda cfg, url, timeout=30, headers=None: response,
             ),
         ):
-            found = discover_urls(BridgeConfig(), "xyzzy nothing", limit=2)
+            found = discover_urls(
+                BridgeConfig(
+                    guard=True,
+                ),
+                "xyzzy nothing",
+                limit=2,
+            )
         self.assertEqual(found, [])
 
     def test_serp_footer_names_backend_not_wiki_host(self) -> None:
@@ -540,7 +587,9 @@ class SerpDiscoveryTests(_TmpDirTestCase):
             mock.patch("freegem.claim_verify._gemini_complete", _gemini(GOOD_ANSWER)),
         ):
             result = verify(
-                BridgeConfig(),
+                BridgeConfig(
+                    guard=True,
+                ),
                 CLAIMS[:1],
                 None,
                 discover=True,
@@ -560,7 +609,9 @@ class SerpDiscoveryTests(_TmpDirTestCase):
         with mock.patch.object(DuckDuckGoHTMLProvider, "search", return_value=[]):
             with self.assertRaises(VerifyError) as caught:
                 verify(
-                    BridgeConfig(),
+                    BridgeConfig(
+                        guard=True,
+                    ),
                     CLAIMS[:1],
                     None,
                     discover=True,
@@ -583,7 +634,9 @@ class SerpDiscoveryTests(_TmpDirTestCase):
         ):
             with self.assertRaises(VerifyError) as caught:
                 verify(
-                    BridgeConfig(),
+                    BridgeConfig(
+                        guard=True,
+                    ),
                     CLAIMS[:1],
                     None,
                     discover=True,
@@ -731,7 +784,9 @@ class McpAndCliTests(_TmpDirTestCase):
             mock.patch("freegem.claim_verify._gemini_complete", _gemini(GOOD_ANSWER)),
         ):
             output = run_tool(
-                BridgeConfig(),
+                BridgeConfig(
+                    guard=True,
+                ),
                 "web_verify",
                 {"claims": CLAIMS, "urls": [WIKI_URL]},
             )
@@ -740,11 +795,23 @@ class McpAndCliTests(_TmpDirTestCase):
 
     def test_dispatch_requires_urls_or_discover(self) -> None:
         with self.assertRaises(ValueError):
-            run_tool(BridgeConfig(), "web_verify", {"claims": ["c"]})
+            run_tool(
+                BridgeConfig(
+                    guard=True,
+                ),
+                "web_verify",
+                {"claims": ["c"]},
+            )
 
     def test_dispatch_requires_claims(self) -> None:
         with self.assertRaises(ValueError):
-            run_tool(BridgeConfig(), "web_verify", {"urls": [WIKI_URL]})
+            run_tool(
+                BridgeConfig(
+                    guard=True,
+                ),
+                "web_verify",
+                {"urls": [WIKI_URL]},
+            )
 
     def test_dispatch_discovery_flag(self) -> None:
         payload = json.dumps(
@@ -765,7 +832,9 @@ class McpAndCliTests(_TmpDirTestCase):
             mock.patch("freegem.claim_verify._gemini_complete", _gemini(GOOD_ANSWER)),
         ):
             output = run_tool(
-                BridgeConfig(),
+                BridgeConfig(
+                    guard=True,
+                ),
                 "web_verify",
                 {"claims": CLAIMS[:1], "discover": True, "discovery_query": "Alexander the Great"},
             )

@@ -29,7 +29,7 @@ class UploadUrlValidationTests(unittest.TestCase):
     """The host allowlist that keeps the cookie on Google infrastructure."""
 
     def setUp(self) -> None:
-        self.cfg = BridgeConfig(log_requests=False)
+        self.cfg = BridgeConfig(guard=True, log_requests=False)
 
     def test_googleapis_upload_host_accepted(self) -> None:
         url = "https://content-push.googleapis.com/upload/session-123"
@@ -120,7 +120,7 @@ class FetchImageBytesTests(unittest.TestCase):
     """Remote image fetching must not carry the session cookie."""
 
     def setUp(self) -> None:
-        self.cfg = BridgeConfig(log_requests=False)
+        self.cfg = BridgeConfig(guard=True, log_requests=False)
 
     def test_non_http_scheme_refused_without_request(self) -> None:
         for scheme in ("file", "ftp", "data", ""):
@@ -198,7 +198,7 @@ class UploadFlowTests(unittest.TestCase):
 
     def setUp(self) -> None:
         reset_page_tokens()
-        self.cfg = BridgeConfig(log_requests=False, cookie_file=None)
+        self.cfg = BridgeConfig(guard=True, log_requests=False, cookie_file=None)
 
     def _response(
         self,

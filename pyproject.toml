@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "freegem"
-version = "2.9.3"
+version = "2.9.4"
 description = "Free Gemini, shaped as the APIs you already use: OpenAI-compatible, Google-native, and MCP."
 readme = "README.md"
 license = { text = "MIT" }
