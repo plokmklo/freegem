@@ -43,7 +43,9 @@ class WatchCoreTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.state_dir = Path(tmp.name)
-        self.cfg = BridgeConfig()
+        self.cfg = BridgeConfig(
+            guard=True,
+        )
 
     def watch(self, body: str, *, now: float | None = None, url: str = URL) -> Any:
         return watch_url(
@@ -195,7 +197,9 @@ class WatchLoopTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.state_dir = Path(tmp.name)
-        self.cfg = BridgeConfig()
+        self.cfg = BridgeConfig(
+            guard=True,
+        )
 
     def test_loop_polls_without_sleeping(self) -> None:
         bodies = iter(["alpha", "alpha", "beta"])

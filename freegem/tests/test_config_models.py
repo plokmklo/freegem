@@ -18,12 +18,16 @@ class ImmutabilityTests(unittest.TestCase):
     """The frozen config is the fix for a real concurrency bug; prove it holds."""
 
     def test_config_is_frozen(self) -> None:
-        cfg = BridgeConfig()
+        cfg = BridgeConfig(
+            guard=True,
+        )
         with self.assertRaises(Exception):
             cfg.port = 9999  # type: ignore[misc]
 
     def test_replace_returns_new_instance(self) -> None:
-        cfg = BridgeConfig()
+        cfg = BridgeConfig(
+            guard=True,
+        )
         derived = cfg.replace(port=9999)
         self.assertIsNot(cfg, derived)
         self.assertEqual(cfg.port, 8081)
@@ -31,7 +35,7 @@ class ImmutabilityTests(unittest.TestCase):
 
     def test_replace_does_not_mutate_original(self) -> None:
         """Two requests deriving from one config cannot see each other."""
-        base = BridgeConfig(default_model="gemini-3.6-flash")
+        base = BridgeConfig(guard=True, default_model="gemini-3.6-flash")
         a = base.replace(default_model="gemini-3.5-flash-thinking")
         b = base.replace(default_model="gemini-flash-lite")
         self.assertEqual(base.default_model, "gemini-3.6-flash")
@@ -39,8 +43,15 @@ class ImmutabilityTests(unittest.TestCase):
         self.assertEqual(b.default_model, "gemini-flash-lite")
 
     def test_defaults_are_not_shared_mutable(self) -> None:
-        cfg = BridgeConfig()
-        self.assertEqual(BridgeConfig().host, cfg.host)
+        cfg = BridgeConfig(
+            guard=True,
+        )
+        self.assertEqual(
+            BridgeConfig(
+                guard=True,
+            ).host,
+            cfg.host,
+        )
 
 
 class RedactionTests(unittest.TestCase):
@@ -48,6 +59,7 @@ class RedactionTests(unittest.TestCase):
 
     def test_redacted_omits_secrets(self) -> None:
         cfg = BridgeConfig(
+            guard=True,
             xsrf_token="super-secret-token",
             cookie_file="/home/me/gemini-auth.json",
         )
@@ -59,20 +71,30 @@ class RedactionTests(unittest.TestCase):
         self.assertNotIn("/home/me", blob)
 
     def test_redacted_reports_presence_not_value(self) -> None:
-        cfg = BridgeConfig(xsrf_token="abc123")
+        cfg = BridgeConfig(guard=True, xsrf_token="abc123")
         self.assertTrue(cfg.redacted()["xsrf_token_set"])
-        self.assertFalse(BridgeConfig().redacted()["xsrf_token_set"])
+        self.assertFalse(
+            BridgeConfig(
+                guard=True,
+            ).redacted()["xsrf_token_set"]
+        )
 
     def test_redacted_is_json_serialisable(self) -> None:
         """It is meant to be dumped into logs, so it must round-trip."""
         import json
 
-        cfg = BridgeConfig(cookie_file="freegem/tests/__init__.py")
+        cfg = BridgeConfig(guard=True, cookie_file="freegem/tests/__init__.py")
         self.assertIsInstance(json.dumps(cfg.redacted()), str)
 
     def test_session_detection(self) -> None:
-        self.assertFalse(BridgeConfig().has_session_cookie())
-        self.assertTrue(BridgeConfig(cookie_file="freegem/tests/__init__.py").has_session_cookie())
+        self.assertFalse(
+            BridgeConfig(
+                guard=True,
+            ).has_session_cookie()
+        )
+        self.assertTrue(
+            BridgeConfig(guard=True, cookie_file="freegem/tests/__init__.py").has_session_cookie()
+        )
 
 
 class ConfigLoadingTests(unittest.TestCase):
@@ -105,7 +127,12 @@ class BatchConcurrencyConfigTests(unittest.TestCase):
     """#15: the batch ceiling is a real config field, coerced like its siblings."""
 
     def test_default_is_sixteen(self) -> None:
-        self.assertEqual(BridgeConfig().batch_max_concurrency, 16)
+        self.assertEqual(
+            BridgeConfig(
+                guard=True,
+            ).batch_max_concurrency,
+            16,
+        )
 
     def test_string_value_is_coerced(self) -> None:
         cfg = BridgeConfig.from_dict({"batch_max_concurrency": "32"})
@@ -120,7 +147,11 @@ class BrowserRenderConfigTests(unittest.TestCase):
     """#14: the optional browser-render rung's flag is a real config field."""
 
     def test_default_is_off(self) -> None:
-        self.assertFalse(BridgeConfig().smart_fetch_browser_render)
+        self.assertFalse(
+            BridgeConfig(
+                guard=True,
+            ).smart_fetch_browser_render
+        )
 
     def test_string_values_are_coerced(self) -> None:
         self.assertTrue(

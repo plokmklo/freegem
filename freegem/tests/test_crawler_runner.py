@@ -174,7 +174,7 @@ class CrawlRunnerTestCase(unittest.TestCase):
         self.addCleanup(self.server.shutdown)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.base = f"http://{_FAKE_HOST}:{self.server.server_port}"
-        self.cfg = BridgeConfig(log_requests=False)
+        self.cfg = BridgeConfig(guard=True, log_requests=False)
 
     def write_schema(self) -> str:
         path = os.path.join(self.dir, "schema.json")

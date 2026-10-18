@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`freegem scrape --guard` / config `"guard": true`** — opt into the SSRF guard
+  (scheme allowlist + public-IP checks + pinned dial + redirect re-checks) as a
+  feature instead of a default gate. Plain `scrape` fetches and hands text to
+  the caller/AI (user directive 2026-10-17). `serve`/`mcp` force it ON.
+
+### Changed
+
+- **validation loosened to opt-in**: the SSRF guard no longer pre-refuses
+  targets on the CLI by default; only the server/MCP tool surfaces stay strict
+  (a prompt-injected agent cannot read local files through them).
+
 ### Fixed
 
 - **Server**: `Sec-Fetch-Site: cross-site` POSTs are refused only when the

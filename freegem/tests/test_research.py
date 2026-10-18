@@ -137,7 +137,7 @@ class CollectTests(_TmpDirTestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        self.cfg = BridgeConfig(log_requests=False)
+        self.cfg = BridgeConfig(guard=True, log_requests=False)
 
     def _run(self, urls: list[str], **kwargs: Any) -> Any:
         from freegem.web_research import _collect_sources
@@ -245,7 +245,7 @@ class ResearchFlowTests(_TmpDirTestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        self.cfg = BridgeConfig(log_requests=False)
+        self.cfg = BridgeConfig(guard=True, log_requests=False)
 
     def _research(
         self,
@@ -464,7 +464,7 @@ class RendererTests(_TmpDirTestCase):
 class MCPResearchTests(_TmpDirTestCase):
     def setUp(self) -> None:
         super().setUp()
-        self.cfg = BridgeConfig(log_requests=False)
+        self.cfg = BridgeConfig(guard=True, log_requests=False)
 
     def test_tool_spec_registered(self) -> None:
         names = {spec["name"] for spec in TOOL_SPECS}
@@ -513,7 +513,7 @@ class MCPResearchTests(_TmpDirTestCase):
 class CLIResearchTests(_TmpDirTestCase):
     def setUp(self) -> None:
         super().setUp()
-        self.cfg = BridgeConfig(log_requests=False)
+        self.cfg = BridgeConfig(guard=True, log_requests=False)
 
     def test_parser_accepts_research_shape(self) -> None:
         from freegem.cli import _build_parser
@@ -627,7 +627,7 @@ class ConcurrentCollectTests(_TmpDirTestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        self.cfg = BridgeConfig(log_requests=False)
+        self.cfg = BridgeConfig(guard=True, log_requests=False)
 
     def _collect(self, urls: list[str], fetcher: Any, **kwargs: Any) -> Any:
         from freegem.web_research import _collect_sources
@@ -740,7 +740,7 @@ class EvidenceTests(_TmpDirTestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        self.cfg = BridgeConfig(log_requests=False)
+        self.cfg = BridgeConfig(guard=True, log_requests=False)
 
     def _research(
         self,
@@ -923,7 +923,11 @@ class EvidenceTests(_TmpDirTestCase):
         self.assertIn("Fetched: S1 1970-01-01T00:00:00Z", markdown)
 
     def test_config_flag_reaches_research(self) -> None:
-        self.assertTrue(BridgeConfig().research_evidence)
+        self.assertTrue(
+            BridgeConfig(
+                guard=True,
+            ).research_evidence
+        )
         seen: dict[str, Any] = {}
 
         def fake_research(cfg: BridgeConfig, question: str, urls: list[str], **kw: Any) -> Any:

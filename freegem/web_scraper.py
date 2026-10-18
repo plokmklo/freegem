@@ -219,10 +219,31 @@ def extraction_quality(text: str) -> str:
 # ─── fetching ─────────────────────────────────────────────────────────────────
 
 
+def _network_opener(cfg: BridgeConfig) -> urllib.request.OpenerDirector:
+    """Single opener path, always SSRF-pinned.
+
+    The pinned opener resolves-and-checks the host once (close the DNS-rebind
+    window) and dials ONLY the verified-public IPs. That behavior exists in
+    BOTH modes; the ONLY difference between guard=False and guard=True is
+    whether we additionally run ``url_allowed`` pre-validation and REFUSE on a
+    bad host:
+
+    * ``guard=False`` (default): resolve publicly, dial checked IPs — fetch
+      operator-chosen URLs and hand text to the caller/AI. Validation is a
+      feature, not a gate (user directive 2026-10-17).
+    * ``guard=True``: same opener, plus ``url_allowed`` refusal of
+      loopback/private/link-local/metadata hosts, non-http(s) schemes, and
+      embedded credentials — before any packet leaves.
+
+    Server/MCP surfaces force ``guard=True`` in cmd_serve/cmd_mcp.
+    """
+    return build_guarded_opener(cfg.proxy, _ssl_ctx())
+
+
 def _fetch(
     cfg: BridgeConfig, url: str, timeout: float = 30, headers: dict[str, str] | None = None
 ) -> Any:
-    """GET one URL through the guarded opener. Raises ScrapeError on refusal.
+    """GET one URL. Raises ScrapeError on refusal.
 
     ``headers`` replaces the default header set entirely -- it is how the
     smart-fetch ladder's browser-identifying retry differs from the honest
@@ -234,7 +255,7 @@ def _fetch(
         request_headers.setdefault("Accept-Encoding", "gzip")
     request = urllib.request.Request(url, headers=request_headers)
     try:
-        return build_guarded_opener(cfg.proxy, _ssl_ctx()).open(request, timeout=timeout)
+        return _network_opener(cfg).open(request, timeout=timeout)
     except SSRFRefused as exc:
         log(cfg, f"scrape refused: {exc}")
         raise ScrapeError(f"SSRF guard refused {url!r}: {exc}") from exc
@@ -373,7 +394,7 @@ class RobotsCache:
             headers["If-Modified-Since"] = entry.last_modified
         request = urllib.request.Request(robots_url, headers=headers)
         try:
-            response = build_guarded_opener(cfg.proxy, _ssl_ctx()).open(request, timeout=15)
+            response = _network_opener(cfg).open(request, timeout=15)
         except SSRFRefused as exc:
             log(cfg, f"robots fetch refused: {exc}")
             raise ScrapeError(f"SSRF guard refused {robots_url!r}: {exc}") from exc
@@ -1308,10 +1329,13 @@ def scrape_page(
         return _scrape_local_file(
             cfg, local_path, url, include_tags=include_tags, exclude_tags=exclude_tags
         )
-    try:
-        url = url_allowed(url)
-    except SSRFRefused as exc:
-        raise ScrapeError(f"SSRF guard refused {url!r}: {exc}") from exc
+    if getattr(cfg, "guard", False):
+        # Validation is a feature (--guard / "guard": true), not a default:
+        # an unvalidated scrape just fetches and hands text to the caller.
+        try:
+            url = url_allowed(url)
+        except SSRFRefused as exc:
+            raise ScrapeError(f"SSRF guard refused {url!r}: {exc}") from exc
     if not ignore_robots:
         _check_robots(cfg, url)
 

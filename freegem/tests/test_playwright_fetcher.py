@@ -85,7 +85,9 @@ class TestPlaywrightFetcher(unittest.TestCase):
     @patch("freegem.playwright_fetcher.crawl_fetch")
     @patch("freegem.playwright_fetcher.is_playwright_available", return_value=False)
     def test_fetch_http_first_normal(self, mock_pw: Any, mock_fetch: Any) -> None:
-        cfg = BridgeConfig()
+        cfg = BridgeConfig(
+            guard=True,
+        )
         outcome = FetchOutcome(url="https://example.com", kind="ok", body=b"Hello World" * 50)
         mock_fetch.return_value = outcome
 

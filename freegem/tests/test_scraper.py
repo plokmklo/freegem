@@ -179,7 +179,7 @@ class _FakeSiteTestCase(unittest.TestCase):
     """Base with a loopback test server and the DNS/dial fakes."""
 
     def setUp(self) -> None:
-        self.cfg = BridgeConfig(log_requests=False)
+        self.cfg = BridgeConfig(guard=True, log_requests=False)
         self.resolver = mock.patch("freegem.ssrf.socket.getaddrinfo", side_effect=_fake_resolver)
         self.resolver.start()
         self.addCleanup(self.resolver.stop)
@@ -389,7 +389,7 @@ class ScrapeGuardTests(unittest.TestCase):
     """scrape_page refuses before any socket exists, guard unstubbed."""
 
     def setUp(self) -> None:
-        self.cfg = BridgeConfig(log_requests=False)
+        self.cfg = BridgeConfig(guard=True, log_requests=False)
 
     def _refused(self, url: str) -> None:
         with mock.patch("freegem.ssrf.socket.create_connection") as create:
@@ -774,7 +774,7 @@ class RobotsCacheTests(unittest.TestCase):
     """The per-origin robots cache: TTL hits, validators, refusal rules."""
 
     def setUp(self) -> None:
-        self.cfg = BridgeConfig(log_requests=False)
+        self.cfg = BridgeConfig(guard=True, log_requests=False)
         clear_robots_cache()
 
     def _robots(self, body: str, etag: str | None = None) -> _FakeBytesResponse:
@@ -884,7 +884,7 @@ class MediaWikiAdapterTests(unittest.TestCase):
     """scrape_page routes wiki articles through the site's own Action API."""
 
     def setUp(self) -> None:
-        self.cfg = BridgeConfig(log_requests=False)
+        self.cfg = BridgeConfig(guard=True, log_requests=False)
 
     def _api_body(self, title: str, extract: str) -> bytes:
         return json.dumps(
@@ -1082,7 +1082,9 @@ class VoidElementSkipTests(unittest.TestCase):
             mock.patch("freegem.web_scraper._check_robots"),
             mock.patch("freegem.web_scraper._fetch", return_value=response),
         ):
-            result = scrape_page(BridgeConfig(log_requests=False), "https://example.org/page")
+            result = scrape_page(
+                BridgeConfig(guard=True, log_requests=False), "https://example.org/page"
+            )
         self.assertEqual(result.title, "T")
         self.assertIn("Real heading", result.text)
         self.assertIn("Real paragraph content.", result.text)
@@ -1430,7 +1432,7 @@ class AskBudgetTests(unittest.TestCase):
     """Question mode reads the whole page: --ask auto-raises max_chars."""
 
     def setUp(self) -> None:
-        self.cfg = BridgeConfig(log_requests=False)
+        self.cfg = BridgeConfig(guard=True, log_requests=False)
 
     def _page(self) -> ScrapeResult:
         return ScrapeResult(url="https://x.example/", title="T", text="page text " * 50)
@@ -1487,7 +1489,7 @@ class LocalFileScrapeTests(unittest.TestCase):
     )
 
     def setUp(self) -> None:
-        self.cfg = BridgeConfig(log_requests=False)
+        self.cfg = BridgeConfig(guard=True, log_requests=False)
         tmp = tempfile.mkdtemp(prefix="freegem-local-")
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         self.tmp = Path(tmp)

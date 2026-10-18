@@ -140,6 +140,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="disable the smart-fetch fallback ladder (direct fetch only)",
     )
     scrape.add_argument(
+        "--guard",
+        action="store_true",
+        help="enable the SSRF guard (scheme + public-IP checks, pinned dial); "
+        "off by default -- validation is a feature, not a gate",
+    )
+    scrape.add_argument(
         "--no-cache",
         action="store_true",
         help="skip the shared fetch cache for this run (nothing is written)",
@@ -516,6 +522,11 @@ def _apply_overrides(cfg: BridgeConfig, args: argparse.Namespace) -> BridgeConfi
 def cmd_serve(cfg: BridgeConfig, args: argparse.Namespace) -> int:
     from .server import ThreadedServer
 
+    # Network-facing surface: the SSRF guard is forced ON here regardless of
+    # the config default (which is off so the CLI just fetches). A server
+    # fetches URLs its clients chose -- that stays strict.
+    cfg = cfg.replace(guard=True)
+
     if args.port:
         cfg = cfg.replace(port=args.port)
     if args.host:
@@ -555,6 +566,9 @@ def cmd_serve(cfg: BridgeConfig, args: argparse.Namespace) -> int:
 
 
 def cmd_mcp(cfg: BridgeConfig, args: argparse.Namespace) -> int:
+    # Network-facing surface: SSRF guard forced ON (see cmd_serve note). The
+    # MCP web_scrape tool answers URLs an agent's prompt chose -- strict.
+    cfg = cfg.replace(guard=True)
     server = build_server(cfg, name=args.name)
     log(
         cfg,
@@ -722,6 +736,9 @@ def cmd_scrape(cfg: BridgeConfig, args: argparse.Namespace) -> int:
     """
     from .web_research import ResearchCache
     from .web_scraper import scrape_cli, scrape_many
+
+    if getattr(args, "guard", False):
+        cfg = cfg.replace(guard=True)
 
     max_chars = args.max_chars
     if max_chars is None:

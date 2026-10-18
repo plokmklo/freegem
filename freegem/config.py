@@ -85,6 +85,13 @@ DEFAULT_CONFIG: Mapping[str, Any] = MappingProxyType(
         # (a fresh render beats an old snapshot) and is a plain headless
         # browser: SSRF-guarded per request, no stealth, NON_GOALS hold.
         "smart_fetch_browser_render": False,
+        # SSRF guard for network fetches: scheme + public-IP checks, pinned
+        # dial, redirect re-checks. OFF by default -- validation is a FEATURE,
+        # not a gate (user directive 2026-10-17): plain `scrape` should just
+        # fetch and hand text to the caller/AI. Enable per-run with `--guard`
+        # or globally with "guard": true for untrusted URLs on hostile
+        # networks. Local files never touch the guard (allow_local path).
+        "guard": False,
         # Optional bearer key for the server's own job/result/artifact REST API
         # and the MCP adapter. None keeps the loopback-only, unauthenticated
         # behavior; a non-None value makes those endpoints demand
@@ -151,6 +158,7 @@ _BOOL_FIELDS = frozenset(
         "smart_fetch",
         "smart_fetch_ai",
         "smart_fetch_browser_render",
+        "guard",
     }
 )
 _STR_FIELDS = frozenset(
@@ -270,6 +278,7 @@ class BridgeConfig:
     smart_fetch: bool = DEFAULT_CONFIG["smart_fetch"]
     smart_fetch_ai: bool = DEFAULT_CONFIG["smart_fetch_ai"]
     smart_fetch_browser_render: bool = DEFAULT_CONFIG["smart_fetch_browser_render"]
+    guard: bool = DEFAULT_CONFIG["guard"]
     api_key: str | None = DEFAULT_CONFIG["api_key"]
     brave_api_key: str = DEFAULT_CONFIG["brave_api_key"]
     reader_api_key: str = DEFAULT_CONFIG["reader_api_key"]
@@ -355,6 +364,7 @@ class BridgeConfig:
             "smart_fetch": self.smart_fetch,
             "smart_fetch_ai": self.smart_fetch_ai,
             "smart_fetch_browser_render": self.smart_fetch_browser_render,
+            "guard": self.guard,
             # Booleans and paths only; never the token itself.
             "xsrf_token_set": bool(self.xsrf_token),
             "api_key_set": bool(self.api_key),

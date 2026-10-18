@@ -62,7 +62,7 @@ class EndpointTestCase(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.server = ThreadedServer(("127.0.0.1", 0), BridgeConfig(log_requests=False))
+        cls.server = ThreadedServer(("127.0.0.1", 0), BridgeConfig(guard=True, log_requests=False))
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
         cls.port = cls.server.server_address[1]
@@ -76,7 +76,7 @@ class EndpointTestCase(unittest.TestCase):
     def setUp(self) -> None:
         # Point the handler at a config we can observe, without touching the
         # module-level default.
-        self.server.config = BridgeConfig(log_requests=False)
+        self.server.config = BridgeConfig(guard=True, log_requests=False)
 
     def request(
         self, method: str, path: str, body: Any = None, headers: dict[str, str] | None = None
@@ -115,7 +115,7 @@ class HermeticServerTestCase(unittest.TestCase):
 
     def _make_config(self) -> BridgeConfig:
         """Hook: tests that need a specific config override this."""
-        return BridgeConfig(log_requests=False)
+        return BridgeConfig(guard=True, log_requests=False)
 
     def setUp(self) -> None:
         self.cfg = self._make_config()
@@ -577,7 +577,7 @@ class ConfigInjectionTests(EndpointTestCase):
 
     def test_temporary_chats_reaches_payload(self) -> None:
         """Two concurrent configs must not interfere."""
-        self.server.config = BridgeConfig(log_requests=False, temporary_chats=True)
+        self.server.config = BridgeConfig(guard=True, log_requests=False, temporary_chats=True)
         from freegem import gemini
 
         with mock.patch.object(gemini, "_post", return_value=io_bytes(wrb_line("ok"))):
@@ -854,7 +854,7 @@ class ThreadCapTests(unittest.TestCase):
     def _boot(self, cap: int) -> ThreadedServer:
         server = ThreadedServer(
             ("127.0.0.1", 0),
-            BridgeConfig(log_requests=False),
+            BridgeConfig(guard=True, log_requests=False),
             max_concurrent_requests=cap,
         )
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -950,7 +950,7 @@ class QueueTests(ThreadCapTests):
     """request_queue_wait_sec > 0: brief admission queueing before the 503."""
 
     def _boot(self, cap: int, queue_wait: float = 0.0) -> ThreadedServer:
-        cfg = BridgeConfig(log_requests=False, request_queue_wait_sec=queue_wait)
+        cfg = BridgeConfig(guard=True, log_requests=False, request_queue_wait_sec=queue_wait)
         server = ThreadedServer(("127.0.0.1", 0), cfg, max_concurrent_requests=cap)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -1058,7 +1058,7 @@ class PreBodyRejectionKeepAliveTests(HermeticServerTestCase):
     def _make_config(self) -> BridgeConfig:
         # The API key gates the jobs face (the chat face is auth-free by
         # design), which is how the 401 site below is reached.
-        return BridgeConfig(log_requests=False, api_key="secret", job_db="memory")
+        return BridgeConfig(guard=True, log_requests=False, api_key="secret", job_db="memory")
 
     def _rejected_post(
         self, extra_headers: list[tuple[str, str]], path: str = "/v1/chat/completions"

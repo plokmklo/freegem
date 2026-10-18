@@ -59,14 +59,16 @@ class BatchConcurrencyClampTests(unittest.TestCase):
     """#15: the batch ceiling is config-driven and a clamp says so on stderr."""
 
     def test_within_cap_not_clamped_and_silent(self) -> None:
-        cfg = BridgeConfig(batch_max_concurrency=32)
+        cfg = BridgeConfig(guard=True, batch_max_concurrency=32)
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             self.assertEqual(_clamp_batch_concurrency(cfg, 20), 20)
         self.assertEqual(err.getvalue(), "")
 
     def test_over_default_cap_clamped_with_exactly_one_warning(self) -> None:
-        cfg = BridgeConfig()  # default ceiling: 16
+        cfg = BridgeConfig(
+            guard=True,
+        )  # default ceiling: 16
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             self.assertEqual(_clamp_batch_concurrency(cfg, 20), 16)
@@ -76,7 +78,7 @@ class BatchConcurrencyClampTests(unittest.TestCase):
         )
 
     def test_raised_ceiling_never_prints_within_bounds(self) -> None:
-        cfg = BridgeConfig(batch_max_concurrency=32)
+        cfg = BridgeConfig(guard=True, batch_max_concurrency=32)
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             self.assertEqual(_clamp_batch_concurrency(cfg, 20), 20)
@@ -87,15 +89,35 @@ class BatchConcurrencyClampTests(unittest.TestCase):
     def test_zero_or_negative_cap_floors_at_one_with_warning(self) -> None:
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            self.assertEqual(_clamp_batch_concurrency(BridgeConfig(batch_max_concurrency=0), 20), 1)
-            self.assertEqual(_clamp_batch_concurrency(BridgeConfig(batch_max_concurrency=-3), 5), 1)
+            self.assertEqual(
+                _clamp_batch_concurrency(BridgeConfig(guard=True, batch_max_concurrency=0), 20), 1
+            )
+            self.assertEqual(
+                _clamp_batch_concurrency(BridgeConfig(guard=True, batch_max_concurrency=-3), 5), 1
+            )
         self.assertEqual(err.getvalue().count("clamped to 1 (batch_max_concurrency)"), 2)
 
     def test_request_below_floor_is_normalized_silently(self) -> None:
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            self.assertEqual(_clamp_batch_concurrency(BridgeConfig(), 0), 1)
-            self.assertEqual(_clamp_batch_concurrency(BridgeConfig(), -5), 1)
+            self.assertEqual(
+                _clamp_batch_concurrency(
+                    BridgeConfig(
+                        guard=True,
+                    ),
+                    0,
+                ),
+                1,
+            )
+            self.assertEqual(
+                _clamp_batch_concurrency(
+                    BridgeConfig(
+                        guard=True,
+                    ),
+                    -5,
+                ),
+                1,
+            )
         self.assertEqual(err.getvalue(), "")
 
 
@@ -116,13 +138,20 @@ class BatchPoolWidthTests(unittest.TestCase):
         return seen
 
     def test_raised_ceiling_builds_the_bigger_pool(self) -> None:
-        self.assertEqual(self._run_batch(BridgeConfig(batch_max_concurrency=32), 20), [20])
+        self.assertEqual(
+            self._run_batch(BridgeConfig(guard=True, batch_max_concurrency=32), 20), [20]
+        )
 
     def test_default_ceiling_still_clamps_to_sixteen_once(self) -> None:
         err = io.StringIO()
         out = io.StringIO()
         with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
-            seen = self._run_batch(BridgeConfig(), 20)
+            seen = self._run_batch(
+                BridgeConfig(
+                    guard=True,
+                ),
+                20,
+            )
         self.assertEqual(seen, [16])
         # ONE warning, on stderr only: stdout stays pipeline-safe.
         self.assertEqual(err.getvalue().count("clamped to 16 (batch_max_concurrency)"), 1)
@@ -131,7 +160,7 @@ class BatchPoolWidthTests(unittest.TestCase):
     def test_zero_ceiling_takes_the_sequential_path(self) -> None:
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            seen = self._run_batch(BridgeConfig(batch_max_concurrency=0), 20, count=3)
+            seen = self._run_batch(BridgeConfig(guard=True, batch_max_concurrency=0), 20, count=3)
         self.assertEqual(seen, [], "a floor-1 batch needs no pool at all")
         self.assertEqual(err.getvalue().count("clamped to 1 (batch_max_concurrency)"), 1)
 
@@ -184,7 +213,7 @@ class TagSelectionTests(unittest.TestCase):
     """#29: include_tags/exclude_tags shape the extraction, default is untouched."""
 
     def setUp(self) -> None:
-        self.cfg = BridgeConfig(log_requests=False)
+        self.cfg = BridgeConfig(guard=True, log_requests=False)
 
     def _scrape(self, **kwargs: Any) -> ScrapeResult:
         with mock.patch(
@@ -399,7 +428,7 @@ class BrowserRenderRungTests(unittest.TestCase):
     """#14: the optional browser-render rung -- after reader, before wayback."""
 
     def setUp(self) -> None:
-        self.cfg = BridgeConfig(log_requests=False, smart_fetch_browser_render=True)
+        self.cfg = BridgeConfig(guard=True, log_requests=False, smart_fetch_browser_render=True)
         clear_memory()
 
     def tearDown(self) -> None:
@@ -458,7 +487,7 @@ class BrowserRenderRungTests(unittest.TestCase):
     def test_disabled_by_default_never_calls_the_browser(self) -> None:
         from freegem.smart_fetch import fallback_scrape
 
-        cfg = BridgeConfig(log_requests=False)  # smart_fetch_browser_render=False
+        cfg = BridgeConfig(guard=True, log_requests=False)  # smart_fetch_browser_render=False
         ladder = _FakeLadder(render=self._ok_render())
         with contextlib.ExitStack() as stack:
             for patcher in ladder.patches():
@@ -524,7 +553,7 @@ class BrowserRenderRungTests(unittest.TestCase):
     def test_disabled_flag_gates_the_rung_directly(self) -> None:
         from freegem.smart_fetch import _browser_render_read
 
-        cfg = BridgeConfig(log_requests=False)  # default: off
+        cfg = BridgeConfig(guard=True, log_requests=False)  # default: off
         with mock.patch(
             "freegem.playwright_fetcher.is_playwright_available", return_value=True
         ) as available:
@@ -558,7 +587,7 @@ class ResearchCacheFullTextTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.cfg = BridgeConfig(log_requests=False)
+        self.cfg = BridgeConfig(guard=True, log_requests=False)
         self.tmp = tempfile.mkdtemp(prefix="freegem-fetchfeat-")
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
 

@@ -165,7 +165,7 @@ class ImageFetchCapTests(unittest.TestCase):
     """``image_url`` must not be an unauthenticated RAM-exhaustion vector."""
 
     def setUp(self) -> None:
-        self.cfg = BridgeConfig(log_requests=False)
+        self.cfg = BridgeConfig(guard=True, log_requests=False)
 
     def _fetch(self, response: _FakeResponse) -> bytes:
         with (
@@ -386,7 +386,7 @@ class _FakeGemini:
 
 class MapReduceEvidenceTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.cfg = BridgeConfig(log_requests=False)
+        self.cfg = BridgeConfig(guard=True, log_requests=False)
 
     def test_verified_chunk_quotes_drops_fabricated(self) -> None:
         reply = (

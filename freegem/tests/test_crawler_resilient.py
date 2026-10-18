@@ -132,7 +132,7 @@ class LadderTestCase(unittest.TestCase):
         )
         self.wayback_patch.start()
         self.addCleanup(self.wayback_patch.stop)
-        self.cfg = BridgeConfig(log_requests=False)
+        self.cfg = BridgeConfig(guard=True, log_requests=False)
         # Real delays would slow the suite; the ladder still exercises every
         # branch with a zero floor, and Retry-After comes back as a sleep
         # bounded by the pacer penalty cap.
@@ -521,7 +521,9 @@ class DistillTests(unittest.TestCase):
         # generate() raising must degrade to the deterministic cut, never raise.
         body = ("Paragraph 0 with enough substance to survive a summary cut. " * 1) * 40
         with mock.patch("freegem.crawler.distill.generate", side_effect=RuntimeError("no session")):
-            text, mode = distill_text(BridgeConfig(log_requests=False), "https://x.test/", body)
+            text, mode = distill_text(
+                BridgeConfig(guard=True, log_requests=False), "https://x.test/", body
+            )
         self.assertEqual(mode, "extractive")
         self.assertIn("Paragraph 0", text)
 
@@ -530,7 +532,7 @@ class DistillTests(unittest.TestCase):
             "freegem.crawler.distill.generate", return_value="THE IMPORTANT BITS ONLY"
         ) as gen:
             text, mode = distill_text(
-                BridgeConfig(log_requests=False), "https://x.test/", "long body " * 100
+                BridgeConfig(guard=True, log_requests=False), "https://x.test/", "long body " * 100
             )
         self.assertEqual(mode, "gemini")
         self.assertEqual(text, "THE IMPORTANT BITS ONLY")
@@ -573,7 +575,7 @@ class CampaignRetryTests(unittest.TestCase):
 
         with mock.patch("freegem.crawler.campaign.fetch_resilient", side_effect=fake_fetch):
             result = run_campaign(
-                BridgeConfig(log_requests=False),
+                BridgeConfig(guard=True, log_requests=False),
                 [
                     {"url": "https://fine.test/", "category": "c"},
                     {"url": "https://dead.test/", "category": "c"},
@@ -625,7 +627,7 @@ class CampaignRetryTests(unittest.TestCase):
 
         with mock.patch("freegem.crawler.campaign.fetch_resilient", side_effect=fake_fetch):
             result = run_campaign(
-                BridgeConfig(log_requests=False),
+                BridgeConfig(guard=True, log_requests=False),
                 [
                     {"url": "https://a.test/", "category": "c"},
                     {"url": "https://b.test/", "category": "c"},

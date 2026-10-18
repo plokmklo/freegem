@@ -275,7 +275,12 @@ def test_fetch_http_first_no_browser_when_http_ok(
     monkeypatch.setattr("freegem.selenium_fetcher.crawl_fetch", lambda url, cfg: good)
     from freegem.config import BridgeConfig
 
-    outcome, sel = fetch_http_first_selenium("https://example.org/", BridgeConfig())
+    outcome, sel = fetch_http_first_selenium(
+        "https://example.org/",
+        BridgeConfig(
+            guard=True,
+        ),
+    )
     assert sel is None
     assert outcome is good
 

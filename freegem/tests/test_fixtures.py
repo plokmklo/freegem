@@ -31,7 +31,13 @@ class MalformedHtmlFixtureTests(unittest.TestCase):
 
     def _extract(self, name: str) -> str:
         html = (FIXTURES / name).read_text(encoding="utf-8")
-        extractor = _parse_html(BridgeConfig(), f"https://fixture.test/{name}", html)
+        extractor = _parse_html(
+            BridgeConfig(
+                guard=True,
+            ),
+            f"https://fixture.test/{name}",
+            html,
+        )
         return _clean_text(extractor.text_parts)
 
     def test_void_element_jam_fixture_keeps_later_paragraphs(self) -> None:
@@ -67,7 +73,13 @@ class InjectionFixtureTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.html = (FIXTURES / "injection_page.html").read_text(encoding="utf-8")
-        extractor = _parse_html(BridgeConfig(), "https://fixture.test/injection", cls.html)
+        extractor = _parse_html(
+            BridgeConfig(
+                guard=True,
+            ),
+            "https://fixture.test/injection",
+            cls.html,
+        )
         cls.text = _clean_text(extractor.text_parts)
 
     def test_page_text_is_extracted_as_data(self) -> None:
@@ -245,7 +257,13 @@ class ClaimSetBenchmarkTests(unittest.TestCase):
             mock.patch("freegem.web_scraper.scrape_page", _fetcher(pages)),
             mock.patch("freegem.claim_verify._gemini_complete", _gemini(answer)),
         ):
-            result = verify(BridgeConfig(), self.set_spec["claims"], [url])
+            result = verify(
+                BridgeConfig(
+                    guard=True,
+                ),
+                self.set_spec["claims"],
+                [url],
+            )
         for claim, expected in zip(result.claims, self.set_spec["expected"], strict=True):
             self.assertEqual(claim.status, expected["status"], claim.claim)
             self.assertEqual(claim.all_verified, expected["all_verified"])

@@ -19,7 +19,9 @@ class MockServer:
     ``self.server.config`` and ``self.server.server_metrics``."""
 
     def __init__(self, cfg: BridgeConfig | None = None) -> None:
-        self.config = cfg or BridgeConfig()
+        self.config = cfg or BridgeConfig(
+            guard=True,
+        )
         self.server_metrics = MagicMock()
 
 
@@ -102,7 +104,7 @@ class TestServerJobsAndAuth(unittest.TestCase):
             )
             from freegem.jobs import execute_job
 
-            execute_job(job, BridgeConfig(log_requests=False))
+            execute_job(job, BridgeConfig(guard=True, log_requests=False))
 
         done = _await_job(job.id)
         self.assertEqual(done.status, "completed")
@@ -115,7 +117,7 @@ class TestServerJobsAndAuth(unittest.TestCase):
         job = GLOBAL_JOB_MANAGER.create_job("extract", {"text": "hello"})
         from freegem.jobs import execute_job
 
-        execute_job(job, BridgeConfig(log_requests=False))
+        execute_job(job, BridgeConfig(guard=True, log_requests=False))
         done = _await_job(job.id)
         self.assertEqual(done.status, "failed")
         assert done.error is not None
@@ -172,7 +174,9 @@ class JobsRestHttpTests(unittest.TestCase):
         from freegem.server import ThreadedServer
 
         reset_job_runner_for_tests()
-        self.cfg = BridgeConfig(log_requests=False, api_key="jobs-rest-key", job_db="memory")
+        self.cfg = BridgeConfig(
+            guard=True, log_requests=False, api_key="jobs-rest-key", job_db="memory"
+        )
         self.server = ThreadedServer(("127.0.0.1", 0), self.cfg, max_concurrent_requests=8)
         self.port = self.server.server_address[1]
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
