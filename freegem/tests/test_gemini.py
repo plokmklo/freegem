@@ -878,8 +878,9 @@ class BackoffTests(unittest.TestCase):
     def test_jitter_prevents_lockstep_retries(self) -> None:
         """Concurrent workers must not all sleep the exact same duration."""
         delays = [_backoff_delay(2, 1) for _ in range(100)]
-        self.assertGreater(len(set(round(d, 3) for d in delays)), 1,
-                           "jitter must produce varied delays")
+        self.assertGreater(
+            len({round(d, 3) for d in delays}), 1, "jitter must produce varied delays"
+        )
 
     def test_retry_after_also_capped(self) -> None:
         self.assertEqual(_backoff_delay(2, 1, retry_after=3600.0), _RETRY_BACKOFF_CAP_SEC)

@@ -11,8 +11,9 @@ import json
 import os
 import tempfile
 import unittest
+from collections.abc import Iterator
 from contextlib import redirect_stderr, redirect_stdout
-from typing import Any, Iterator
+from typing import Any
 from unittest import mock
 
 from freegem.cli import main

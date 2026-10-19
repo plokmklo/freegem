@@ -12,6 +12,7 @@ import json
 import random
 import re
 import ssl
+import sys
 import threading
 import time
 import urllib.error
@@ -175,7 +176,6 @@ def log(cfg: BridgeConfig, message: str) -> None:
     if not cfg.log_requests:
         return
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    import sys
 
     print(f"[{stamp}] {message}", file=sys.stderr, flush=True)
 
@@ -281,12 +281,9 @@ def _backoff_delay(base: float, attempt: int, retry_after: float | None = None) 
     delay to zero or beyond the cap; Retry-After overrides it when present.
     """
     delay = min(base * (2 ** (attempt - 1)), _RETRY_BACKOFF_CAP_SEC)
-    if retry_after is not None:
+    if retry_after is not None and retry_after > delay:
         # Honor the server's own hint when it asks for more than our curve.
-        if retry_after > delay:
-            return min(retry_after, _RETRY_BACKOFF_CAP_SEC)
-        # Server's hint was shorter than our curve; use our curve (with
-        # jitter) since the server is OK with us waiting that long.
+        return min(retry_after, _RETRY_BACKOFF_CAP_SEC)
     # ±50% jitter prevents synchronized retries across concurrent workers
     # without ever zeroing the backoff or exceeding the cap. When the
     # exponential curve is already pinned at the ceiling, jitter is skipped:
@@ -904,7 +901,7 @@ def generate_stream(
             # Same one-time recovery as the non-streaming path.
             _refresh_build_tag_once(cfg)
             raise
-        except _StreamRewriteError:
+        except _StreamRewriteError as exc:
             # Gemini rewrote a snapshot that was never emitted. If nothing
             # reached the client (emitted is empty), retry is safe -- but
             # in practice the rewrite check only fires after at least one
@@ -914,7 +911,7 @@ def generate_stream(
             # duplicate partial output.
             if emitted:
                 raise
-            last_error = sys.exc_info()[1]
+            last_error = exc
             if attempt < cfg.retry_attempts:
                 delay = _backoff_delay(cfg.retry_delay_sec, attempt, None)
                 note_gemini_retry()
