@@ -57,6 +57,7 @@ DEFAULT_CONFIG: Mapping[str, Any] = {
     # the Wikimedia API portal (or the site's own OpenSearch API for
     # non-Wikimedia MediaWiki hosts). robots.txt is honored either way.
     "discover_wiki": "en.wikipedia.org",
+    "api_key": None,
 }
 
 
@@ -86,6 +87,7 @@ class BridgeConfig:
     request_queue_wait_sec: float = DEFAULT_CONFIG["request_queue_wait_sec"]
     research_evidence: bool = DEFAULT_CONFIG["research_evidence"]
     discover_wiki: str = DEFAULT_CONFIG["discover_wiki"]
+    api_key: str | None = DEFAULT_CONFIG["api_key"]
 
     # ---- construction -------------------------------------------------------
 

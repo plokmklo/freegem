@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import socket
 import struct
 import threading
@@ -23,7 +24,8 @@ from typing import Any
 from . import __version__
 from .config import BridgeConfig
 from .gemini import BridgeError, generate, generate_stream, log
-from .metrics import ServerMetrics, new_request_id
+from .jobs import GLOBAL_JOB_MANAGER, Job
+from .metrics import ServerMetrics, new_request_id, record_audit_event
 from .models import MODELS, resolve_model
 from .multimodal import detect_image_mime, fetch_image_bytes, upload_image
 from .tools import (
@@ -117,6 +119,161 @@ def upload_images(cfg: BridgeConfig, images: list[ImageRef]) -> list[str] | None
 
 
 class GeminiHandler(BaseHTTPRequestHandler):
+
+    def _authenticate_request(self) -> bool:
+        api_key = getattr(self.cfg, "api_key", None) or os.environ.get("FREEGEM_API_KEY")
+        if not api_key:
+            return True
+
+        auth_header = self.headers.get("Authorization", "")
+        key_header = self.headers.get("X-API-Key", "")
+
+        token = ""
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:].strip()
+        elif key_header:
+            token = key_header.strip()
+
+        client_ip = self.client_address[0] if self.client_address else "127.0.0.1"
+        req_id = getattr(self, "_request_id", "")
+
+        if token == api_key:
+            return True
+
+        record_audit_event("auth_failure", client_ip, req_id, {"path": self.path})
+        self.send_error_json("Unauthorized: invalid or missing API key", 401)
+        return False
+
+    def _handle_jobs_get(self, path: str) -> None:
+        if not self._authenticate_request():
+            return
+
+        parts = [p for p in path.split("/") if p]
+        # GET /v1/jobs
+        if len(parts) == 2:
+            jobs = GLOBAL_JOB_MANAGER.list_jobs()
+            self.send_json({"object": "list", "data": jobs})
+            return
+
+        job_id = parts[2]
+        job = GLOBAL_JOB_MANAGER.get_job(job_id)
+        if not job:
+            self.send_error_json("job not found", 404)
+            return
+
+        # GET /v1/jobs/{id}/results
+        if len(parts) >= 4 and parts[3] == "results":
+            self.send_json({"id": job.id, "status": job.status, "result": job.result, "error": job.error})
+            return
+
+        # GET /v1/jobs/{id}
+        self.send_json(job.to_dict())
+
+    def _handle_artifacts_get(self, path: str) -> None:
+        if not self._authenticate_request():
+            return
+
+        parts = [p for p in path.split("/") if p]
+        if len(parts) < 3:
+            self.send_error_json("artifact id required", 400)
+            return
+
+        art_id = parts[2]
+        art = GLOBAL_JOB_MANAGER.get_artifact(art_id)
+        if not art or not os.path.exists(art.file_path):
+            self.send_error_json("artifact not found", 404)
+            return
+
+        try:
+            with open(art.file_path, "rb") as f:
+                content = f.read()
+            self._send(content, 200, art.content_type)
+        except Exception as exc:
+            self.send_error_json(f"failed to read artifact: {exc}", 500)
+
+    def _handle_jobs_post(self) -> None:
+        if not self._authenticate_request():
+            return
+
+        raw = self.read_body()
+        if raw is None:
+            return
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except Exception:
+            self.send_error_json("invalid JSON payload", 400)
+            return
+
+        job_type = data.get("type", "")
+        params = data.get("params", {})
+        if not job_type:
+            self.send_error_json("job type is required", 400)
+            return
+
+        job = GLOBAL_JOB_MANAGER.create_job(job_type, params)
+        self._run_job_background(job, self.cfg)
+        self.send_json(job.to_dict(), 202)
+
+    def _run_job_background(self, job: Job, cfg: BridgeConfig) -> None:
+        def _worker():
+            GLOBAL_JOB_MANAGER.update_job_status(job.id, "processing")
+            client_ip = getattr(self, "client_address", ("127.0.0.1",))[0]
+            req_id = getattr(self, "_request_id", "")
+            record_audit_event("job_started", client_ip, req_id, {"job_id": job.id, "type": job.type})
+
+            try:
+                if job.type == "scrape":
+                    from .web_scraper import scrape_page
+                    url = job.params.get("url", "")
+                    res = scrape_page(url, cfg)
+                    GLOBAL_JOB_MANAGER.update_job_status(
+                        job.id, "completed", result={"url": res.url, "title": res.title, "text": res.text, "links": res.links}
+                    )
+                elif job.type == "research":
+                    from .web_research import research
+                    topic = job.params.get("topic", "")
+                    res = research(cfg, topic)
+                    GLOBAL_JOB_MANAGER.update_job_status(job.id, "completed", result=res)
+                elif job.type == "playwright":
+                    from .playwright_fetcher import PlaywrightOptions, fetch_with_playwright
+                    opts = PlaywrightOptions(**job.params)
+                    pw_res = fetch_with_playwright(opts)
+                    art_ids = []
+                    if pw_res.screenshot_path and os.path.exists(pw_res.screenshot_path):
+                        art = GLOBAL_JOB_MANAGER.save_artifact(job.id, "screenshot.png", "image/png", pw_res.screenshot_path)
+                        art_ids.append(art.id)
+                    if pw_res.pdf_path and os.path.exists(pw_res.pdf_path):
+                        art = GLOBAL_JOB_MANAGER.save_artifact(job.id, "document.pdf", "application/pdf", pw_res.pdf_path)
+                        art_ids.append(art.id)
+                    if pw_res.trace_path and os.path.exists(pw_res.trace_path):
+                        art = GLOBAL_JOB_MANAGER.save_artifact(job.id, "trace.zip", "application/zip", pw_res.trace_path)
+                        art_ids.append(art.id)
+
+                    GLOBAL_JOB_MANAGER.update_job_status(
+                        job.id,
+                        "completed" if pw_res.ok else "failed",
+                        result={"url": pw_res.url, "final_url": pw_res.final_url, "title": pw_res.title, "text": pw_res.text, "status": pw_res.status},
+                        error=pw_res.error,
+                    )
+                elif job.type == "document":
+                    from .adapters import parse_document
+                    doc_data = job.params.get("data", "").encode("utf-8") if isinstance(job.params.get("data"), str) else job.params.get("data", b"")
+                    filename = job.params.get("filename", "")
+                    doc_res = parse_document(doc_data, filename)
+                    GLOBAL_JOB_MANAGER.update_job_status(
+                        job.id, "completed", result={"text": doc_res.text, "markdown": doc_res.markdown, "metadata": doc_res.metadata}
+                    )
+                else:
+                    GLOBAL_JOB_MANAGER.update_job_status(job.id, "failed", error=f"Unknown job type {job.type!r}")
+
+                record_audit_event("job_finished", client_ip, req_id, {"job_id": job.id, "status": job.status})
+            except Exception as exc:
+                trace = {"timestamp": time.time(), "error": str(exc)}
+                GLOBAL_JOB_MANAGER.update_job_status(job.id, "failed", error=str(exc), retry_trace=trace)
+                record_audit_event("job_failed", client_ip, req_id, {"job_id": job.id, "error": str(exc)})
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
     """Serves all protocol faces from one handler.
 
     ``server.config`` is set by :class:`ThreadedServer`; every request reads it
