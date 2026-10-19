@@ -930,6 +930,12 @@ def _cmd_scrape_classic(cfg: BridgeConfig, args: argparse.Namespace) -> int:
         cfg = cfg.replace(guard=True)
 
     want_ai_clean = getattr(args, "ai_clean", False)
+    if want_ai_clean:
+        # The per-run flag IS the explicit choice the config gate wants:
+        # without this, --ai-clean could never leave the "disabled" state
+        # for users who did not also set the config key (smoke-matrix
+        # finding). Same pattern as --guard above.
+        cfg = cfg.replace(smart_fetch_ai_clean=True)
     if want_ai_clean and args.ask:
         print("error: --ai-clean and --ask are both AI transformations; pick one", file=sys.stderr)
         return 2
