@@ -9,6 +9,15 @@ rescued the page that answers HTTP 200 but extracts badly.
 This module is that missing layer, available ON REQUEST only (``freegem
 scrape URL --ai`` or the library's :func:`ai_scrape`):
 
+0. when the FETCH ITSELF fails on a wall (403/429/5xx/timeout -- never our
+   own SSRF/cap refusals), the WALL RUNG asks the bridge's search-grounded
+   model for that page's content, with citations, and refuses the answer
+   unless it clears the honesty floors (length, no self-admitted
+   non-answer). The result is labeled ``via="ai-wall-rescue"``: an
+   AI-mediated read, never presented as a verbatim fetch. It is the
+   AI-assisted sibling of the ladder's ``ai-search`` step -- reachable
+   through this module's own seam even when the ladder's own AI step is
+   config-disabled, and never bypassing our guards;
 1. the ordinary scrape runs first (smart-fetch ladder included);
 2. its text is graded by the deterministic
    :func:`freegem.web_scraper.extraction_quality`;
@@ -81,6 +90,7 @@ from .llm_extract import (
     ExtractionSchema,
     extract_structured,
 )
+from .smart_fetch import _looks_like_ai_nonanswer, classify_failure
 from .web_scraper import (
     _MIN_CONTENT_CHARS,
     _SCRAPE_MANY_MAX,
@@ -99,10 +109,13 @@ __all__ = [
     "AI_EXTRACT_MODES",
     "AiMemory",
     "AiScrapeResult",
+    "SearchFn",
     "ai_scrape",
     "ai_scrape_many",
     "default_ai_memory_path",
     "default_complete",
+    "default_search",
+    "rescue_text",
     "schema_from_json",
 ]
 
@@ -136,6 +149,26 @@ _EQUAL_GRADE_GAIN = 1.10
 _SENTINEL_NONE = "NONE"
 
 Complete = Callable[[str], str]
+SearchFn = Callable[[str], str]
+
+#: Fetch-failure classes the wall rung may attempt to rescue. ``http`` and
+#: ``network`` mean the site (or the path to it) refused us while the page
+#: plausibly exists elsewhere; ``refused`` / ``cap`` are OUR OWN guards
+#: (SSRF, robots opt-in, size caps) and no AI path may bypass them -- the
+#: same contract the smart-fetch ladder enforces. ``type`` means the site
+#: answered with a non-HTML body, which a text search cannot read either.
+_WALL_KINDS = ("http", "network")
+
+#: A wall answer at or below this length is "the model shrugged": discarded
+#: without further ceremony, exactly like the ladder's ai-search floor.
+_MIN_WALL_CHARS = 80
+
+#: Wall-clock bound for the wall rung's one search call. Same discipline as
+#: smart-fetch's ai-search rung (#25): OUR wait is bounded; the generation
+#: thread is abandoned on timeout (threads cannot be killed -- gemini's own
+#: socket and retry bounds end it) so a wedged call cannot hold the caller
+#: (or, inside a batch, a pool worker) hostage.
+_WALL_SEARCH_TIMEOUT_SEC = 30.0
 
 
 def default_complete(cfg: BridgeConfig) -> Complete:
@@ -146,6 +179,38 @@ def default_complete(cfg: BridgeConfig) -> Complete:
     to the network except through this callable.
     """
     return BridgeProvider(cfg).complete
+
+
+def default_search(cfg: BridgeConfig) -> SearchFn:
+    """The zero-config wall-rung seam: freegem's own search-grounded model.
+
+    One bounded call into the bridge's ``gemini_search`` tool per question.
+    Tests inject their own ``search`` seam instead -- like ``complete``,
+    nothing in this module talks to the network except through these
+    callables. The bound follows the smart-fetch ai-search discipline: our
+    wait is capped, the generation thread is abandoned on timeout.
+    """
+
+    def search(query: str) -> str:
+        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import TimeoutError as FuturesTimeout
+
+        from .mcp_tools import run_tool
+
+        pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ai-wall")
+        try:
+            future = pool.submit(run_tool, cfg, "gemini_search", {"query": query})
+            try:
+                return future.result(timeout=_WALL_SEARCH_TIMEOUT_SEC)
+            except FuturesTimeout as exc:
+                raise ScrapeError(
+                    f"ai-wall-rescue search timed out after {_WALL_SEARCH_TIMEOUT_SEC:g}s"
+                ) from exc
+        finally:
+            # Do NOT wait: a wedged generation must not hold the caller.
+            pool.shutdown(wait=False, cancel_futures=True)
+
+    return search
 
 
 def default_ai_memory_path() -> Path:
@@ -278,6 +343,25 @@ def _question_prompt(question: str, title: str, text: str, notes: list[str]) -> 
     )
 
 
+def _wall_prompt(url: str, error: str) -> str:
+    """The wall rung's one search-grounded question, framed for honesty.
+
+    The prompt carries the fetch failure so the model knows the direct
+    paths are dead, demands the page's main content verbatim with a cited
+    source, and requires an explicit refusal when the page is out of
+    reach -- the same non-answer contract the ladder's ai-search rung
+    enforces downstream via :func:`smart_fetch._looks_like_ai_nonanswer`.
+    """
+    return (
+        f"The web page {url} could not be fetched directly ({error}). Find "
+        "this specific page and return its main readable content: quote the "
+        "page or article body as fully and verbatim as you can, and cite the "
+        "source URL you actually read it from. Do not summarize from memory. "
+        "If you cannot access the page's actual content, say exactly that "
+        "instead of guessing."
+    )
+
+
 def _gate_rescue(original: str, original_quality: str, rescued: str) -> bool:
     """Decide whether the model's text displaces the heuristic text.
 
@@ -357,6 +441,101 @@ def schema_from_json(raw: str) -> ExtractionSchema:
     return ExtractionSchema(name="cli", fields=tuple(fields))
 
 
+def rescue_text(
+    cfg: BridgeConfig,
+    url: str,
+    title: str,
+    text: str,
+    *,
+    complete: Complete | None = None,
+) -> tuple[str | None, str]:
+    """Attempt one AI content rescue on already-extracted page text.
+
+    The scrape rung's gate, factored out for callers that hold extracted
+    text from another pipeline (the crawler's ``--ai-rescue``): the model
+    is asked for the page's main readable content, and the answer comes
+    back only if it clears the same gate the scrape rung applies --
+    strictly better grade, or 10%+ more text at an equal grade on a
+    substantial original. Returns ``(rescued_text, note)``; ``rescued_text``
+    is ``None`` on every honest non-win (no content, gate rejection,
+    model error), and ``note`` always says which.
+    """
+    if complete is None:
+        complete = default_complete(cfg)
+    notes: list[str] = []
+    quality = extraction_quality(text)
+    try:
+        rescued = complete(_rescue_prompt(title, text, notes)).strip()
+    except Exception as exc:  # BridgeError, RateLimitError, ...
+        return None, f"ai-extract failed: {type(exc).__name__}: {exc}"
+    if not rescued or rescued.upper().startswith(_SENTINEL_NONE):
+        return None, "ai-extract: model found no recoverable content"
+    if _gate_rescue(text, quality, rescued):
+        return rescued, f"ai-extract accepted ({len(rescued)} chars)"
+    return None, (
+        f"ai-extract rejected: model text did not improve on the {quality} heuristic extraction"
+    )
+
+
+def _wall_recovery(
+    cfg: BridgeConfig,
+    url: str,
+    *,
+    error: str,
+    ai_extract: str,
+    max_chars: int,
+    search: SearchFn | None,
+    memory: AiMemory | None,
+    host: str,
+) -> AiScrapeResult:
+    """The wall rung: one search-grounded attempt to read a fetch-failed page.
+
+    Reached only through :func:`ai_scrape`'s failure path. The gate is the
+    honesty contract, not a quality gate (there is no heuristic text to
+    beat): our own guard refusals are never bypassed, the model's answer
+    must clear the length floor, must not self-admit it could not read the
+    page, and the shipped result is labeled ``via="ai-wall-rescue"`` --
+    an AI-mediated read with citations, never a verbatim fetch. The view
+    is returned to the caller only; it never enters any cache.
+    """
+    failure = AiScrapeResult(url=url, ok=False, error=error, via="none")
+    if ai_extract == "never" or classify_failure(error) not in _WALL_KINDS:
+        return failure
+    notes: list[str] = [f"fetch failed ({classify_failure(error)}); ai-wall-rescue attempted"]
+    if memory is not None and memory.get(host) == "ai-wall-rescue":
+        notes.append("host's last read needed the AI wall rung")
+    if search is None:
+        search = default_search(cfg)
+    try:
+        answer = search(_wall_prompt(url, error[:300])).strip()
+    except Exception as exc:  # ScrapeError (our bound), BridgeError, RateLimitError, ...
+        notes.append(f"ai-wall-rescue failed: {type(exc).__name__}: {exc}")
+        failure.notes = notes
+        return failure
+    if not answer or len(answer) < _MIN_WALL_CHARS:
+        notes.append("ai-wall-rescue: no usable content returned")
+    elif _looks_like_ai_nonanswer(answer):
+        notes.append("ai-wall-rescue: the model could not read the page either")
+    else:
+        failure.ok = True
+        failure.error = None
+        failure.title = f"AI-assisted read of {url}"
+        failure.text = answer[:max_chars]
+        failure.truncated = len(answer) > max_chars
+        failure.via = "ai-wall-rescue"
+        failure.quality = extraction_quality(answer)
+        failure.ai_used = True
+        notes.append(
+            f"ai-wall-rescue accepted ({len(answer)} chars, AI-mediated with citations, "
+            "not a verbatim fetch)"
+        )
+        if memory is not None:
+            with contextlib.suppress(OSError):
+                memory.remember(host, "ai-wall-rescue")
+    failure.notes = notes
+    return failure
+
+
 def ai_scrape(
     cfg: BridgeConfig,
     url: str,
@@ -371,6 +550,7 @@ def ai_scrape(
     ignore_robots: bool = True,
     allow_local: bool = False,
     complete: Complete | None = None,
+    search: SearchFn | None = None,
     memory: AiMemory | None = None,
     progress: Any | None = None,
 ) -> AiScrapeResult:
@@ -387,12 +567,17 @@ def ai_scrape(
     ``result.fields``; ``field_problems`` carries whatever the validator
     had to forgive).
 
-    ``complete`` is the AI seam (default: the Gemini bridge). ``memory`` is
+    ``complete`` is the AI seam (default: the Gemini bridge). ``search`` is
+    the wall rung's seam (default: the bridge's search-grounded model); it
+    fires only when the fetch itself fails on a wall-classified error and
+    ``ai_extract`` is not ``"never"``. ``memory`` is
     the per-host AiMemory (default: a fresh one on the default path, only
     when a rescue actually happens). ``allow_local`` forwards to
     ``scrape_page`` (#50): local targets stay a CLI-only, operator-typed
     choice. Fetch failures raise nothing: the result carries ``ok=False``
-    and ``error``.
+    and ``error`` -- unless the wall rung rescues the read, in which case
+    the result is ``ok=True`` with ``via="ai-wall-rescue"`` and honest
+    notes; that AI-mediated view is never written to any cache.
     """
     if ai_extract not in AI_EXTRACT_MODES:
         raise ValueError(f"ai_extract must be one of {AI_EXTRACT_MODES}, got {ai_extract!r}")
@@ -413,7 +598,16 @@ def ai_scrape(
             progress=progress,
         )
     except ScrapeError as exc:
-        return AiScrapeResult(url=url, ok=False, error=str(exc), via="none")
+        return _wall_recovery(
+            cfg,
+            url,
+            error=str(exc),
+            ai_extract=ai_extract,
+            max_chars=max_chars,
+            search=search,
+            memory=memory,
+            host=host,
+        )
 
     result = AiScrapeResult(
         url=url,

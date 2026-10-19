@@ -73,6 +73,14 @@ class CrawlSpec:
     #: Gemini, extractive fallback; adds ``distilled``/``distill_mode`` to
     #: the default (no-schema) records.
     distill: bool = False
+    #: AI content rescue for the default (no-schema) records: when a page's
+    #: extraction grades below ``ok`` (nav soup, script shells), one gated
+    #: model attempt per the scrape --ai contract
+    #: (:func:`freegem.ai_scrape.rescue_text`); the record carries
+    #: ``ai_rescued``/``ai_rescue_note``. Fetch failures are NOT rescued:
+    #: the resilient fetcher owns those, and a crawl frontier must never
+    #: turn into unbounded model calls on dead URLs.
+    ai_rescue: bool = False
     sitemaps: bool = False
     output_path: str = ""
     output_format: str = "jsonl"
@@ -603,6 +611,8 @@ def _process(
                 distilled, mode = distill_text(cfg, url, text, content_type=outcome.content_type)
                 record["distilled"] = distilled
                 record["distill_mode"] = mode
+            if spec.ai_rescue:
+                _ai_rescue_record(cfg, url, record)
             records = [record]
             field_errors: list[FieldError] = []
         else:
@@ -772,6 +782,37 @@ def _default_record(dom: HtmlDom | None, payload: Any, url: str) -> dict[str, An
             body = str(payload)
         return {"url": url, "title": "", "text": body[:cap]}
     return {"url": url, "title": "", "text": ""}
+
+
+def _ai_rescue_record(
+    cfg: BridgeConfig,
+    url: str,
+    record: dict[str, Any],
+    *,
+    complete: Any | None = None,
+) -> None:
+    """Spec.ai_rescue: one gated AI attempt on a poor default-record extraction.
+
+    Mirrors the scrape --ai gate exactly (:func:`freegem.ai_scrape.rescue_text`):
+    only a below-``ok`` grade triggers a model call, only a strictly better
+    extraction displaces the heuristic text, and the outcome is recorded in
+    the record either way (``ai_rescued`` bool + ``ai_rescue_note``) so the
+    crawl output stays honest about what the model did and did not do.
+    """
+    from ..ai_scrape import rescue_text  # lazy: crawler must import without the AI layer
+    from ..web_scraper import extraction_quality
+
+    cap = 20_000  # the default record's own text cap
+    grade = extraction_quality(record.get("text", ""))
+    if grade == "ok":
+        return
+    rescued, note = rescue_text(
+        cfg, url, record.get("title", ""), record.get("text", ""), complete=complete
+    )
+    record["ai_rescue_note"] = note
+    if rescued is not None:
+        record["text"] = rescued[:cap]
+        record["ai_rescued"] = True
 
 
 def _content_hash_of(outcome: FetchOutcome) -> str:

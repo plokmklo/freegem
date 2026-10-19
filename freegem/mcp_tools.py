@@ -140,6 +140,58 @@ TOOL_SPECS: list[dict[str, Any]] = [
             "the site's own OpenSearch) -- never a crawl."
         ),
     },
+    {
+        "name": "ai_clean",
+        "summary": "AI-distilled page content (drops nav/cookie boilerplate)",
+        "description": (
+            "Fetch a URL (same SSRF guard + smart-fetch ladder as web_scrape) and "
+            "run one bounded Gemini pass that returns the page's main readable "
+            "content with navigation, cookie banners, and boilerplate removed. "
+            "The AI-mediated view is labeled via='ai-clean' and is NEVER cached as "
+            "a verbatim extraction. If the page cannot be fetched, returns an error."
+        ),
+    },
+    {
+        "name": "ai_summarize",
+        "summary": "AI-generated summary of a web page",
+        "description": (
+            "Fetch a URL and produce a summary with key points and gist. The "
+            "summary is AI-mediated (via='ai-summary'), labeled, and bounded by a "
+            "per-call character budget. Uses the same SSRF-safe fetch path."
+        ),
+    },
+    {
+        "name": "ai_extract",
+        "summary": "Extract structured fields from one or more web pages",
+        "description": (
+            "Fetch one or more URLs and extract structured fields. When a query "
+            "is given, the model answers the question from fetched text with [S#] "
+            "citations. When a schema is given, the model outputs JSON with exactly "
+            "those keys. AI-mediated (via='ai-extract'), bounded, and labeled. "
+            "Uses the same SSRF-safe fetch path."
+        ),
+    },
+    {
+        "name": "ai_research",
+        "summary": "Multi-page AI research: answer a question with cited sources",
+        "description": (
+            "Fetch several pages, then answer one question with [S1]..[Sn] inline "
+            "citations. Each page is AI-summarized into a per-source note; the "
+            "answer is distilled from those notes. Citations and fetch metadata "
+            "remain the source of truth; AI quotes are marked UNVERIFIED if not "
+            "checkable against fetched text. Same SSRF-safe fetch path as web_scrape."
+        ),
+    },
+    {
+        "name": "ai_crawl",
+        "summary": "AI-powered crawl: score pages against a query, discover links",
+        "description": (
+            "Start from seed URLs, fetch pages through the SSRF-safe path, score "
+            "each page's relevance to a query, distill oversized pages, and use AI "
+            "link discovery to find semantically relevant next hops. Bounded by "
+            "max_pages and max_depth. Returns per-page scores and summaries."
+        ),
+    },
 ]
 
 
@@ -161,6 +213,81 @@ def _run(cfg: BridgeConfig, prompt: str, model: str | None = None) -> str:
             "or an expired session cookie."
         )
     return text
+
+
+def _ai_mcp_cache(arguments: dict[str, Any]) -> Any:
+    """Build a ResearchCache for MCP AI tools, or None if no-cache is set."""
+    if arguments.get("no_cache", False):
+        return None
+    from .web_research import ResearchCache
+
+    return ResearchCache(ResearchCache.default_path(), 1800)
+
+
+def _coerce_schema(schema: Any) -> dict[str, str] | None:
+    """Normalize an MCP schema argument to dict[str, str] | None for freegem_ai."""
+    if schema is None:
+        return None
+    if isinstance(schema, str):
+        schema = json.loads(schema)
+    if not isinstance(schema, dict):
+        return None
+    return {str(k): str(v) if isinstance(v, str) else "string" for k, v in schema.items()}
+
+
+def _ai_batch_dict(result: Any) -> dict[str, Any]:
+    """Serialize an AIBatchResult to a JSON-safe dict for MCP."""
+    d = {
+        "url": result.page.scrape.url,
+        "title": result.page.scrape.title,
+        "via": result.page.scrape.via,
+        "ok": result.ok,
+    }
+    if result.page.scrape.text:
+        d["text_length"] = len(result.page.scrape.text)
+    if result.page.ai_clean:
+        d["ai_clean"] = result.page.ai_clean.text
+    if result.page.ai_summary:
+        d["ai_summary"] = result.page.ai_summary.text
+    if result.page.ai_entities:
+        d["ai_entities"] = result.page.ai_entities.text
+    if result.ai_question:
+        d["ai_question"] = result.ai_question.text
+    if result.ai_extract:
+        d["ai_extract"] = result.ai_extract.text
+    return d
+
+
+def _ai_crawl_dict(record: Any) -> dict[str, Any]:
+    """Serialize an AICrawlRecord to a JSON-safe dict for MCP."""
+    return {
+        "url": record.url,
+        "status": record.status,
+        "ok": record.ok,
+        "title": record.title,
+        "chars": record.chars,
+        "via": record.via,
+        "ai_score": record.ai_score.text if record.ai_score else None,
+        "ai_links": record.ai_links.text if record.ai_links else None,
+        "ai_distill": record.ai_distill.text if record.ai_distill else None,
+        "error": record.error,
+    }
+
+
+def _ai_page_dict(result: Any) -> dict[str, Any]:
+    """Serialize an AIPageResult to a JSON-safe dict for MCP."""
+    d = {
+        "url": result.scrape.url,
+        "title": result.scrape.title,
+        "via": result.scrape.via,
+    }
+    if result.scrape.text:
+        d["text_length"] = len(result.scrape.text)
+    if result.ai_clean:
+        d["ai_clean"] = result.ai_clean.text
+    if result.ai_summary:
+        d["ai_summary"] = result.ai_summary.text
+    return d
 
 
 def run_tool(cfg: BridgeConfig, name: str, arguments: dict[str, Any]) -> str:
@@ -314,6 +441,159 @@ def run_tool(cfg: BridgeConfig, name: str, arguments: dict[str, Any]) -> str:
             f"Proxy:     {redact_proxy(cfg.proxy)}",
         ]
         return "\n".join(lines)
+
+    if name == "ai_clean":
+        from freegem_ai import ai_clean_page
+
+        url = str(arguments.get("url") or "").strip()
+        if not url:
+            raise ValueError("ai_clean requires a 'url' argument")
+        max_chars = int(arguments.get("max_chars") or 50_000)
+        smart = arguments.get("smart", True) is not False
+        cache = _ai_mcp_cache(arguments)
+        clean_result = ai_clean_page(
+            cfg,
+            url,
+            max_chars=max_chars,
+            smart=smart,
+            cache=cache,
+            refresh=arguments.get("refresh", False),
+            model=arguments.get("model"),
+        )
+        return json.dumps(_ai_page_dict(clean_result))
+
+    if name == "ai_summarize":
+        from freegem.web_scraper import scrape_page
+        from freegem_ai import ai_summarize
+
+        url = str(arguments.get("url") or "").strip()
+        if not url:
+            raise ValueError("ai_summarize requires a 'url' argument")
+        max_chars = int(arguments.get("max_chars") or 50_000)
+        smart = arguments.get("smart", True) is not False
+        cache = _ai_mcp_cache(arguments)
+        page = scrape_page(
+            cfg,
+            url,
+            max_chars=max_chars,
+            smart=smart,
+            cache=cache,
+            refresh=arguments.get("refresh", False),
+        )
+        if not page.text:
+            return json.dumps({"error": f"could not fetch {url}", "url": url})
+        budget = int(arguments.get("budget_chars") or 100_000)
+        summary = ai_summarize(cfg, page.text, model=arguments.get("model"), budget_chars=budget)
+        return json.dumps(
+            {
+                "url": url,
+                "title": page.title,
+                "summary": summary.text,
+                "via": summary.via,
+                "model": summary.model,
+            }
+        )
+
+    if name == "ai_extract":
+        from freegem_ai import ai_extract, scrape
+
+        urls = arguments.get("urls")
+        if not isinstance(urls, list) or not urls:
+            raise ValueError("ai_extract requires a non-empty 'urls' list")
+        query = str(arguments.get("query") or "").strip() or None
+        schema_raw: Any = arguments.get("schema")
+        schema_dict = _coerce_schema(schema_raw)
+        max_chars = int(arguments.get("max_chars") or 50_000)
+        smart = arguments.get("smart", True) is not False
+        cache = _ai_mcp_cache(arguments)
+        budget = int(arguments.get("budget_chars") or 100_000)
+        if query:
+            ext_result = ai_extract(
+                cfg,
+                query,
+                list(urls),
+                schema=schema_dict or {},
+                model=arguments.get("model"),
+                max_chars_per_page=max_chars,
+                smart=smart,
+                cache=cache,
+                refresh=arguments.get("refresh", False),
+                budget_chars=budget,
+            )
+            return (
+                json.dumps(ext_result.as_dict())
+                if hasattr(ext_result, "as_dict")
+                else json.dumps({"text": ext_result.text, "sources": []})
+            )
+        else:
+            results = scrape(
+                cfg,
+                list(urls),
+                schema=schema_dict,
+                model=arguments.get("model"),
+                max_chars=max_chars,
+                smart=smart,
+                cache=cache,
+                refresh=arguments.get("refresh", False),
+                budget_chars=budget,
+                concurrency=int(arguments.get("concurrency", 3)),
+                no_limit=arguments.get("no_limit", False),
+            )
+            return json.dumps([_ai_batch_dict(r) for r in results], default=str)
+
+    if name == "ai_research":
+        from freegem_ai import ai_research
+
+        urls = arguments.get("urls")
+        if not isinstance(urls, list) or not urls:
+            raise ValueError("ai_research requires a non-empty 'urls' list")
+        query = str(arguments.get("query") or "").strip()
+        if not query:
+            raise ValueError("ai_research requires a 'query' argument")
+        max_chars = int(arguments.get("max_chars") or 50_000)
+        smart = arguments.get("smart", True) is not False
+        cache = _ai_mcp_cache(arguments)
+        budget = int(arguments.get("budget_chars") or 100_000)
+        research_result = ai_research(
+            cfg,
+            query,
+            list(urls),
+            schema=None,
+            model=arguments.get("model"),
+            max_chars_per_page=max_chars,
+            smart=smart,
+            cache=cache,
+            refresh=arguments.get("refresh", False),
+            budget_chars=budget,
+        )
+        return json.dumps(
+            {"text": research_result.text, "sources": list(research_result.sources)}, default=str
+        )
+
+    if name == "ai_crawl":
+        from freegem_ai import ai_crawl as ai_crawl_fn
+
+        seeds = arguments.get("seeds")
+        if not isinstance(seeds, list) or not seeds:
+            raise ValueError("ai_crawl requires a non-empty 'seeds' list")
+        query = str(arguments.get("query") or "").strip()
+        if not query:
+            raise ValueError("ai_crawl requires a 'query' argument")
+        smart = arguments.get("smart", True) is not False
+        cache = _ai_mcp_cache(arguments)
+        budget = int(arguments.get("budget_chars") or 100_000)
+        crawl_result = ai_crawl_fn(
+            cfg,
+            list(seeds),
+            query,
+            max_pages=int(arguments.get("max_pages", 50)),
+            max_depth=int(arguments.get("max_depth", 2)),
+            model=arguments.get("model"),
+            budget_chars=budget,
+            smart=smart,
+            concurrency=int(arguments.get("concurrency", 2)),
+        )
+        return json.dumps([_ai_crawl_dict(r) for r in crawl_result.records], default=str)
 
     raise ValueError(f"unknown tool: {name}")
 

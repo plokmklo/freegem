@@ -1,3 +1,36 @@
+## [2.11.0] — 2026-10-20
+
+The AI rung goes where the walls are: a search-grounded WALL RUNG for
+pages whose fetch itself fails, and the AI-assisted scraper wired into
+`research` and `crawl`.
+
+### Added
+
+- **AI wall rung** (`ai_scrape`): when the fetch itself fails on a
+  wall-class error (403/429/5xx/timeout — never our own SSRF/cap
+  refusals), one search-grounded model call is asked for the page's main
+  content, with a cited source URL. The answer ships only if it clears
+  the honesty floors: 80+ chars, no self-admitted non-answer. Wins are
+  labeled `via="ai-wall-rescue"` — an AI-mediated read, never presented
+  as a verbatim fetch — and never enter any cache. New `search` seam
+  (plus `default_search`, bounded like the ladder's ai-search rung) makes
+  the whole rung hermetically testable and campaign-throttleable.
+- **`research --ai`**: pages fetch through `ai_scrape` — gated content
+  rescue for poor extractions plus the wall rung for fetch-failed pages.
+  Default stays byte-identical (`ai_extract="never"`); AI views are never
+  cached, so the shared-cache contract (#21) is untouched.
+- **`crawl run --ai-rescue`**: the crawler's default (no-schema) records
+  get the same gated rescue when their extraction grades below `ok`
+  (`ai_rescued`/`ai_rescue_note` in the record). Fetch failures stay the
+  resilient fetcher's business — a frontier never turns into unbounded
+  model calls on dead URLs.
+- **`rescue_text`**: the scrape rung's gate, factored out as a public
+  helper for callers that hold extracted text from another pipeline.
+- **Campaign deep phase widened**: JS-heavy categories (js-spa, media,
+  bot-walled) join the always-mode population; a new wall phase
+  (`ai_wall_phase.py`) re-attempts every phase-A failure through the wall
+  rung with one grounded verify question per accepted read.
+
 ## [2.10.0] — 2026-10-19
 
 AI-assisted web smart scraping: the LLM joins the extraction pipeline as a
@@ -145,7 +178,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   atomic-write temp name is UNIQUE per write (mkstemp + `os.replace`), not
   a fixed `<name>.tmp` two writers of the same URL shared — the old
   interleaving produced half files that `load` read as corrupt and
-  silently reset to fresh baselines. A failed save removes its temp file.
+  silently reset to fresh baselines. A failed save removes its temp file,
+  and the one Windows-specific flavor of failure — a transient
+  `PermissionError` when the target is mid-rename under a concurrent
+  writer — is retried briefly instead of crashing a watch loop.
 - **watch (#56) the stored simhash must be what the stored text actually
   hashes to**: `text_hash` gates the verdict, but the simhash drives the
   reported distance, and a tampered or stale simhash used to sail through

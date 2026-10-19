@@ -188,7 +188,20 @@ class WatchState:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write(json.dumps(self.to_dict(), ensure_ascii=False))
-            _atomic_replace(tmp_name, target)
+            # (#54, Windows) os.replace onto a target another thread or
+            # process is reading/renaming can transiently raise
+            # PermissionError even though every writer's file is complete.
+            # A failed save is honest, but this flavor is pure contention:
+            # retry briefly so two concurrent watches of the same URL (the
+            # exact scenario #54 protects) cannot crash each other's loop.
+            for attempt in range(5):
+                try:
+                    os.replace(tmp_name, target)
+                    break
+                except PermissionError:
+                    if attempt == 4:
+                        raise
+                    time.sleep(0.002 * (attempt + 1))
         except BaseException:
             with contextlib.suppress(OSError):
                 os.unlink(tmp_name)

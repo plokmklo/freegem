@@ -30,8 +30,10 @@ from freegem.ai_scrape import (
     _gate_rescue,
     _question_prompt,
     _rescue_prompt,
+    _wall_recovery,
     ai_scrape,
     ai_scrape_many,
+    rescue_text,
     schema_from_json,
 )
 from freegem.config import BridgeConfig
@@ -84,6 +86,14 @@ class _AiSite(BaseHTTPRequestHandler):
             return
         if path == "/empty":
             self._send(b"<html><head><title>Empty</title></head><body></body></html>")
+            return
+        if path == "/walled":
+            body = b"forbidden by the CDN"
+            self.send_response(403)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
         self.send_error(404)
 
@@ -549,6 +559,251 @@ class CliAiTests(_MainCase):
         self.assertEqual(code, 0)
         self.assertIn("via html", out)
         self.assertIn("via ai-extract +ai", out)
+
+
+class WallRungTests(_SiteCase):
+    """The wall rung: one search-grounded AI attempt on fetch-failed pages.
+
+    The honesty contract, hermetically: the rung fires only on wall-class
+    fetch failures and never on our own guard refusals; a self-admitted
+    non-answer, a shrug-short answer, or a seam error is an HONEST failure
+    with the original error preserved; a win is labeled ai-wall-rescue,
+    capped at max_chars, and remembered per host.
+    """
+
+    def scrape_walled(self, **kw: object) -> AiScrapeResult:
+        kw.setdefault("smart", False)
+        return ai_scrape(self.cfg, self.url("/walled"), **kw)  # type: ignore[arg-type]
+
+    def test_403_page_is_rescued_via_wall_rung(self) -> None:
+        searches = _Model(_OK_TEXT)
+        res = self.scrape_walled(ai_extract="auto", search=searches)
+        self.assertEqual(searches.calls, 1)
+        self.assertTrue(res.ok)
+        self.assertEqual(res.via, "ai-wall-rescue")
+        self.assertTrue(res.ai_used)
+        self.assertEqual(res.quality, "ok")
+        self.assertIn(self.url("/walled"), searches.prompts[0])
+        self.assertIn("could not be fetched directly", searches.prompts[0])
+        self.assertTrue(any("ai-wall-rescue accepted" in n for n in res.notes))
+        self.assertIn("not a verbatim fetch", " | ".join(res.notes))
+
+    def test_wall_rung_nonanswer_is_an_honest_failure(self) -> None:
+        searches = _Model(
+            "I wasn't able to access the page's content. The page is behind a "
+            "login wall I cannot pass, so I cannot quote it."
+        )
+        res = self.scrape_walled(ai_extract="auto", search=searches)
+        self.assertFalse(res.ok)
+        self.assertFalse(res.ai_used)
+        self.assertEqual(res.via, "none")
+        self.assertIn("403", res.error or "")
+        self.assertTrue(any("could not read the page either" in n for n in res.notes))
+
+    def test_wall_rung_short_answer_is_not_content(self) -> None:
+        searches = _Model("nope")
+        res = self.scrape_walled(ai_extract="auto", search=searches)
+        self.assertFalse(res.ok)
+        self.assertTrue(any("no usable content" in n for n in res.notes))
+
+    def test_wall_rung_search_failure_is_recorded(self) -> None:
+        searches = _Model(exc=RuntimeError("bridge down"))
+        res = self.scrape_walled(ai_extract="auto", search=searches)
+        self.assertFalse(res.ok)
+        self.assertTrue(any("ai-wall-rescue failed: RuntimeError" in n for n in res.notes))
+
+    def test_wall_rung_never_mode_stays_silent(self) -> None:
+        searches = _Model("SHOULD NOT BE CALLED")
+        res = self.scrape_walled(ai_extract="never", search=searches)
+        self.assertEqual(searches.calls, 0)
+        self.assertFalse(res.ok)
+
+    def test_wall_rung_never_bypasses_our_guards(self) -> None:
+        """Our own guard refusals are OURS; no AI path may bypass them."""
+        searches = _Model(_OK_TEXT)
+        for error in (
+            "SSRF guard: 127.0.0.1 resolves to a forbidden range",
+            "robots.txt disallows https://site/walled",
+            "page exceeds the 50000 char cap",
+            "refusing content type application/pdf",
+        ):
+            res = _wall_recovery(
+                self.cfg,
+                self.url("/walled"),
+                error=error,
+                ai_extract="auto",
+                max_chars=1000,
+                search=searches,
+                memory=None,
+                host="site.test",
+            )
+            self.assertFalse(res.ok, error)
+            self.assertEqual(res.error, error)
+            self.assertEqual(res.notes, [], error)
+        self.assertEqual(searches.calls, 0)
+
+    def test_wall_recovery_is_reachable_only_through_a_walled_scrape(self) -> None:
+        """Integration: a real 403 from the loopback site reaches the rung."""
+        searches = _Model(_OK_TEXT)
+        res = self.scrape_walled(ai_extract="auto", search=searches)
+        self.assertTrue(res.ok)
+        self.assertEqual(res.via, "ai-wall-rescue")
+
+    def test_wall_rung_respects_max_chars(self) -> None:
+        searches = _Model(_OK_TEXT)
+        res = self.scrape_walled(ai_extract="auto", search=searches, max_chars=200)
+        self.assertTrue(res.ok)
+        self.assertEqual(len(res.text), 200)
+        self.assertTrue(res.truncated)
+
+    def test_wall_rung_remembered_in_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = AiMemory(Path(tmp) / "mem.json")
+            searches = _Model(_OK_TEXT)
+            res = self.scrape_walled(ai_extract="auto", search=searches, memory=memory)
+            self.assertTrue(res.ok)
+            host = urllib.parse.urlsplit(self.url("/walled")).hostname or ""
+            self.assertEqual(memory.get(host), "ai-wall-rescue")
+
+
+class RescueTextTests(unittest.TestCase):
+    """rescue_text: the scrape rung's gate, factored out for the crawler."""
+
+    def test_win_returns_rescued_text(self) -> None:
+        model = _Model(_OK_TEXT)
+        rescued, note = rescue_text(BridgeConfig(), "u", "T", "nav junk", complete=model)
+        self.assertIsNotNone(rescued)
+        self.assertIn("accepted", note)
+        self.assertEqual(model.calls, 1)
+
+    def test_none_sentinel_is_honest(self) -> None:
+        model = _Model("NONE")
+        rescued, note = rescue_text(BridgeConfig(), "u", "T", "nav junk", complete=model)
+        self.assertIsNone(rescued)
+        self.assertIn("no recoverable content", note)
+
+    def test_gate_rejection_is_honest(self) -> None:
+        model = _Model("!!!" * 300)  # long but no grade improvement
+        rescued, note = rescue_text(BridgeConfig(), "u", "T", "nav junk", complete=model)
+        self.assertIsNone(rescued)
+        self.assertIn("rejected", note)
+
+    def test_model_error_is_recorded(self) -> None:
+        model = _Model(exc=RateLimitError("429", kind="rate_limit"))
+        rescued, note = rescue_text(BridgeConfig(), "u", "T", "nav junk", complete=model)
+        self.assertIsNone(rescued)
+        self.assertIn("ai-extract failed: RateLimitError", note)
+
+
+class CrawlAiRescueTests(unittest.TestCase):
+    """CrawlSpec.ai_rescue: the gated rescue on the crawler's default records."""
+
+    def record(self, text: str) -> dict[str, object]:
+        return {"url": "u", "title": "T", "text": text}
+
+    def test_ok_grade_costs_zero_model_calls(self) -> None:
+        from freegem.crawler.runner import _ai_rescue_record
+
+        model = _Model("SHOULD NOT BE CALLED")
+        rec = self.record(_OK_TEXT)
+        _ai_rescue_record(BridgeConfig(), "u", rec, complete=model)
+        self.assertEqual(model.calls, 0)
+        self.assertNotIn("ai_rescued", rec)
+        self.assertNotIn("ai_rescue_note", rec)
+
+    def test_nav_record_is_rescued_and_marked(self) -> None:
+        from freegem.crawler.runner import _ai_rescue_record
+
+        model = _Model(_OK_TEXT)
+        rec = self.record("Home Menu About Sign in")
+        _ai_rescue_record(BridgeConfig(), "u", rec, complete=model)
+        self.assertEqual(model.calls, 1)
+        self.assertIs(rec["ai_rescued"], True)
+        self.assertEqual(rec["text"], _OK_TEXT.strip())
+        self.assertIn("accepted", str(rec["ai_rescue_note"]))
+
+    def test_rejected_rescue_keeps_heuristic_text(self) -> None:
+        from freegem.crawler.runner import _ai_rescue_record
+
+        model = _Model("!!!" * 300)
+        rec = self.record("Home Menu About Sign in")
+        _ai_rescue_record(BridgeConfig(), "u", rec, complete=model)
+        self.assertNotIn("ai_rescued", rec)
+        self.assertEqual(rec["text"], "Home Menu About Sign in")
+        self.assertIn("rejected", str(rec["ai_rescue_note"]))
+
+    def test_rescued_text_is_capped(self) -> None:
+        from freegem.crawler.runner import _ai_rescue_record
+
+        model = _Model(_OK_TEXT * 100)
+        rec = self.record("Home Menu About Sign in")
+        _ai_rescue_record(BridgeConfig(), "u", rec, complete=model)
+        self.assertEqual(len(str(rec["text"])), 20_000)
+
+
+class ResearchAiWiringTests(_SiteCase):
+    """research --ai routes page fetches through ai_scrape (and only then)."""
+
+    def test_never_mode_calls_scrape_page_not_ai_scrape(self) -> None:
+        from freegem import web_research
+        from freegem.web_scraper import ScrapeResult
+
+        sentinel = ScrapeResult(url="u", title="T", text=_OK_TEXT, via="html")
+        with (
+            mock.patch("freegem.web_scraper.scrape_page", return_value=sentinel) as sp,
+            mock.patch("freegem.ai_scrape.ai_scrape") as ai,
+        ):
+            out = web_research._fetch_page(
+                self.cfg,
+                self.url("/article"),
+                max_chars=1000,
+                cache=None,
+                refresh=False,
+                ai_extract="never",
+            )
+            self.assertIs(out, sentinel)
+            sp.assert_called_once()
+            ai.assert_not_called()
+
+    def test_ai_mode_routes_through_ai_scrape(self) -> None:
+        from freegem import web_research
+
+        fake = AiScrapeResult(url="u", ok=True, title="T", text=_OK_TEXT, via="ai-extract")
+        with mock.patch("freegem.ai_scrape.ai_scrape", return_value=fake) as ai:
+            out = web_research._fetch_page(
+                self.cfg,
+                self.url("/navgunk"),
+                max_chars=1000,
+                cache=None,
+                refresh=False,
+                ai_extract="auto",
+            )
+            self.assertIs(out, fake)
+            ai.assert_called_once()
+            self.assertEqual(ai.call_args.kwargs.get("ai_extract"), "auto")
+            self.assertIs(ai.call_args.kwargs.get("smart"), False)
+
+    def test_ai_failure_raises_scrape_error(self) -> None:
+        from freegem import web_research
+        from freegem.web_scraper import ScrapeError
+
+        fake = AiScrapeResult(url="u", ok=False, error="HTTP 403 for u", via="none")
+        with mock.patch("freegem.ai_scrape.ai_scrape", return_value=fake):
+            with self.assertRaises(ScrapeError):
+                web_research._fetch_page(
+                    self.cfg,
+                    self.url("/walled"),
+                    max_chars=1000,
+                    cache=None,
+                    refresh=False,
+                    ai_extract="auto",
+                )
+
+    def test_research_parser_has_ai_flag(self) -> None:
+        from freegem.cli import _build_parser
+
+        args = _build_parser().parse_args(["research", "http://x/", "--query", "q", "--ai"])
+        self.assertTrue(args.ai)
 
 
 if __name__ == "__main__":  # pragma: no cover

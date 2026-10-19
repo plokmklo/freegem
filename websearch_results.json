@@ -1,0 +1,458 @@
+{
+  "summary": {
+    "tool": "WebSearch (built-in)",
+    "total": 50,
+    "success": 0,
+    "failed": 50,
+    "success_rate": 0.0,
+    "avg_time": 6.3,
+    "p50_latency": 5.7,
+    "p95_latency": 9.1,
+    "avg_answer_chars": 0.0,
+    "by_category": {
+      "General Q&A": {
+        "pass": 0,
+        "total": 5
+      },
+      "Technical": {
+        "pass": 0,
+        "total": 5
+      },
+      "Recent News": {
+        "pass": 0,
+        "total": 5
+      },
+      "Finance": {
+        "pass": 0,
+        "total": 5
+      },
+      "Science": {
+        "pass": 0,
+        "total": 5
+      },
+      "Programming": {
+        "pass": 0,
+        "total": 5
+      },
+      "Trading": {
+        "pass": 0,
+        "total": 5
+      },
+      "Web Dev": {
+        "pass": 0,
+        "total": 5
+      },
+      "Productivity": {
+        "pass": 0,
+        "total": 5
+      },
+      "Health": {
+        "pass": 0,
+        "total": 5
+      }
+    },
+    "notes": "DDG was blocked so this arm uses WebSearch. All 50 WebSearch calls returned an empty payload: only a query-echo header plus an unexecuted nested web_search call record and a sources reminder - zero organic results (no titles, snippets, or URLs) for every query, so all 50 score FAIL with answer_chars=0. Tool did not raise errors; it simply returned no result list. Latencies approximate: batch wall-time/10 from Bash date before/after each of 5 batches of 10 parallel calls."
+  },
+  "results": [
+    {
+      "id": 1,
+      "category": "General Q&A",
+      "status": "FAIL",
+      "latency_s": 9.07,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 2,
+      "category": "General Q&A",
+      "status": "FAIL",
+      "latency_s": 9.07,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 3,
+      "category": "General Q&A",
+      "status": "FAIL",
+      "latency_s": 9.07,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 4,
+      "category": "General Q&A",
+      "status": "FAIL",
+      "latency_s": 9.07,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 5,
+      "category": "General Q&A",
+      "status": "FAIL",
+      "latency_s": 9.07,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 6,
+      "category": "Technical",
+      "status": "FAIL",
+      "latency_s": 9.07,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 7,
+      "category": "Technical",
+      "status": "FAIL",
+      "latency_s": 9.07,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 8,
+      "category": "Technical",
+      "status": "FAIL",
+      "latency_s": 9.07,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 9,
+      "category": "Technical",
+      "status": "FAIL",
+      "latency_s": 9.07,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 10,
+      "category": "Technical",
+      "status": "FAIL",
+      "latency_s": 9.07,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 11,
+      "category": "Recent News",
+      "status": "FAIL",
+      "latency_s": 5.4,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 12,
+      "category": "Recent News",
+      "status": "FAIL",
+      "latency_s": 5.4,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 13,
+      "category": "Recent News",
+      "status": "FAIL",
+      "latency_s": 5.4,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 14,
+      "category": "Recent News",
+      "status": "FAIL",
+      "latency_s": 5.4,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 15,
+      "category": "Recent News",
+      "status": "FAIL",
+      "latency_s": 5.4,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 16,
+      "category": "Finance",
+      "status": "FAIL",
+      "latency_s": 5.4,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 17,
+      "category": "Finance",
+      "status": "FAIL",
+      "latency_s": 5.4,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 18,
+      "category": "Finance",
+      "status": "FAIL",
+      "latency_s": 5.4,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 19,
+      "category": "Finance",
+      "status": "FAIL",
+      "latency_s": 5.4,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 20,
+      "category": "Finance",
+      "status": "FAIL",
+      "latency_s": 5.4,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 21,
+      "category": "Science",
+      "status": "FAIL",
+      "latency_s": 5.92,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 22,
+      "category": "Science",
+      "status": "FAIL",
+      "latency_s": 5.92,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 23,
+      "category": "Science",
+      "status": "FAIL",
+      "latency_s": 5.92,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 24,
+      "category": "Science",
+      "status": "FAIL",
+      "latency_s": 5.92,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 25,
+      "category": "Science",
+      "status": "FAIL",
+      "latency_s": 5.92,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 26,
+      "category": "Programming",
+      "status": "FAIL",
+      "latency_s": 5.92,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 27,
+      "category": "Programming",
+      "status": "FAIL",
+      "latency_s": 5.92,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 28,
+      "category": "Programming",
+      "status": "FAIL",
+      "latency_s": 5.92,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 29,
+      "category": "Programming",
+      "status": "FAIL",
+      "latency_s": 5.92,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 30,
+      "category": "Programming",
+      "status": "FAIL",
+      "latency_s": 5.92,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 31,
+      "category": "Trading",
+      "status": "FAIL",
+      "latency_s": 5.68,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 32,
+      "category": "Trading",
+      "status": "FAIL",
+      "latency_s": 5.68,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 33,
+      "category": "Trading",
+      "status": "FAIL",
+      "latency_s": 5.68,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 34,
+      "category": "Trading",
+      "status": "FAIL",
+      "latency_s": 5.68,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 35,
+      "category": "Trading",
+      "status": "FAIL",
+      "latency_s": 5.68,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 36,
+      "category": "Web Dev",
+      "status": "FAIL",
+      "latency_s": 5.68,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 37,
+      "category": "Web Dev",
+      "status": "FAIL",
+      "latency_s": 5.68,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 38,
+      "category": "Web Dev",
+      "status": "FAIL",
+      "latency_s": 5.68,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 39,
+      "category": "Web Dev",
+      "status": "FAIL",
+      "latency_s": 5.68,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 40,
+      "category": "Web Dev",
+      "status": "FAIL",
+      "latency_s": 5.68,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 41,
+      "category": "Productivity",
+      "status": "FAIL",
+      "latency_s": 5.23,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 42,
+      "category": "Productivity",
+      "status": "FAIL",
+      "latency_s": 5.23,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 43,
+      "category": "Productivity",
+      "status": "FAIL",
+      "latency_s": 5.23,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 44,
+      "category": "Productivity",
+      "status": "FAIL",
+      "latency_s": 5.23,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 45,
+      "category": "Productivity",
+      "status": "FAIL",
+      "latency_s": 5.23,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 46,
+      "category": "Health",
+      "status": "FAIL",
+      "latency_s": 5.23,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 47,
+      "category": "Health",
+      "status": "FAIL",
+      "latency_s": 5.23,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 48,
+      "category": "Health",
+      "status": "FAIL",
+      "latency_s": 5.23,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 49,
+      "category": "Health",
+      "status": "FAIL",
+      "latency_s": 5.23,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    },
+    {
+      "id": 50,
+      "category": "Health",
+      "status": "FAIL",
+      "latency_s": 5.23,
+      "answer_chars": 0,
+      "notes": "zero organic results returned"
+    }
+  ]
+}
