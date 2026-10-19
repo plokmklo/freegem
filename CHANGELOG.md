@@ -31,6 +31,13 @@ pages whose fetch itself fails, and the AI-assisted scraper wired into
   (`ai_wall_phase.py`) re-attempts every phase-A failure through the wall
   rung with one grounded verify question per accepted read.
 
+### Documentation
+
+- README now documents the AI wall rescue layer (honesty floors,
+  `via="ai-wall-rescue"` labeling, never cached), `research --ai`, and the
+  crawler's `--ai-rescue` flag with its `ai_rescued`/`ai_rescue_note`
+  record fields.
+
 ## [2.10.0] — 2026-10-19
 
 AI-assisted web smart scraping: the LLM joins the extraction pipeline as a

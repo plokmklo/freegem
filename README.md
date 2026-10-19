@@ -436,6 +436,15 @@ answered: a page whose only door is a bot wall stays unread, and the error
 says exactly that. `--no-smart` (or config `smart_fetch: false`) keeps the
 direct fetch only.
 
+**AI wall rescue** — when the fetch itself fails on a wall-class error
+(403/429/5xx, timeout — never freegem's own SSRF or cap refusals), one
+search-grounded model call may be asked for the page's main content with a
+cited source URL. The answer ships only if it clears the honesty floors
+(80+ characters, no self-admitted non-answer) and is labeled
+`via="ai-wall-rescue"` — an AI-mediated read, never presented as a verbatim
+fetch — and it never enters any cache. No logins are created, no CAPTCHA is
+solved: the model can only read what the open web already indexes.
+
 ### Content selection, cache, and batch mode
 
 **Structured selection** — `--include-tags` / `--exclude-tags` take CSS
@@ -542,6 +551,11 @@ What it does beyond N scrapes:
   HTML, so article text arrives clean, without navigation chrome. The adapter
   runs behind the same SSRF guard; per-source metadata records it as
   `via: mediawiki-api`.
+- **AI-assisted rescue (`--ai`)** — with the flag set, pages that extracted
+  poorly (navigation-only, empty) get one gated model rescue, and pages
+  whose fetch failed on a wall-class error go through the AI wall rung
+  above. The default (no flag) stays byte-identical; AI-produced views are
+  never written to the cache, so the shared-cache contract is untouched.
 - **Concurrent fetching** — pages from different sites are fetched in
   parallel (bounded pool, 3 by default, `--fetch-concurrency` or the
   `research_concurrency` config to change; fetches to the same host always
@@ -717,10 +731,23 @@ freegem crawl run --seeds https://example.com/docs/ \
   --state crawl.db --out results.jsonl --artifacts artifacts/ \
   --schema fields.json --sitemap --delay-ms 250 --concurrency 2
 
+# run it with gated AI rescue for poor extractions (default records only)
+freegem crawl run --seeds https://example.com/docs/ \
+  --allow-path /docs --max-depth 2 --max-pages 50 \
+  --state crawl.db --out results.jsonl --ai-rescue
+
 # inspect / continue
 freegem crawl status --state crawl.db
 freegem crawl run --seeds https://example.com/docs/ --state crawl.db   # resume
 ```
+
+### AI rescue (--ai-rescue)
+
+With `--ai-rescue`, a default (no-schema) record whose extraction grades
+below `ok` gets one gated model rescue; accepted reads carry
+`ai_rescued: true` and an `ai_rescue_note`. Schema records are never
+rewritten by the model, and fetch failures stay the resilient fetcher's
+business — a frontier never turns into unbounded model calls on dead URLs.
 
 ### Scope
 
