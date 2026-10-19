@@ -149,7 +149,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   atomic-write temp name is UNIQUE per write (mkstemp + `os.replace`), not
   a fixed `<name>.tmp` two writers of the same URL shared — the old
   interleaving produced half files that `load` read as corrupt and
-  silently reset to fresh baselines. A failed save removes its temp file.
+  silently reset to fresh baselines. A failed save removes its temp file,
+  and the one Windows-specific flavor of failure — a transient
+  `PermissionError` when the target is mid-rename under a concurrent
+  writer — is retried briefly instead of crashing a watch loop.
 - **watch (#56) the stored simhash must be what the stored text actually
   hashes to**: `text_hash` gates the verdict, but the simhash drives the
   reported distance, and a tampered or stale simhash used to sail through
