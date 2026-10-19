@@ -1276,13 +1276,16 @@ promise:
 - **Guaranteed scraping, availability, completeness, freshness, or accuracy
   on arbitrary sites.** Sites fail, move, truncate, and change without
   notice; jobs report what they actually got, failures included.
-- **CAPTCHA solving, anti-bot bypass, stealth success, or fingerprint
-  evasion.** FreeGem fetches politely, like a normal client, and when a site
-  refuses it tries *legitimate* alternate read paths (browser-identifying
-  headers, public readers, the Internet Archive) — but it never solves a
-  CAPTCHA, never answers a challenge, and never rotates identities. A page
-  whose only door is a bot wall stays unread, and the failure says so — a
-  design stance, not a missing feature.
+- **CAPTCHA solving, identity rotation, or stealth success by default.**
+  FreeGem fetches politely by default and, when a site refuses, tries
+  *legitimate* alternate read paths (browser-identifying headers, public
+  readers, the Internet Archive, AI-assisted reads). Two further rungs
+  exist but only as explicit opt-ins you switch on: `tls-browser`
+  (Chrome's TLS fingerprint through curl_cffi, for sites that fingerprint
+  the TLS hello) and `flaresolverr` (an adapter to a FlareSolverr instance
+  you run yourself, for managed challenge walls). Neither is on by
+  default, neither solves a CAPTCHA, and identities are never rotated. A
+  page whose only door is a CAPTCHA stays unread, and the failure says so.
 - **A free proxy pool or managed browser fleet.** Requests come from your
   machine and your IPs; proxies are yours to choose, configure, and pay for.
 - **A proprietary web index or built-in SERP service.** The crawler, simhash

@@ -245,8 +245,11 @@ class FallbackLadderTests(unittest.TestCase):
         self.assertIn("every read path refused", message)
         self.assertIn("direct: HTTP 403", message)
         # (#60) Gated-off rungs drop out of the ladder entirely: the default
-        # config has browser-render off, so the walk is the other four.
-        expected = [s for s in STRATEGIES if s != "browser-render"]
+        # config has browser-render, tls-browser and flaresolverr off, so
+        # the walk is the other four.
+        expected = [
+            s for s in STRATEGIES if s not in {"browser-render", "tls-browser", "flaresolverr"}
+        ]
         for name in expected:
             self.assertIn(name, message)
         self.assertEqual(order, expected)
@@ -295,9 +298,10 @@ class FallbackLadderTests(unittest.TestCase):
                 fallback_scrape(
                     self.cfg, "https://x.example/", max_chars=100, first_error="HTTP 403"
                 )
-        # (#60) The gated-off render rung is dropped before the walk, so the
-        # four allowed rungs (incl. ai-search) are all attempted.
-        self.assertEqual(len(order), len(STRATEGIES) - 1)
+        # (#60) The gated-off rungs (browser-render, tls-browser,
+        # flaresolverr) are dropped before the walk, so the four allowed
+        # rungs (incl. ai-search) are all attempted.
+        self.assertEqual(len(order), 4)
         self.assertNotIn("browser-render", order)
         self.assertIn("ai-search", str(caught.exception))
 
@@ -390,7 +394,7 @@ class FallbackLadderTests(unittest.TestCase):
         self.assertEqual(order, [], "no rung may run once the budget is gone")
         message = str(caught.exception)
         # (#60) Only the four rungs the config allows get a (skipped) slot.
-        self.assertEqual(message.count("ladder budget was exhausted"), len(STRATEGIES) - 1)
+        self.assertEqual(message.count("ladder budget was exhausted"), 4)
         self.assertIn("skipped", message)
 
     def test_healthy_ladder_still_runs_inside_the_budget(self) -> None:

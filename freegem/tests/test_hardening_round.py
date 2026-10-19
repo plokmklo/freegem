@@ -573,7 +573,12 @@ class Fix60GatedOffRungTests(_StateDirTestCase):
         self.assertEqual(order, ["browser-headers", "reader", "wayback"])
 
     def test_render_gate_on_restores_the_full_ladder(self) -> None:
-        cfg = BridgeConfig(guard=True, log_requests=False, smart_fetch_browser_render=True)
+        # (#60) With every gate open the walk is the complete ladder.
+        cfg = BridgeConfig(guard=True, log_requests=False).replace(
+            smart_fetch_browser_render=True,
+            smart_fetch_tls_browser=True,
+            smart_fetch_flaresolverr="http://127.0.0.1:8191",
+        )
         self.assertEqual(list(_strategy_order("h.example", cfg)), list(STRATEGIES))
 
     def test_remembered_rung_cannot_front_rank_while_gated_off(self) -> None:

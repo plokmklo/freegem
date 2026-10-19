@@ -12,26 +12,43 @@ The ladder, in order:
    browser-identifying client. Many 403s are naive UA matching, not a
    policy: a real browser would be served. If the site still refuses a
    browser-shaped request, nothing browser-shaped is faked beyond this.
-2. ``reader``           -- ``https://r.jina.ai/<url>``, a public reader
+2. ``tls-browser``      -- OPTIONAL, off by default (config
+   ``smart_fetch_tls_browser``): the same URL fetched through curl_cffi
+   with Chrome's exact TLS/HTTP2 fingerprint, so the client presenting
+   browser headers IS the client whose hello the site fingerprints
+   (v2.12.0, docs/ANTIBOT_RESEARCH.md). No header overrides -- a
+   mismatched header/TLS pair is itself a detection signal -- one warm-up
+   retry carrying the wall's own cookies, session discarded afterwards.
+   An explicit choice like browser-render; needs the optional curl_cffi
+   dependency.
+3. ``reader``           -- ``https://r.jina.ai/<url>``, a public reader
    service that fetches the page itself and returns markdown. The page is
    read through a service the site can see and rate-limit like any client.
-3. ``browser-render``   -- OPTIONAL, off by default (config
+4. ``browser-render``   -- OPTIONAL, off by default (config
    ``smart_fetch_browser_render``): a plain headless Chromium render
    through the Playwright fetcher, for pages whose text only exists after
    JavaScript. Positioned here because a FRESH render beats an OLD
    archive; a browser launch is an explicit choice, never a silent
    fallback, and no stealth is involved (NON_GOALS hold).
-4. ``wayback``          -- the Internet Archive's availability API, then
+5. ``flaresolverr``     -- OPTIONAL, off by default (config
+   ``smart_fetch_flaresolverr``): an adapter to a FlareSolverr instance
+   the user runs themselves -- the community's standard self-hosted
+   answer to managed challenge walls. FreeGem ships no solver (NON_GOALS
+   hold): the rung only exists when the user configured an endpoint, and
+   its result is labeled ``via="flaresolverr"``.
+6. ``wayback``          -- the Internet Archive's availability API, then
    the closest snapshot. Published, permanent, and legal: the archive is
    meant to be read.
-5. ``ai-search``        -- the bridge's own Gemini search tool is asked for
+7. ``ai-search``        -- the bridge's own Gemini search tool is asked for
    the page's content, with citations. AI-mediated and clearly labeled
    (``via="ai-search"``): never presented as a verbatim fetch. Requires a
    configured session; skipped, never half-tried, without one.
 
 What is deliberately NOT here, and stays not here (per NON_GOALS): CAPTCHA
-solving, challenge answering, IP/identity rotation, TLS-fingerprint
-spoofing, headless-browser stealth. A page whose only door is a CAPTCHA
+solving, challenge answering, IP/identity rotation, headless-browser
+stealth. The tls-browser and flaresolverr rungs (v2.12.0) are the two
+OPT-IN exceptions -- each exists only when the user switches it on, and
+neither answers CAPTCHAs. A page whose only door is a CAPTCHA
 stays unread, and the error says so. The taxonomy of every failed ladder is
 honest -- each attempted path and its exact refusal -- so callers (and
 humans) can tell "the site demands a login" from "our network is broken".
@@ -56,6 +73,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from . import flaresolverr_fetcher, tls_fetcher
 from .config import BridgeConfig
 from .web_scraper import ScrapeError, ScrapeResult, scrape_page
 
@@ -68,11 +86,22 @@ __all__ = [
     "fallback_scrape",
 ]
 
-#: The ladder, in default order. ``browser-render`` is the OPTIONAL rung
-#: (config ``smart_fetch_browser_render``, default off: gated inside the
-#: rung itself, like ai-search's flag gate). ``ai-search`` is gated at
+#: The ladder, in default order. ``browser-render``, ``tls-browser`` and
+#: ``flaresolverr`` are the OPTIONAL rungs (config
+#: ``smart_fetch_browser_render`` / ``smart_fetch_tls_browser`` /
+#: ``smart_fetch_flaresolverr``, all default off: gated inside the
+#: rungs themselves and dropped from the order by ``_gated_off``, like
+#: ai-search's flag gate). ``ai-search`` is gated at
 #: runtime (needs a session and the ``smart_fetch_ai`` config flag).
-STRATEGIES = ("browser-headers", "reader", "browser-render", "wayback", "ai-search")
+STRATEGIES = (
+    "browser-headers",
+    "tls-browser",
+    "reader",
+    "browser-render",
+    "flaresolverr",
+    "wayback",
+    "ai-search",
+)
 
 #: Pause between ladder steps. One failed request per strategy, spaced out:
 #: the ladder is a polite reader, not a hammer.
@@ -120,6 +149,16 @@ _BROWSER_RENDER_QUIET_MS = 6_000
 #: (#61) The domcontentloaded phase's settle beat: SPA frameworks hydrate
 #: after the event fires; this gives them one breath before extraction.
 _BROWSER_RENDER_SETTLE_MS = 1_200
+
+#: Wall-clock bound for the tls-browser rung (v2.12.0). curl_cffi is a
+#: plain HTTP client -- no launch, no render -- so its bound is the cheap
+#: one, and it covers both GETs of the cookie warm-up pair.
+_TLS_TIMEOUT_SEC = 15.0
+
+#: Wall-clock bound for the flaresolverr rung (v2.12.0). Solving a managed
+#: challenge takes a real browser real seconds; the service's own
+#: ``maxTimeout`` gets this minus one second of socket headroom.
+_FLARESOLVERR_TIMEOUT_SEC = 45.0
 
 #: (#58) Process-wide cap on CONCURRENT headless renders. Every render is a
 #: whole Chromium process; a concurrent batch scrape (up to 16 workers) used
@@ -348,6 +387,10 @@ def _gated_off(cfg: BridgeConfig) -> set[str]:
     off: set[str] = set()
     if not getattr(cfg, "smart_fetch_browser_render", False):
         off.add("browser-render")
+    if not getattr(cfg, "smart_fetch_tls_browser", False):
+        off.add("tls-browser")
+    if not flaresolverr_fetcher.is_configured(cfg):
+        off.add("flaresolverr")
     if not getattr(cfg, "smart_fetch_ai", True):
         off.add("ai-search")
     return off
@@ -387,6 +430,8 @@ def _try_strategy(
             ignore_robots=ignore_robots,
             headers_override=_BROWSER_HEADERS,
         )
+    if strategy == "tls-browser":
+        return _tls_browser_read(cfg, url, max_chars, budget=budget)
     if strategy == "reader":
         reader_url = "https://r.jina.ai/" + url
         result = scrape_page(
@@ -402,6 +447,8 @@ def _try_strategy(
         return _parse_reader_output(result, url, max_chars)
     if strategy == "browser-render":
         return _browser_render_read(cfg, url, max_chars, budget=budget)
+    if strategy == "flaresolverr":
+        return _flaresolverr_read(cfg, url, max_chars, budget=budget)
     if strategy == "wayback":
         snapshot = _wayback_snapshot(cfg, url)
         result = scrape_page(cfg, snapshot, max_chars=max_chars, ignore_robots=True)
@@ -621,6 +668,83 @@ def _browser_render_read(
         truncated=truncated,
         via="browser-render",
     )
+
+
+def _ext_html_read(
+    cfg: BridgeConfig, via: str, url: str, html: str, max_chars: int
+) -> ScrapeResult:
+    """Extract text from a rung's raw HTML exactly like the direct path does.
+
+    Shared by the rungs that obtain RAW HTML from somewhere else
+    (tls-browser, flaresolverr): the ordinary extractor strips scripts and
+    chrome, so a rung win differs from a direct win by its ``via`` label
+    and nothing else.
+    """
+    from .web_scraper import _clean_text, _parse_html
+
+    extractor = _parse_html(cfg, url, html)
+    text = _clean_text(extractor.text_parts)
+    if not text:
+        raise ScrapeError(f"{via} extracted zero readable text from {url!r}")
+    truncated = len(text) > max_chars
+    if truncated:
+        text = text[:max_chars].rstrip()
+    return ScrapeResult(
+        url=url,
+        title=extractor.title or url,
+        text=text,
+        truncated=truncated,
+        via=via,
+    )
+
+
+def _tls_browser_read(
+    cfg: BridgeConfig, url: str, max_chars: int, *, budget: float | None = None
+) -> ScrapeResult:
+    """The tls-browser rung (v2.12.0): Chrome's TLS hello through curl_cffi.
+
+    OFF by default (config ``smart_fetch_tls_browser``): it presents the
+    TLS fingerprint of the browser whose headers the browser-headers rung
+    already sends, which is the point where naive UA matching ends and
+    fingerprinting begins -- an explicit user choice, never a silent
+    fallback. Honors ``cfg.proxy``; no header overrides; at most two GETs
+    (one warm-up retry); the session and its cookies are discarded.
+    """
+    if not getattr(cfg, "smart_fetch_tls_browser", False):
+        raise ScrapeError("tls-browser disabled (smart_fetch_tls_browser=false)")
+
+    wall = _TLS_TIMEOUT_SEC if budget is None else min(_TLS_TIMEOUT_SEC, budget)
+    if wall < 1.0:
+        raise ScrapeError(
+            f"tls-browser skipped for {url!r}: only {max(wall, 0.0):.2f}s of ladder budget remain"
+        )
+    try:
+        html = tls_fetcher.tls_fetch_html(cfg, url, timeout=wall)
+    except tls_fetcher.TlsFetchError as exc:
+        raise ScrapeError(str(exc)) from exc
+    return _ext_html_read(cfg, "tls-browser", url, html, max_chars)
+
+
+def _flaresolverr_read(
+    cfg: BridgeConfig, url: str, max_chars: int, *, budget: float | None = None
+) -> ScrapeResult:
+    """The flaresolverr rung (v2.12.0): solve through the user's own service.
+
+    Exists only when config ``smart_fetch_flaresolverr`` holds an endpoint
+    (the ladder's gate drops it otherwise; the client itself refuses too).
+    The solved HTML goes through the ordinary extractor; the result is
+    labeled ``via="flaresolverr"`` end to end.
+    """
+    wall = _FLARESOLVERR_TIMEOUT_SEC if budget is None else min(_FLARESOLVERR_TIMEOUT_SEC, budget)
+    if wall < 5.0:
+        raise ScrapeError(
+            f"flaresolverr skipped for {url!r}: only {max(wall, 0.0):.2f}s of ladder budget remain"
+        )
+    try:
+        html = flaresolverr_fetcher.flaresolverr_html(cfg, url, timeout=wall)
+    except flaresolverr_fetcher.FlareSolverrError as exc:
+        raise ScrapeError(str(exc)) from exc
+    return _ext_html_read(cfg, "flaresolverr", url, html, max_chars)
 
 
 def _snapshot_matches(snapshot: str, url: str) -> bool:
