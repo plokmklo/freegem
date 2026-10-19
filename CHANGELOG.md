@@ -59,23 +59,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is an honest failure, not content. The wait is capped (30 s) and sized
   to the caller's remaining budget; a refusal-shaped short answer
   classifies as "no main content" before the length gate can mislabel it.
-- **watch state management (#55)**: `freegem watch --list` (every stored
-  watch; corrupt state files are listed first, not hidden),
-  `--forget URL`, `--forget-all`, and pre-check sweeps `--max-age DUR`
-  (intervals now accept `d` days) and `--max-entries N` (evicts the
-  oldest-checked). Corrupt entries count as never-checked so they are
-  always first out under either sweep.
-- **`freegem scrape --ai-clean` / config `"smart_fetch_ai_clean"`** — one
-  bounded Gemini pass over an already-fetched page's extracted text that
-  returns the page's main readable content (navigation, cookie banners,
-  subscription prompts, and related-link walls dropped). OFF by default;
-  single-URL text/markdown only; mutually exclusive with `--ask`; labeled
-  in the output (`ai-clean view`, an HTML comment in markdown mode); never
-  written to the shared fetch cache (#21 discipline); a model answer that
-  admits it could not read the page — or says exactly `NO MAIN CONTENT` —
-  is an honest failure, not content. The wait is capped (30 s) and sized
-  to the caller's remaining budget; a refusal-shaped short answer
-  classifies as "no main content" before the length gate can mislabel it.
+  (Smoke-matrix finding, fixed pre-merge: the `--ai-clean` flag itself now
+  turns the config gate ON for the run — without that wiring the flag
+  could never leave the "disabled" state for anyone who did not also edit
+  the config file.)
 - **watch state management (#55)**: `freegem watch --list` (every stored
   watch; corrupt state files are listed first, not hidden),
   `--forget URL`, `--forget-all`, and pre-check sweeps `--max-age DUR`

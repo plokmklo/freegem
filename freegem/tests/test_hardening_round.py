@@ -900,6 +900,45 @@ class AiCleanCliWiringTests(_StateDirTestCase):
         self.assertEqual(code, 2)
         self.assertIn("pick one", err)
 
+    def test_cli_flag_enables_the_per_run_gate(self) -> None:
+        """Smoke-matrix regression: `--ai-clean` must turn the config gate ON
+        for the run -- the flag IS the explicit choice, or the feature is
+        unreachable for anyone who did not also edit the config file."""
+        from freegem.web_scraper import ScrapeResult
+
+        class FakeProvider:
+            def __init__(self, cfg: Any) -> None:
+                pass
+
+            def complete(self, prompt: str) -> str:
+                return "The cleaned article body, free of chrome. " * 30
+
+        page = ScrapeResult(url="https://a.example/", title="T", text="The article body. " * 400)
+        with (
+            mock.patch("freegem.web_scraper.scrape_page", return_value=page),
+            mock.patch("freegem.llm_extract.BridgeProvider", FakeProvider),
+        ):
+            code, out, _err = self.run_cli(
+                ["scrape", "https://a.example/", "--ai-clean", "--no-cache"]
+            )
+        self.assertEqual(code, 0)
+        self.assertIn("ai-clean view", out)
+        self.assertIn("cleaned article body", out)
+
+    def test_disabled_without_the_flag_stays_disabled(self) -> None:
+        """No --ai-clean and no config: the scrape path never reaches the
+        model (the flag gate stays closed)."""
+        from freegem.web_scraper import ScrapeResult
+
+        page = ScrapeResult(url="https://a.example/", title="T", text="The article body. " * 400)
+        with (
+            mock.patch("freegem.web_scraper.scrape_page", return_value=page),
+            mock.patch("freegem.llm_extract.BridgeProvider") as provider,
+        ):
+            code, _out, _ = self.run_cli(["scrape", "https://a.example/", "--no-cache"])
+        self.assertEqual(code, 0)
+        self.assertFalse(provider.called)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
