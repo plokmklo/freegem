@@ -915,6 +915,25 @@ class MediaWikiAdapterTests(unittest.TestCase):
         self.assertTrue(api_url.startswith("https://en.wikipedia.org/w/api.php?"))
         self.assertIn("titles=Alexander_the_Great", api_url)
 
+    def test_exchars_explicit_in_fallback_extracts(self) -> None:
+        """Fallback prop=extracts request must include explicit exchars
+        (issue #67). The MediaWiki API default caps extracts far below what
+        FreeGem's own _MAX_CHARS_HARD_LIMIT permits, so we request the full
+        budget and let _caller_view trim afterwards (#21)."""
+        responses = [
+            _FakeBytesResponse(self._api_body("Alexander the Great", "")),
+            _FakeBytesResponse(
+                self._api_body("Alexander the Great", "Alexander III of Macedon ... " * 30)
+            ),
+        ]
+        with mock.patch("freegem.web_scraper._fetch", side_effect=responses) as fetch:
+            result = scrape_page(self.cfg, "https://en.wikipedia.org/wiki/Alexander_the_Great")
+        self.assertEqual(result.via, "mediawiki-api")
+        # The second call is the fallback extracts request
+        fallback_url = fetch.call_args_list[1][0][1]
+        self.assertIn("prop=extracts", fallback_url)
+        self.assertIn("exchars=200000", fallback_url)
+
     def test_full_parse_api_returns_whole_article(self) -> None:
         """action=parse returns the COMPLETE rendered article (tables and all)
         -- the extracts API caps its output and loses the tail of long pages."""

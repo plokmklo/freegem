@@ -3,7 +3,7 @@
 [![CI](https://github.com/plokmklo/freegem/actions/workflows/ci.yml/badge.svg)](https://github.com/plokmklo/freegem/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Version](https://img.shields.io/badge/version-2.9.3-blueviolet)
+![Version](https://img.shields.io/badge/version-2.11.0-blueviolet)
 
 **A local bridge for Gemini Web, presented through the interfaces you already use.**
 

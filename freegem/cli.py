@@ -703,6 +703,32 @@ def _build_parser() -> argparse.ArgumentParser:
         "doctor", help="check session, build tag, and network reachability", parents=[common]
     )
 
+    bench = sub.add_parser(
+        "bench",
+        help="hermetic release benchmark suite (issue #68)",
+        parents=[common],
+    )
+    bench.add_argument(
+        "--output",
+        "-o",
+        metavar="PATH",
+        default=None,
+        help="write full JSON/text report to PATH",
+    )
+    bench.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="report format (default: text)",
+    )
+    bench.add_argument(
+        "--runs",
+        type=int,
+        default=5,
+        metavar="N",
+        help="runs per benchmark category (default 5)",
+    )
+
     return parser
 
 
@@ -1493,6 +1519,16 @@ def cmd_verify(cfg: BridgeConfig, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bench(cfg: BridgeConfig, args: argparse.Namespace) -> int:
+    """Run the hermetic release benchmark suite (issue #68)."""
+    from freegem.bench_release import main as bench_main
+
+    argv = ["--format", args.format, "--runs", str(args.runs)]
+    if args.output:
+        argv += ["--output", args.output]
+    return bench_main(argv)
+
+
 def cmd_doctor(cfg: BridgeConfig, args: argparse.Namespace) -> int:
     """Read-only diagnostics. Never sends a generation request."""
     from .gemini import account_prefix, load_cookie
@@ -1888,6 +1924,7 @@ def main(argv: list[str] | None = None) -> int:
         "ai",
         "watch",
         "doctor",
+        "bench",
     }
     if not any(a in _commands for a in raw) and not any(
         a in ("-h", "--help", "--version") for a in raw
@@ -1934,6 +1971,7 @@ def main(argv: list[str] | None = None) -> int:
         "ai": cmd_ai,
         "watch": cmd_watch,
         "doctor": cmd_doctor,
+        "bench": cmd_bench,
     }
     return handlers[command](cfg, args)
 
