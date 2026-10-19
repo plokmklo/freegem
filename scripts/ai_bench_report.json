@@ -1,0 +1,178 @@
+{
+ "campaign": "AI-assisted smart scraping — freegem 2.10.0 (8aadfca)",
+ "finished_utc": "2026-10-19T11:39:17.810382+00:00",
+ "totals": {
+  "attempted": 1003,
+  "readable": 747,
+  "readable_pct": 74.5,
+  "honestly_unreadable": 256
+ },
+ "quality_labels": {
+  "ok": 720,
+  "nav_only": 27
+ },
+ "via": {
+  "html": 703,
+  "reader": 16,
+  "ai-extract": 4,
+  "mediawiki-api-parse": 24
+ },
+ "ai": {
+  "rescue_attempts": 31,
+  "rescued": 4,
+  "rescued_pct_of_attempts": 0.4,
+  "verify_asked": 4,
+  "verify_ok": 4
+ },
+ "failure_taxonomy": {
+  "other_http": 69,
+  "hard_cdn_wall_403": 148,
+  "timeout": 14,
+  "dead_dns": 14,
+  "tls": 5,
+  "rate_limited_429": 6
+ },
+ "per_category": {
+  "bot-walled": {
+   "attempted": 46,
+   "ok": 28,
+   "ai_rescued": 0
+  },
+  "gov-edu": {
+   "attempted": 59,
+   "ok": 43,
+   "ai_rescued": 0
+  },
+  "java": {
+   "attempted": 50,
+   "ok": 47,
+   "ai_rescued": 0
+  },
+  "js-spa": {
+   "attempted": 59,
+   "ok": 53,
+   "ai_rescued": 0
+  },
+  "legacy-encoding": {
+   "attempted": 29,
+   "ok": 11,
+   "ai_rescued": 1
+  },
+  "media": {
+   "attempted": 27,
+   "ok": 11,
+   "ai_rescued": 0
+  },
+  "news-africa": {
+   "attempted": 30,
+   "ok": 22,
+   "ai_rescued": 0
+  },
+  "news-arabic": {
+   "attempted": 20,
+   "ok": 12,
+   "ai_rescued": 0
+  },
+  "news-asia": {
+   "attempted": 42,
+   "ok": 34,
+   "ai_rescued": 0
+  },
+  "news-br": {
+   "attempted": 22,
+   "ok": 20,
+   "ai_rescued": 0
+  },
+  "news-cn-gb": {
+   "attempted": 38,
+   "ok": 34,
+   "ai_rescued": 0
+  },
+  "news-en": {
+   "attempted": 55,
+   "ok": 35,
+   "ai_rescued": 0
+  },
+  "news-eu": {
+   "attempted": 55,
+   "ok": 39,
+   "ai_rescued": 0
+  },
+  "news-india": {
+   "attempted": 32,
+   "ok": 21,
+   "ai_rescued": 0
+  },
+  "news-latam": {
+   "attempted": 36,
+   "ok": 22,
+   "ai_rescued": 0
+  },
+  "news-ru": {
+   "attempted": 28,
+   "ok": 21,
+   "ai_rescued": 0
+  },
+  "news-tw-hk": {
+   "attempted": 24,
+   "ok": 19,
+   "ai_rescued": 2
+  },
+  "old-static": {
+   "attempted": 46,
+   "ok": 28,
+   "ai_rescued": 1
+  },
+  "p3-curated": {
+   "attempted": 165,
+   "ok": 135,
+   "ai_rescued": 0
+  },
+  "php": {
+   "attempted": 48,
+   "ok": 35,
+   "ai_rescued": 0
+  },
+  "python-docs": {
+   "attempted": 47,
+   "ok": 44,
+   "ai_rescued": 0
+  },
+  "reference": {
+   "attempted": 45,
+   "ok": 33,
+   "ai_rescued": 0
+  }
+ },
+ "ai_deep": {
+  "design": "always-mode rescue on every nav_only page + a deterministic sample of 40 ok pages (gate honesty control); accepted rescues get one grounded verify question",
+  "attempted": 67,
+  "gates": {
+   "rejected": 50,
+   "fetch_failed": 2,
+   "none": 14,
+   "accepted": 1
+  },
+  "by_source": {
+   "nav_only": {
+    "rejected": 13,
+    "fetch_failed": 1,
+    "none": 13
+   },
+   "ok_sample": {
+    "rejected": 37,
+    "accepted": 1,
+    "none": 1,
+    "fetch_failed": 1
+   }
+  },
+  "verify_ok": 1,
+  "examples": [
+   {
+    "url": "https://poppler.freedesktop.org/",
+    "chars": "0->3915",
+    "answer": "This page provides information, downloads, documentation, and development details for Poppler, a PDF rendering library based on the xpdf-3.0 code base."
+   }
+  ]
+ }
+}

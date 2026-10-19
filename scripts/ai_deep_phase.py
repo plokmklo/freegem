@@ -27,6 +27,7 @@ import os
 import random
 import sqlite3
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,6 +40,7 @@ sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 import ai_scrape_bench as bench  # noqa: E402
+
 from freegem.ai_scrape import ai_scrape  # noqa: E402
 from freegem.config import BridgeConfig  # noqa: E402
 
@@ -71,7 +73,9 @@ def selection(con: sqlite3.Connection) -> tuple[list[dict], list[dict]]:
             "SELECT url, chars FROM results WHERE kind='ok' AND quality='nav_only'"
         )
     ]
-    ok_urls = [r[0] for r in con.execute("SELECT url FROM results WHERE kind='ok' AND quality='ok'")]
+    ok_urls = [
+        r[0] for r in con.execute("SELECT url FROM results WHERE kind='ok' AND quality='ok'")
+    ]
     sample = sorted(random.Random(SEED).sample(ok_urls, min(OK_SAMPLE, len(ok_urls))))
     ok_rows = [{"url": u, "chars": 0, "source": "ok_sample"} for u in sample]
     return nav_only, ok_rows
@@ -84,7 +88,10 @@ def main() -> int:
     nav_only, ok_sample = selection(con)
     deep_done = {r[0] for r in con.execute("SELECT url FROM ai_deep")}
     todo = [s for grp in (nav_only, ok_sample) for s in grp if s["url"] not in deep_done]
-    print(f"deep phase: nav_only={len(nav_only)} ok_sample={len(ok_sample)} todo={len(todo)}", flush=True)
+    print(
+        f"deep phase: nav_only={len(nav_only)} ok_sample={len(ok_sample)} todo={len(todo)}",
+        flush=True,
+    )
     if not todo:
         fold(con)
         print("AI-DEEP DONE", flush=True)
@@ -137,7 +144,12 @@ def main() -> int:
     return 3
 
 
-def deep_one(cfg: BridgeConfig, throttle: AiThrottle, lock: threading.Lock, seed: dict) -> dict:
+def deep_one(
+    cfg: BridgeConfig,
+    throttle: bench.AiThrottle,
+    lock: threading.Lock,
+    seed: dict,
+) -> dict:
     url = seed["url"]
 
     def complete(prompt: str) -> str:
@@ -203,7 +215,13 @@ def fold(con: sqlite3.Connection) -> None:
         bench.build_report()
     report = json.loads(report_path.read_text(encoding="utf-8"))
     rows = [
-        dict(zip([c[0] for c in con.execute("SELECT * FROM ai_deep LIMIT 1").description], r))
+        dict(
+            zip(
+                [c[0] for c in con.execute("SELECT * FROM ai_deep LIMIT 1").description],
+                r,
+                strict=False,
+            )
+        )
         for r in con.execute("SELECT * FROM ai_deep")
     ]
     gates = Counter(r["gate"] for r in rows)
@@ -222,7 +240,11 @@ def fold(con: sqlite3.Connection) -> None:
         "by_source": {k: dict(v) for k, v in sorted(by_source.items())},
         "verify_ok": len(verified),
         "examples": [
-            {"url": r["url"], "chars": f"{r['chars_before']}->{r['chars_after']}", "answer": (r["answer"] or "")[:160]}
+            {
+                "url": r["url"],
+                "chars": f"{r['chars_before']}->{r['chars_after']}",
+                "answer": (r["answer"] or "")[:160],
+            }
             for r in verified[:6]
         ],
     }

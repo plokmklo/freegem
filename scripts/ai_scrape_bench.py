@@ -27,7 +27,6 @@ import sqlite3
 import sys
 import threading
 import time
-import urllib.parse
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,13 +39,10 @@ sys.path.insert(0, str(REPO))
 from freegem.ai_scrape import AiMemory, ai_scrape  # noqa: E402
 from freegem.config import BridgeConfig  # noqa: E402
 from freegem.gemini import RateLimitError, generate  # noqa: E402
-from freegem.web_scraper import extraction_quality  # noqa: E402
 
 SEEDS = REPO / "scripts" / "p3_seeds_1000.jsonl"
 DB = REPO / "scripts" / "ai_bench_state.db"
-REPORT = Path(
-    os.environ.get("AI_BENCH_REPORT", str(REPO / "scripts" / "ai_bench_report.json"))
-)
+REPORT = Path(os.environ.get("AI_BENCH_REPORT", str(REPO / "scripts" / "ai_bench_report.json")))
 
 FETCH_WORKERS = int(os.environ.get("AI_BENCH_WORKERS", "12"))
 TIME_BUDGET = float(os.environ.get("AI_BENCH_TIME_BUDGET", "520"))
@@ -269,8 +265,16 @@ def main() -> int:
 
 
 def build_report() -> None:
-    rows = [dict(zip([c[0] for c in con.execute("SELECT * FROM results LIMIT 1").description], r))
-            for r in con.execute("SELECT * FROM results")]
+    rows = [
+        dict(
+            zip(
+                [c[0] for c in con.execute("SELECT * FROM results LIMIT 1").description],
+                r,
+                strict=False,
+            )
+        )
+        for r in con.execute("SELECT * FROM results")
+    ]
     n = len(rows)
     ok_rows = [r for r in rows if r["kind"] == "ok"]
     errs = [r for r in rows if r["kind"] == "error"]
@@ -281,9 +285,7 @@ def build_report() -> None:
         via[r["via"]] = via.get(r["via"], 0) + 1
     rescued = [r for r in ok_rows if r["via"] == "ai-extract"]
     verify_ok = sum(1 for r in rescued if r["verify_ok"])
-    rescue_attempts = sum(
-        1 for r in ok_rows if "ai-extract attempted" in (r["ai_notes"] or "")
-    )
+    rescue_attempts = sum(1 for r in ok_rows if "ai-extract attempted" in (r["ai_notes"] or ""))
     taxonomy: dict[str, int] = {}
     for r in errs:
         e = (r["error"] or "").lower()
