@@ -1,8 +1,10 @@
 """Tests for PDF/DOCX adapters, rich metadata extraction, and Markdown conversion."""
 
 import unittest
+from unittest.mock import patch
 
-from freegem.adapters import parse_docx, parse_pdf
+from freegem.adapters import parse_document_with_ai, parse_docx, parse_pdf
+from freegem.config import BridgeConfig
 from freegem.crawler.extract import extract_metadata, html_to_markdown
 from freegem.crawler.hardening import HtmlDom
 
@@ -18,6 +20,18 @@ class TestAdaptersAndExtractors(unittest.TestCase):
         res = parse_docx(b"not a real zip")
         self.assertEqual(res.doc_type, "docx")
         self.assertIn("Failed", res.text)
+
+    @patch("freegem.gemini.generate", return_value="AI document answer")
+    def test_parse_document_with_ai(self, mock_gen):
+        cfg = BridgeConfig()
+        doc_res, ai_ans = parse_document_with_ai(
+            b"%PDF-1.4 ... (Hello World) Tj ...",
+            "test.pdf",
+            cfg=cfg,
+            question="What is in this PDF?",
+        )
+        self.assertEqual(doc_res.doc_type, "pdf")
+        self.assertEqual(ai_ans, "AI document answer")
 
     def test_extract_metadata(self):
         html_doc = """

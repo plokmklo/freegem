@@ -237,7 +237,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
                 elif job.type == "playwright":
                     from .playwright_fetcher import PlaywrightOptions, fetch_with_playwright
                     opts = PlaywrightOptions(**job.params)
-                    pw_res = fetch_with_playwright(opts)
+                    pw_res = fetch_with_playwright(opts, cfg=cfg)
                     art_ids = []
                     if pw_res.screenshot_path and os.path.exists(pw_res.screenshot_path):
                         art = GLOBAL_JOB_MANAGER.save_artifact(job.id, "screenshot.png", "image/png", pw_res.screenshot_path)
@@ -256,12 +256,14 @@ class GeminiHandler(BaseHTTPRequestHandler):
                         error=pw_res.error,
                     )
                 elif job.type == "document":
-                    from .adapters import parse_document
+                    from .adapters import parse_document_with_ai
                     doc_data = job.params.get("data", "").encode("utf-8") if isinstance(job.params.get("data"), str) else job.params.get("data", b"")
                     filename = job.params.get("filename", "")
-                    doc_res = parse_document(doc_data, filename)
+                    q = job.params.get("question")
+                    a_prompt = job.params.get("ai_prompt")
+                    doc_res, ai_ans = parse_document_with_ai(doc_data, filename, cfg=cfg, question=q, ai_prompt=a_prompt)
                     GLOBAL_JOB_MANAGER.update_job_status(
-                        job.id, "completed", result={"text": doc_res.text, "markdown": doc_res.markdown, "metadata": doc_res.metadata}
+                        job.id, "completed", result={"text": doc_res.text, "markdown": doc_res.markdown, "metadata": doc_res.metadata, "ai_answer": ai_ans}
                     )
                 else:
                     GLOBAL_JOB_MANAGER.update_job_status(job.id, "failed", error=f"Unknown job type {job.type!r}")

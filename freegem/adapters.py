@@ -176,3 +176,35 @@ def parse_document(data_or_path: bytes | str, filename_or_mime: str = "") -> Doc
     if "docx" in lower_hint or lower_hint.endswith(".docx"):
         return parse_docx(data_or_path)
     return parse_pdf(data_or_path)
+
+
+def parse_document_with_ai(
+    data_or_path: bytes | str,
+    filename_or_mime: str = "",
+    *,
+    cfg: Any | None = None,
+    question: str | None = None,
+    ai_prompt: str | None = None,
+) -> tuple[DocumentResult, str | None]:
+    """Parse document and optionally run AI assistance on its content."""
+    doc_res = parse_document(data_or_path, filename_or_mime)
+    ai_answer = None
+
+    prompt_task = ai_prompt or question
+    if prompt_task and cfg is not None:
+        try:
+            from .gemini import generate
+            from .models import DEFAULT_MODEL, resolve_model
+
+            prompt = (
+                f"You are an AI document analysis assistant.\n\n"
+                f"Task: {prompt_task}\n\n"
+                f"Document Type: {doc_res.doc_type.upper()}\n"
+                f"Document Text:\n{doc_res.markdown[:50000]}\n"
+            )
+            _name, mode_id, think, _err, _extra = resolve_model(DEFAULT_MODEL)
+            ai_answer = generate(cfg, prompt, mode_id or 0, think or 0).strip()
+        except Exception as exc:
+            ai_answer = f"AI extraction error: {exc}"
+
+    return doc_res, ai_answer

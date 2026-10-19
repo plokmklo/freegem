@@ -1,8 +1,8 @@
-"""Optional Playwright HTTP-first / browser-fallback rendering.
+"""Optional Playwright HTTP-first / browser-fallback rendering with AI assistance.
 
 Provides browser-assisted rendering for JS-heavy web pages, with isolated
-browser contexts, flexible waits, screenshots, PDFs, traces, and reliable
-resource cleanup.
+browser contexts, flexible waits, screenshots, PDFs, traces, reliable
+resource cleanup, and AI-assisted content extraction using FreeGem.
 """
 
 from __future__ import annotations
@@ -38,6 +38,8 @@ class PlaywrightOptions:
     capture_trace: bool = False
     trace_path: str | None = None
     extra_headers: dict[str, str] = field(default_factory=dict)
+    question: str | None = None
+    ai_prompt: str | None = None
 
 
 @dataclass
@@ -56,6 +58,7 @@ class PlaywrightResult:
     elapsed_ms: int = 0
     ok: bool = True
     error: str | None = None
+    ai_answer: str | None = None
 
 
 def is_playwright_available() -> bool:
@@ -67,11 +70,8 @@ def is_playwright_available() -> bool:
         return False
 
 
-def fetch_with_playwright(opts: PlaywrightOptions) -> PlaywrightResult:
-    """Render a page using a headless Playwright browser context.
-
-    Raises RuntimeError if Playwright is not installed.
-    """
+def fetch_with_playwright(opts: PlaywrightOptions, cfg: BridgeConfig | None = None) -> PlaywrightResult:
+    """Render a page using a headless Playwright browser context, optionally running AI assistance."""
     if not is_playwright_available():
         raise RuntimeError("Playwright package is not installed. Install with `pip install playwright`.")
 
@@ -144,6 +144,28 @@ def fetch_with_playwright(opts: PlaywrightOptions) -> PlaywrightResult:
                 if opts.capture_trace and trace_file:
                     context.tracing.stop(path=trace_file)
 
+                # AI assistance extraction
+                ai_answer = None
+                prompt_task = opts.ai_prompt or opts.question
+                if prompt_task and cfg is not None:
+                    try:
+                        from .crawler.extract import html_to_markdown
+                        from .gemini import generate
+                        from .models import DEFAULT_MODEL, resolve_model
+
+                        clean_md = html_to_markdown(html_content, base_url=final_url)
+                        prompt = (
+                            f"You are an AI web scraping assistant analyzing fetched page content.\n\n"
+                            f"Task: {prompt_task}\n\n"
+                            f"Page Title: {title}\n"
+                            f"Page URL: {final_url}\n\n"
+                            f"Page Content:\n{clean_md[:50000]}\n"
+                        )
+                        _name, mode_id, think, _err, _extra = resolve_model(DEFAULT_MODEL)
+                        ai_answer = generate(cfg, prompt, mode_id or 0, think or 0).strip()
+                    except Exception as exc:
+                        ai_answer = f"AI extraction error: {exc}"
+
                 elapsed = int((time.monotonic() - started) * 1000)
                 return PlaywrightResult(
                     url=opts.url,
@@ -157,6 +179,7 @@ def fetch_with_playwright(opts: PlaywrightOptions) -> PlaywrightResult:
                     trace_path=trace_file if opts.capture_trace else None,
                     elapsed_ms=elapsed,
                     ok=status < 400,
+                    ai_answer=ai_answer,
                 )
             finally:
                 context.close()
@@ -188,13 +211,10 @@ def fetch_http_first(
     force_browser: bool = False,
     playwright_opts: PlaywrightOptions | None = None,
 ) -> tuple[FetchOutcome | None, PlaywrightResult | None]:
-    """Fetch URL HTTP-first, falling back to Playwright if needed or forced.
-
-    Returns (http_outcome, playwright_result). One or both will be populated.
-    """
+    """Fetch URL HTTP-first, falling back to Playwright if needed or forced."""
     if force_browser and is_playwright_available():
         opts = playwright_opts or PlaywrightOptions(url=url)
-        res = fetch_with_playwright(opts)
+        res = fetch_with_playwright(opts, cfg=cfg)
         return None, res
 
     # 1. Standard guarded HTTP fetch
@@ -203,7 +223,7 @@ def fetch_http_first(
     # 2. Check if browser fallback is needed
     if is_playwright_available() and should_fallback_to_browser(http_outcome):
         opts = playwright_opts or PlaywrightOptions(url=url)
-        res = fetch_with_playwright(opts)
+        res = fetch_with_playwright(opts, cfg=cfg)
         return http_outcome, res
 
     return http_outcome, None
