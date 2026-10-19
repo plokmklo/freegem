@@ -98,6 +98,20 @@ DEFAULT_CONFIG: Mapping[str, Any] = MappingProxyType(
         # probabilistic per NON_GOALS. `freegem scrape URL --ai-clean`
         # enables it per run.
         "smart_fetch_ai_clean": False,
+        # Optional tls-browser rung in the smart-fetch ladder (v2.12.0): the
+        # same URL through curl_cffi with Chrome's TLS/HTTP2 fingerprint.
+        # OFF by default -- presenting a fingerprinted hello is an explicit
+        # user choice, never a silent fallback. Needs the optional
+        # `curl_cffi` dependency; honors `proxy`; no header overrides, no
+        # CAPTCHA solving, no identity rotation (NON_GOALS still hold).
+        "smart_fetch_tls_browser": False,
+        # Optional flaresolverr rung (v2.12.0): endpoint URL of a
+        # FlareSolverr instance the USER runs (e.g.
+        # "http://127.0.0.1:8191"). Empty string = the rung does not
+        # exist. FreeGem ships no solver and never starts one; it only
+        # talks the v1 API of the service the user points it at, and the
+        # result is labeled via="flaresolverr" end to end.
+        "smart_fetch_flaresolverr": "",
         # SSRF guard for network fetches: scheme + public-IP checks, pinned
         # dial, redirect re-checks. OFF by default -- validation is a FEATURE,
         # not a gate (user directive 2026-10-17): plain `scrape` should just
@@ -173,6 +187,7 @@ _BOOL_FIELDS = frozenset(
         "smart_fetch_ai",
         "smart_fetch_browser_render",
         "smart_fetch_ai_clean",
+        "smart_fetch_tls_browser",
         "guard",
     }
 )
@@ -188,6 +203,7 @@ _STR_FIELDS = frozenset(
         "auth_user",
         "xsrf_token",
         "brave_api_key",
+        "smart_fetch_flaresolverr",
         "reader_api_key",
         "api_key",
         "job_db",
@@ -318,6 +334,8 @@ class BridgeConfig:
     smart_fetch_ai: bool = DEFAULT_CONFIG["smart_fetch_ai"]
     smart_fetch_browser_render: bool = DEFAULT_CONFIG["smart_fetch_browser_render"]
     smart_fetch_ai_clean: bool = DEFAULT_CONFIG["smart_fetch_ai_clean"]
+    smart_fetch_tls_browser: bool = DEFAULT_CONFIG["smart_fetch_tls_browser"]
+    smart_fetch_flaresolverr: str = DEFAULT_CONFIG["smart_fetch_flaresolverr"]
     guard: bool = DEFAULT_CONFIG["guard"]
     api_key: str | None = DEFAULT_CONFIG["api_key"]
     brave_api_key: str = DEFAULT_CONFIG["brave_api_key"]
@@ -409,6 +427,8 @@ class BridgeConfig:
             "smart_fetch": self.smart_fetch,
             "smart_fetch_ai": self.smart_fetch_ai,
             "smart_fetch_browser_render": self.smart_fetch_browser_render,
+            "smart_fetch_tls_browser": self.smart_fetch_tls_browser,
+            "smart_fetch_flaresolverr": self.smart_fetch_flaresolverr,
             "guard": self.guard,
             # Booleans and paths only; never the token itself.
             "xsrf_token_set": bool(self.xsrf_token),

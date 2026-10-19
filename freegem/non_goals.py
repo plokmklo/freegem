@@ -50,17 +50,23 @@ NON_GOALS: tuple[NonGoal, ...] = (
         ),
     ),
     NonGoal(
-        label="No CAPTCHA solving, anti-bot bypass, stealth, or fingerprint evasion",
+        label="No CAPTCHA solving, identity rotation, or stealth by default",
         assumption=(
             "A headless crawler that slips past CAPTCHAs, bot walls, and "
-            "bot-detection fingerprints."
+            "bot-detection fingerprints out of the box."
         ),
         reality=(
-            "FreeGem fetches politely, like a normal client: honest user "
-            "agent, per-host rate limits, no CAPTCHA solving, no stealth "
-            "modes, no fingerprint evasion. That is a design stance, not a "
-            "missing feature -- if a site hard-blocks you, FreeGem reports "
-            "the failure instead of attacking the site."
+            "FreeGem fetches politely by default: honest user agent, "
+            "per-host rate limits, no CAPTCHA solving, no IP rotation, no "
+            "credential bypass. Two opt-in read paths go further, but only "
+            "when you switch them on: a tls-browser rung (Chrome's TLS "
+            "fingerprint through curl_cffi, config "
+            "smart_fetch_tls_browser) and a FlareSolverr adapter that "
+            "talks to a solver service you run yourself (config "
+            "smart_fetch_flaresolverr). Neither is enabled by default, "
+            "neither answers CAPTCHAs, and a site that still refuses is "
+            "reported as refused -- honestly, with the full ladder "
+            "taxonomy."
         ),
     ),
     NonGoal(

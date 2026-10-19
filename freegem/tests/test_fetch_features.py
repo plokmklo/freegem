@@ -449,7 +449,16 @@ class BrowserRenderRungTests(unittest.TestCase):
         from freegem.smart_fetch import STRATEGIES
 
         self.assertEqual(
-            STRATEGIES, ("browser-headers", "reader", "browser-render", "wayback", "ai-search")
+            STRATEGIES,
+            (
+                "browser-headers",
+                "tls-browser",
+                "reader",
+                "browser-render",
+                "flaresolverr",
+                "wayback",
+                "ai-search",
+            ),
         )
 
     def test_render_rescues_a_page_the_http_rungs_cannot_read(self) -> None:
@@ -525,7 +534,13 @@ class BrowserRenderRungTests(unittest.TestCase):
             "no rung -- and no fetch -- may run once the budget is gone",
         )
         message = str(caught.exception)
-        self.assertEqual(message.count("ladder budget was exhausted"), len(STRATEGIES))
+        # The walk is the config's allowed rungs: all of STRATEGIES minus
+        # the two opt-in rungs (tls-browser, flaresolverr) this test's
+        # default config leaves gated off.
+        self.assertEqual(
+            message.count("ladder budget was exhausted"),
+            len(STRATEGIES) - 2,
+        )
         self.assertIn("browser-render: skipped", message)
 
     def test_rung_is_time_bounded(self) -> None:

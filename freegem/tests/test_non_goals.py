@@ -11,7 +11,7 @@ class NonGoalsDataTests(unittest.TestCase):
         self.assertGreaterEqual(len(labels), 8)
         self.assertIn("No guaranteed scraping SLA", labels)
         self.assertIn(
-            "No CAPTCHA solving, anti-bot bypass, stealth, or fingerprint evasion",
+            "No CAPTCHA solving, identity rotation, or stealth by default",
             labels,
         )
         self.assertIn("No free proxy pool or managed browser fleet", labels)

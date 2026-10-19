@@ -26,16 +26,20 @@ including partial content and hard failures with their status codes — so
 your code can react to reality instead of an assumption. But nothing about
 an arbitrary third-party site is guaranteed, by FreeGem or by anyone.
 
-## 2. No CAPTCHA solving, anti-bot bypass, stealth, or fingerprint evasion
+## 2. No CAPTCHA solving, identity rotation, or stealth by default
 
 **The assumption:** a crawler that slips past CAPTCHAs, bot walls, and
-bot-detection fingerprints.
+bot-detection fingerprints out of the box.
 
-**The reality:** FreeGem fetches politely, like a normal client — honest
-user agent, per-host rate limits, no CAPTCHA solving, no stealth modes, no
-fingerprint evasion. This is a design stance, not a missing feature. If a
-site hard-blocks your traffic, FreeGem reports the failure and moves on
-rather than attacking the site.
+**The reality:** FreeGem fetches politely by default — honest user agent,
+per-host rate limits, no CAPTCHA solving, no IP rotation, no credential
+bypass. Two opt-in read paths go further, but only when you switch them
+on: a **tls-browser** rung (Chrome's TLS fingerprint through curl_cffi,
+config `smart_fetch_tls_browser`) and a **flaresolverr** adapter that
+talks to a solver service you run yourself (config
+`smart_fetch_flaresolverr`). Neither is enabled by default, neither
+answers CAPTCHAs, and a site that still refuses is reported as refused —
+honestly, with the full ladder taxonomy.
 
 ## 3. No free proxy pool or managed browser fleet
 
