@@ -1,6 +1,6 @@
 {
  "campaign": "AI-assisted smart scraping — freegem 2.10.0 (8aadfca)",
- "finished_utc": "2026-10-19T11:39:17.810382+00:00",
+ "finished_utc": "2026-10-19T11:15:53.880394+00:00",
  "totals": {
   "attempted": 1003,
   "readable": 747,
@@ -145,15 +145,26 @@
   }
  },
  "ai_deep": {
-  "design": "always-mode rescue on every nav_only page + a deterministic sample of 40 ok pages (gate honesty control); accepted rescues get one grounded verify question",
-  "attempted": 67,
+  "design": "always-mode rescue on every nav_only page + a deterministic sample of 40 ok pages (gate honesty control) + up to 25 readable pages per JS-heavy category (js-spa, media, bot-walled); accepted rescues get one grounded verify question",
+  "attempted": 121,
   "gates": {
-   "rejected": 50,
+   "rejected": 98,
    "fetch_failed": 2,
-   "none": 14,
+   "none": 20,
    "accepted": 1
   },
   "by_source": {
+   "js_heavy:bot-walled": {
+    "rejected": 17,
+    "none": 5
+   },
+   "js_heavy:js-spa": {
+    "rejected": 24
+   },
+   "js_heavy:media": {
+    "rejected": 7,
+    "none": 1
+   },
    "nav_only": {
     "rejected": 13,
     "fetch_failed": 1,
@@ -172,6 +183,327 @@
     "url": "https://poppler.freedesktop.org/",
     "chars": "0->3915",
     "answer": "This page provides information, downloads, documentation, and development details for Poppler, a PDF rendering library based on the xpdf-3.0 code base."
+   }
+  ]
+ },
+ "ai_wall": {
+  "design": "every phase-A failure re-attempted through the 2.11.0 AI wall rung (search-grounded, citation-required, honesty-floored; smart=False since the non-AI ladder already had its chance in phase A); accepted reads get one grounded verify question",
+  "attempted": 256,
+  "gates": {
+   "nonanswer": 103,
+   "accepted": 100,
+   "unexpected_ok": 38,
+   "none": 1,
+   "not_wall_kind": 1,
+   "skipped_our_refusal": 13
+  },
+  "accepted_pct": 39.1,
+  "verify_ok": 100,
+  "per_category": {
+   "bot-walled": {
+    "attempted": 18,
+    "accepted": 8
+   },
+   "gov-edu": {
+    "attempted": 16,
+    "accepted": 9
+   },
+   "java": {
+    "attempted": 3,
+    "accepted": 1
+   },
+   "js-spa": {
+    "attempted": 6,
+    "accepted": 2
+   },
+   "legacy-encoding": {
+    "attempted": 18,
+    "accepted": 4
+   },
+   "media": {
+    "attempted": 16,
+    "accepted": 8
+   },
+   "news-africa": {
+    "attempted": 8,
+    "accepted": 1
+   },
+   "news-arabic": {
+    "attempted": 8,
+    "accepted": 1
+   },
+   "news-asia": {
+    "attempted": 8,
+    "accepted": 4
+   },
+   "news-br": {
+    "attempted": 2,
+    "accepted": 1
+   },
+   "news-cn-gb": {
+    "attempted": 4,
+    "accepted": 2
+   },
+   "news-en": {
+    "attempted": 20,
+    "accepted": 2
+   },
+   "news-eu": {
+    "attempted": 16,
+    "accepted": 2
+   },
+   "news-india": {
+    "attempted": 11,
+    "accepted": 6
+   },
+   "news-latam": {
+    "attempted": 14,
+    "accepted": 8
+   },
+   "news-ru": {
+    "attempted": 7,
+    "accepted": 1
+   },
+   "news-tw-hk": {
+    "attempted": 5,
+    "accepted": 2
+   },
+   "old-static": {
+    "attempted": 18,
+    "accepted": 11
+   },
+   "p3-curated": {
+    "attempted": 30,
+    "accepted": 9
+   },
+   "php": {
+    "attempted": 13,
+    "accepted": 9
+   },
+   "python-docs": {
+    "attempted": 3,
+    "accepted": 1
+   },
+   "reference": {
+    "attempted": 12,
+    "accepted": 8
+   }
+  },
+  "examples": [
+   {
+    "url": "https://apnews.com/",
+    "chars": 353,
+    "answer": "Based on the provided page content, the Associated Press website is about providing the latest headlines, breaking news, videos, and independent journalism from"
+   },
+   {
+    "url": "https://www.itv.com/news",
+    "chars": 1211,
+    "answer": "This page is about the top news stories and current events featured on ITV News, covering international developments, UK and Irish news, politics, and sports up"
+   },
+   {
+    "url": "https://exame.com/",
+    "chars": 1195,
+    "answer": "This page is about the main readable content of the Exame website, which includes sections covering breaking news, business, economics, careers, investment, tec"
+   },
+   {
+    "url": "https://www.tvn24.pl/",
+    "chars": 734,
+    "answer": "This page is about providing live news updates, current events, political developments, and reports from Poland and around the world on the [TVN24](https://tvn2"
+   },
+   {
+    "url": "https://www.lsm.lv/",
+    "chars": 1127,
+    "answer": "Based on the provided page content, this page is about a selection of current news headlines in Latvia covering topics such as government formation, internation"
+   },
+   {
+    "url": "https://www.philstar.com/",
+    "chars": 1017,
+    "answer": "Based on the provided page content and verified source data, this page is the digital portal of the STAR Group of Publications, delivering the latest Philippine"
+   },
+   {
+    "url": "https://www.thairath.co.th/",
+    "chars": 352,
+    "answer": "Based on the provided page content, the page is about Thairath, which covers up-to-date news, sports, entertainment, health, food, travel, lottery results, horo"
+   },
+   {
+    "url": "https://www.mk.co.kr/",
+    "chars": 2126,
+    "answer": "Based on the provided page content, the page serves as the main homepage for the Maeil Business Newspaper, featuring current news headlines on South Korean poli"
+   }
+  ]
+ },
+ "readable_summary": {
+  "phase_a_readable": 747,
+  "ai_wall_rescued": 100,
+  "transient_walls_passed_on_retry": 38,
+  "readable_after_2_11_0": 885,
+  "total": 1003,
+  "honest_nonanswers": 103,
+  "note": "ai-wall-rescued pages are AI-mediated reads with citations (via=ai-wall-rescue), never presented as verbatim fetches; all 100 verified with grounded answers"
+ },
+ "tls_phase": {
+  "design": "wall-class failures (HTTP-status errors, minus AI-wall-phase rescues) re-attempted through the standard smart-fetch ladder with the opt-in 2.12.0 tls-browser rung enabled (smart_fetch_tls_browser=True); no AI calls; every result carries the full per-rung taxonomy",
+  "attempted": 141,
+  "gate_counts": {
+   "refused": 129,
+   "tls_win": 11,
+   "ladder_win": 1
+  },
+  "wins": 12,
+  "win_via": {
+   "tls-browser": 11,
+   "html": 1
+  },
+  "per_category": {
+   "news-en": {
+    "attempted": 18,
+    "won": 2
+   },
+   "news-br": {
+    "attempted": 1,
+    "won": 1
+   },
+   "news-eu": {
+    "attempted": 14,
+    "won": 2
+   },
+   "news-asia": {
+    "attempted": 3,
+    "won": 0
+   },
+   "news-cn-gb": {
+    "attempted": 2,
+    "won": 1
+   },
+   "news-tw-hk": {
+    "attempted": 3,
+    "won": 0
+   },
+   "news-ru": {
+    "attempted": 6,
+    "won": 0
+   },
+   "news-arabic": {
+    "attempted": 6,
+    "won": 1
+   },
+   "news-india": {
+    "attempted": 5,
+    "won": 1
+   },
+   "news-latam": {
+    "attempted": 5,
+    "won": 0
+   },
+   "news-africa": {
+    "attempted": 7,
+    "won": 0
+   },
+   "old-static": {
+    "attempted": 5,
+    "won": 0
+   },
+   "php": {
+    "attempted": 4,
+    "won": 1
+   },
+   "java": {
+    "attempted": 2,
+    "won": 1
+   },
+   "js-spa": {
+    "attempted": 4,
+    "won": 0
+   },
+   "python-docs": {
+    "attempted": 1,
+    "won": 0
+   },
+   "gov-edu": {
+    "attempted": 7,
+    "won": 0
+   },
+   "reference": {
+    "attempted": 4,
+    "won": 0
+   },
+   "bot-walled": {
+    "attempted": 10,
+    "won": 0
+   },
+   "media": {
+    "attempted": 8,
+    "won": 1
+   },
+   "legacy-encoding": {
+    "attempted": 8,
+    "won": 0
+   },
+   "p3-curated": {
+    "attempted": 18,
+    "won": 1
+   }
+  },
+  "examples": [
+   {
+    "url": "https://thehill.com/",
+    "via": "tls-browser",
+    "chars": 19033
+   },
+   {
+    "url": "https://www.washingtonpost.com/",
+    "via": "tls-browser",
+    "chars": 12683
+   },
+   {
+    "url": "https://noticias.uol.com.br/",
+    "via": "tls-browser",
+    "chars": 6177
+   },
+   {
+    "url": "https://www.lesoir.be/",
+    "via": "tls-browser",
+    "chars": 20344
+   },
+   {
+    "url": "https://www.tagesanzeiger.ch/",
+    "via": "tls-browser",
+    "chars": 17279
+   },
+   {
+    "url": "https://www.almodon.com/",
+    "via": "tls-browser",
+    "chars": 5839
+   },
+   {
+    "url": "https://www.taihainet.com/",
+    "via": "html",
+    "chars": 2212
+   },
+   {
+    "url": "https://anandabazar.com/",
+    "via": "tls-browser",
+    "chars": 11233
+   },
+   {
+    "url": "https://magento.com/",
+    "via": "tls-browser",
+    "chars": 20174
+   },
+   {
+    "url": "https://www.slf4j.org/",
+    "via": "tls-browser",
+    "chars": 1135
+   },
+   {
+    "url": "https://www.pexels.com/",
+    "via": "tls-browser",
+    "chars": 2755
+   },
+   {
+    "url": "https://www.iso.org/",
+    "via": "tls-browser",
+    "chars": 4330
    }
   ]
  }

@@ -87,7 +87,7 @@ def tls_one(cfg: BridgeConfig, seed: dict) -> dict:
         "ts": datetime.now(timezone.utc).isoformat(),
     }
     try:
-        res = scrape_page(cfg, url, max_chars=50_000)
+        res = scrape_page(cfg, url, max_chars=50_000, smart=True)
     except ScrapeError as exc:
         # The full honest taxonomy (per-rung refusals) is the note.
         row["notes"] = f"{exc}"[:400]
