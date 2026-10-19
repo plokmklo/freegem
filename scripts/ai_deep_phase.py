@@ -13,7 +13,10 @@ This pass:
      ACCEPTED rescue gets one grounded verify question;
   2. a deterministic random sample of 40 `ok`-graded pages -> always-mode
      too (expect the gate to reject most — that IS the honesty result);
-  3. everything lands in the ai_deep table (resumable) and folds into
+  3. JS-HEAVY categories (js-spa, media, bot-walled) — the populations
+     where extraction quality is structurally worst — sampled to at most
+     25 readable pages per category, always-mode as well;
+  4. everything lands in the ai_deep table (resumable) and folds into
      ai_scrape_report.json as an "ai_deep" section.
 
 All model calls share the campaign's global throttle (min interval +
@@ -27,7 +30,6 @@ import os
 import random
 import sqlite3
 import sys
-import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,6 +41,8 @@ if not (REPO / "freegem" / "__init__.py").exists():  # running from outside a ch
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(SCRIPTS_DIR))
 
+import threading  # noqa: E402
+
 import ai_scrape_bench as bench  # noqa: E402
 
 from freegem.ai_scrape import ai_scrape  # noqa: E402
@@ -48,6 +52,11 @@ DB_PATH = bench.DB
 TIME_BUDGET = float(os.environ.get("AI_DEEP_TIME_BUDGET", "420"))
 OK_SAMPLE = 40
 SEED = 42
+#: JS-heavy categories: the populations where deterministic extraction is
+#: structurally worst (JS shells, media chrome, bot-wall remnants), so the
+#: always-mode rescue gets exercised where it matters most.
+JS_HEAVY_CATEGORIES = ("js-spa", "media", "bot-walled")
+JS_HEAVY_PER_CATEGORY = 25
 
 DEEP_SCHEMA = """
 CREATE TABLE IF NOT EXISTS ai_deep (
@@ -66,7 +75,7 @@ CREATE TABLE IF NOT EXISTS ai_deep (
 """
 
 
-def selection(con: sqlite3.Connection) -> tuple[list[dict], list[dict]]:
+def selection(con: sqlite3.Connection) -> tuple[list[dict], list[dict], list[dict]]:
     nav_only = [
         {"url": r[0], "chars": r[1], "source": "nav_only"}
         for r in con.execute(
@@ -78,18 +87,30 @@ def selection(con: sqlite3.Connection) -> tuple[list[dict], list[dict]]:
     ]
     sample = sorted(random.Random(SEED).sample(ok_urls, min(OK_SAMPLE, len(ok_urls))))
     ok_rows = [{"url": u, "chars": 0, "source": "ok_sample"} for u in sample]
-    return nav_only, ok_rows
+    js_rows: list[dict] = []
+    for category in JS_HEAVY_CATEGORIES:
+        urls = [
+            r[0]
+            for r in con.execute(
+                "SELECT url FROM results WHERE kind='ok' AND category=? ORDER BY url",
+                (category,),
+            )
+        ]
+        picked = sorted(random.Random(SEED).sample(urls, min(JS_HEAVY_PER_CATEGORY, len(urls))))
+        js_rows.extend({"url": u, "chars": 0, "source": f"js_heavy:{category}"} for u in picked)
+    return nav_only, ok_rows, js_rows
 
 
 def main() -> int:
     con = bench.con
     con.execute(DEEP_SCHEMA)
     con.commit()
-    nav_only, ok_sample = selection(con)
+    nav_only, ok_sample, js_heavy = selection(con)
     deep_done = {r[0] for r in con.execute("SELECT url FROM ai_deep")}
-    todo = [s for grp in (nav_only, ok_sample) for s in grp if s["url"] not in deep_done]
+    todo = [s for grp in (nav_only, ok_sample, js_heavy) for s in grp if s["url"] not in deep_done]
     print(
-        f"deep phase: nav_only={len(nav_only)} ok_sample={len(ok_sample)} todo={len(todo)}",
+        f"deep phase: nav_only={len(nav_only)} ok_sample={len(ok_sample)} "
+        f"js_heavy={len(js_heavy)} todo={len(todo)}",
         flush=True,
     )
     if not todo:
@@ -100,8 +121,6 @@ def main() -> int:
     cfg = BridgeConfig(log_requests=False).replace(smart_fetch_ai=False)
     throttle = bench.AiThrottle(9.0)
     started = time.monotonic()
-
-    import threading
 
     lock = threading.Lock()
 
@@ -232,8 +251,9 @@ def fold(con: sqlite3.Connection) -> None:
     report["ai_deep"] = {
         "design": (
             "always-mode rescue on every nav_only page + a deterministic sample of "
-            "40 ok pages (gate honesty control); accepted rescues get one grounded "
-            "verify question"
+            "40 ok pages (gate honesty control) + up to 25 readable pages per "
+            "JS-heavy category (js-spa, media, bot-walled); accepted rescues get "
+            "one grounded verify question"
         ),
         "attempted": len(rows),
         "gates": dict(gates),
