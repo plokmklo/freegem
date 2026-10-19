@@ -841,6 +841,153 @@ def build_server(cfg: BridgeConfig, name: str = "freegem") -> Any:
         )
 
     @server.tool()
+    def ai_clean(
+        url: str,
+        max_chars: int = 50_000,
+        smart: bool = True,
+        no_cache: bool = False,
+        refresh: bool = False,
+        model: str | None = None,
+    ) -> str:
+        """AI-distilled page content (drops nav/cookie boilerplate)."""
+        return run_tool(
+            cfg,
+            "ai_clean",
+            {
+                "url": url,
+                "max_chars": max_chars,
+                "smart": smart,
+                "no_cache": no_cache,
+                "refresh": refresh,
+                "model": model,
+            },
+        )
+
+    @server.tool()
+    def ai_summarize(
+        url: str,
+        max_chars: int = 50_000,
+        smart: bool = True,
+        no_cache: bool = False,
+        refresh: bool = False,
+        budget_chars: int = 100_000,
+        model: str | None = None,
+    ) -> str:
+        """AI-generated summary of a web page with key points."""
+        return run_tool(
+            cfg,
+            "ai_summarize",
+            {
+                "url": url,
+                "max_chars": max_chars,
+                "smart": smart,
+                "no_cache": no_cache,
+                "refresh": refresh,
+                "budget_chars": budget_chars,
+                "model": model,
+            },
+        )
+
+    @server.tool()
+    def ai_extract(
+        urls: list[str],
+        query: str | None = None,
+        schema: dict | None = None,
+        max_chars: int = 50_000,
+        smart: bool = True,
+        no_cache: bool = False,
+        refresh: bool = False,
+        budget_chars: int = 100_000,
+        concurrency: int = 3,
+        no_limit: bool = False,
+        model: str | None = None,
+    ) -> str:
+        """Extract structured fields or answer a question across web pages."""
+        return run_tool(
+            cfg,
+            "ai_extract",
+            {
+                "urls": urls,
+                "query": query,
+                "schema": schema,
+                "max_chars": max_chars,
+                "smart": smart,
+                "no_cache": no_cache,
+                "refresh": refresh,
+                "budget_chars": budget_chars,
+                "concurrency": concurrency,
+                "no_limit": no_limit,
+                "model": model,
+            },
+        )
+
+    @server.tool()
+    def ai_research(
+        urls: list[str],
+        query: str,
+        max_chars: int = 50_000,
+        smart: bool = True,
+        no_cache: bool = False,
+        refresh: bool = False,
+        budget_chars: int = 100_000,
+        concurrency: int = 3,
+        no_limit: bool = False,
+        model: str | None = None,
+    ) -> str:
+        """Multi-page AI research: answer a question with cited sources."""
+        return run_tool(
+            cfg,
+            "ai_research",
+            {
+                "urls": urls,
+                "query": query,
+                "max_chars": max_chars,
+                "smart": smart,
+                "no_cache": no_cache,
+                "refresh": refresh,
+                "budget_chars": budget_chars,
+                "concurrency": concurrency,
+                "no_limit": no_limit,
+                "model": model,
+            },
+        )
+
+    @server.tool()
+    def ai_crawl(
+        seeds: list[str],
+        query: str,
+        max_pages: int = 50,
+        max_depth: int = 2,
+        max_chars: int = 50_000,
+        smart: bool = True,
+        no_cache: bool = False,
+        refresh: bool = False,
+        budget_chars: int = 100_000,
+        concurrency: int = 3,
+        no_limit: bool = False,
+        model: str | None = None,
+    ) -> str:
+        """AI-powered crawl: score pages against a query, discover links."""
+        return run_tool(
+            cfg,
+            "ai_crawl",
+            {
+                "seeds": seeds,
+                "query": query,
+                "max_pages": max_pages,
+                "max_depth": max_depth,
+                "max_chars": max_chars,
+                "smart": smart,
+                "no_cache": no_cache,
+                "refresh": refresh,
+                "budget_chars": budget_chars,
+                "concurrency": concurrency,
+                "no_limit": no_limit,
+                "model": model,
+            },
+        )
+
+    @server.tool()
     def freegem_submit_job(
         job_type: str, params: dict | None = None, api_key: str | None = None
     ) -> str:
