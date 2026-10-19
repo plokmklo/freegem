@@ -1,8 +1,47 @@
-# Changelog
+## [2.10.0] — 2026-10-19
 
-All notable changes to this project are documented here.
+AI-assisted web smart scraping: the LLM joins the extraction pipeline as a
+gated, labeled rescue rung — on request, never silently.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+### Added
+
+- **`freegem.ai_scrape`**: a library layer over `scrape_page`. The
+  deterministic pipeline (smart-fetch ladder included) always runs first;
+  its text is graded by `extraction_quality`; only when the grade is poor
+  (`nav_only` / `empty`) — or the caller forces `ai_extract="always"` —
+  does the model see the page, with one tightly scoped job: return the
+  page's main readable content in the page's own words. The rescue is
+  GATED: the model's text must grade strictly better than the heuristic
+  text (or be 10% longer at equal grade against a substantial original)
+  or it is discarded and the heuristic result ships with an honest note.
+  A page the heuristic pipeline already read well costs zero model calls.
+- **CLI**: `freegem scrape URL --ai` (auto rescue), `--ai-extract
+  auto|always|never`, and `--schema '{"field":"type",...}'` for
+  schema-validated structured fields (via `llm_extract`, repair-once).
+  `--ask` composes: the answer grounds on the shipped (possibly rescued)
+  text. AI notes go to stderr in text mode and ride in the record under
+  `notes` in `--format jsonl`; batch mode (`scrape URL1 URL2 ... --ai`)
+  runs the same path through the bounded pool with per-URL failure
+  capture.
+- **Provenance discipline**: `via` reports how the shipped text was
+  actually obtained (`ai-extract` when the model's text won the gate);
+  `ai_used` is true only when the model contributed; AI views are NEVER
+  written to the shared research cache (it holds heuristic full-page
+  extractions, per the #21 contract). Page content reaches the model
+  defused and framed in the same untrusted-content markers the `--ask`
+  path uses. Per-host memory
+  (`$FREEGEM_CACHE_DIR/ai_scrape_memory.json`) records which pipeline
+  last read each host — advisory notes only, the heuristic still runs
+  first everywhere.
+- **`ai_scrape_many`**: bounded-pool batch with the same pool discipline
+  as `scrape_many` (config ceiling clamp, per-host locks, ordered
+  results, per-URL failures recorded instead of killing the batch).
+- **tests**: 49 hermetic tests (fake completion seam, loopback server,
+  DNS/dial fakes): the zero-cost contract, gate decisions, honest notes
+  for model refusals / rate limits / unparseable schema answers, memory
+  round-trips, cache non-pollution, batch order, and CLI wiring for
+  text / jsonl / batch / `--ask` / `--schema` paths.
+
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]

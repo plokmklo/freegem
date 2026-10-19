@@ -169,6 +169,29 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="parallel fetches for batch mode, 1-16 (default 4)",
     )
+    scrape.add_argument(
+        "--ai",
+        action="store_true",
+        help="AI-assisted smart scraping: when the heuristic extractor grades "
+        "the page below ok (nav chrome, scripts, empty), let the model recover "
+        "the page's main readable content -- gated and labeled (via=ai-extract)",
+    )
+    scrape.add_argument(
+        "--ai-extract",
+        choices=("auto", "always", "never"),
+        default=None,
+        metavar="MODE",
+        help="content-rescue rung mode (default auto with --ai; 'always' tries "
+        "the rescue on every page, 'never' disables it; implies --ai)",
+    )
+    scrape.add_argument(
+        "--schema",
+        metavar="JSON",
+        default=None,
+        help='extract structured fields, e.g. --schema \'{"title":"string",'
+        '"price":"number","status":{"enum":["in_stock","sold_out"]}}\' '
+        "(implies --ai; fields land in the jsonl record)",
+    )
 
     research = sub.add_parser(
         "research",
@@ -746,7 +769,122 @@ def cmd_scrape(cfg: BridgeConfig, args: argparse.Namespace) -> int:
     the same cap and extractor as the wire path -- the quota-free local-batch
     path. The operator typed the target here, so local reads are enabled for
     the whole command; MCP/server surfaces keep them off.
+
+    ``--ai`` / ``--ai-extract`` / ``--schema`` switch to the AI-assisted
+    path (:mod:`freegem.ai_scrape`): the deterministic pipeline runs first;
+    when its grade is poor the model recovers the page's main content
+    (gated, labeled ``via=ai-extract``), ``--ask`` answers from the shipped
+    text, and ``--schema`` adds validated fields. Notes about every AI
+    event go to stderr; ``--format jsonl`` carries them in the record.
     """
+    from .web_research import ResearchCache
+
+    if getattr(args, "guard", False):
+        cfg = cfg.replace(guard=True)
+    ai_extract = args.ai_extract
+    if ai_extract is None:
+        ai_extract = "auto" if (args.ai or args.schema) else "never"
+    ai_mode = bool(args.ai or args.ai_extract or args.schema)
+    schema = None
+    if args.schema is not None:
+        from .ai_scrape import schema_from_json
+
+        try:
+            schema = schema_from_json(args.schema)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+    if not ai_mode:
+        return _cmd_scrape_classic(cfg, args)
+
+    from .ai_scrape import ai_scrape, ai_scrape_many
+
+    if args.ask and len(args.url) > 1:
+        print("error: --ask works with a single URL only", file=sys.stderr)
+        return 2
+    max_chars = args.max_chars
+    if max_chars is None:
+        max_chars = 200_000 if args.ask else 50_000
+    smart = not args.no_smart and getattr(cfg, "smart_fetch", True)
+    cache = None if args.no_cache else ResearchCache(ResearchCache.default_path(), args.cache_ttl)
+    kwargs: dict[str, Any] = {
+        "max_chars": max_chars,
+        "ignore_robots": not args.respect_robots,
+        "smart": smart,
+        "cache": cache,
+        "refresh": args.refresh,
+        "ai_extract": ai_extract,
+        "schema": schema,
+        "allow_local": True,
+    }
+    if len(args.url) == 1:
+        if args.ask:
+            kwargs["query"] = args.ask
+        result = ai_scrape(cfg, args.url[0], **kwargs)
+        if args.format == "jsonl":
+            print(json.dumps(result.as_dict(), ensure_ascii=False))
+            return 0 if result.ok else 1
+        if not result.ok:
+            print(f"error: {result.error}", file=sys.stderr)
+            return 1
+        for note in result.notes:
+            print(f"note: {note}", file=sys.stderr)
+        if args.ask:
+            print(result.answer or "")
+            return 0
+        if args.format == "markdown":
+            print(
+                _scrape_markdown(
+                    url=result.url,
+                    title=result.title,
+                    text=result.text,
+                    truncated=result.truncated,
+                )
+            )
+        else:
+            print(result.text)
+        return 0
+
+    results = ai_scrape_many(cfg, list(args.url), concurrency=args.concurrency, **kwargs)
+    if args.format == "jsonl":
+        for item in results:
+            print(json.dumps(item.as_dict(), ensure_ascii=False))
+    elif args.format == "markdown":
+        for index, item in enumerate(results, 1):
+            if index > 1:
+                print()
+                print("---")
+                print()
+            if not item.ok:
+                print(f"# {item.url}\n\n**error:** {item.error}")
+                continue
+            print(
+                _scrape_markdown(
+                    url=item.url, title=item.title, text=item.text, truncated=item.truncated
+                )
+            )
+    else:
+        for index, item in enumerate(results, 1):
+            if index > 1:
+                print()
+                print("=" * 72)
+            header = f"[{index}/{len(results)}] {item.url}"
+            if not item.ok:
+                print(f"{header}\nerror: {item.error}")
+                continue
+            ai_tag = " +ai" if item.ai_used else ""
+            print(
+                f"{header}\ntitle: {item.title} ({len(item.text)} chars, via {item.via}{ai_tag})\n"
+            )
+            print(item.text)
+    failed = sum(1 for item in results if not item.ok)
+    if failed == len(results) and results:
+        return 1
+    return 0
+
+
+def _cmd_scrape_classic(cfg: BridgeConfig, args: argparse.Namespace) -> int:
+    """The pre-AI scrape path, byte-identical when no AI flag is given."""
     from .web_research import ResearchCache
     from .web_scraper import scrape_cli, scrape_many
 
