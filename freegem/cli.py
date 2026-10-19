@@ -278,6 +278,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "(default: research_evidence config, on)"
         ),
     )
+    research.add_argument(
+        "--ai",
+        action="store_true",
+        help=(
+            "fetch pages with the AI-assisted smart scraper: gated content "
+            "rescue for poor extractions plus the AI wall rung for pages whose "
+            "fetch itself fails (via=ai-extract / ai-wall-rescue, honest notes; "
+            "AI views are never cached)"
+        ),
+    )
 
     verify = sub.add_parser(
         "verify",
@@ -487,6 +497,16 @@ def _build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--artifacts", metavar="DIR", default="", help="store raw page bodies here")
     run_p.add_argument(
         "--json-logs", action="store_true", help="also print progress events as JSON to stdout"
+    )
+    run_p.add_argument(
+        "--ai-rescue",
+        action="store_true",
+        help=(
+            "when a page's default extraction grades below 'ok', attempt the "
+            "gated AI content rescue (same gate as scrape --ai; the record "
+            "carries ai_rescued/ai_rescue_note). Fetch failures stay the "
+            "resilient fetcher's business -- no model calls on dead URLs"
+        ),
     )
 
     status_p = crawl_sub.add_parser("status", help="show frontier stats for a state file")
@@ -1102,6 +1122,7 @@ def cmd_research(cfg: BridgeConfig, args: argparse.Namespace) -> int:
             refresh=args.refresh,
             fetch_concurrency=args.fetch_concurrency,
             evidence=args.evidence,
+            ai_extract="auto" if args.ai else "never",
         )
     except (BridgeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -1273,6 +1294,7 @@ def _crawl_spec(args: argparse.Namespace) -> Any:
         schema_path=getattr(args, "schema", "") or "",
         artifacts_dir=getattr(args, "artifacts", "") or "",
         state_path=args.state or "",
+        ai_rescue=bool(getattr(args, "ai_rescue", False)),
     )
 
 

@@ -343,6 +343,7 @@ def _collect_sources(
     cache: ResearchCache | None,
     refresh: bool,
     concurrency: int = 1,
+    ai_extract: str = "never",
 ) -> tuple[list[ResearchSource], list[tuple[ResearchSource, str]]]:
     """Fetch (or cache-hit) every URL up to the page and character budgets.
 
@@ -372,7 +373,7 @@ def _collect_sources(
     ``[S1]..[Sn]`` numbering, the URL table, and the JSON schema) always
     follows the order the caller listed, whatever order the network answered.
     """
-    from .web_scraper import ScrapeError, extraction_quality, scrape_page  # lazy: mcp cycle
+    from .web_scraper import ScrapeError, extraction_quality  # lazy: mcp cycle
 
     concurrency = max(1, min(int(concurrency), HARD_FETCH_CONCURRENCY))
 
@@ -386,15 +387,16 @@ def _collect_sources(
 
     def worker(url: str) -> Any:
         # Serialize per host; the pool only widens across distinct hosts.
-        # (#21 residual) The shared cache goes INTO scrape_page: it stores
+        # (#21 residual) The shared cache goes INTO the fetch: it stores
         # the FULL extraction once, and this caller's max_chars is a view.
         with host_lock[url]:
-            return scrape_page(
+            return _fetch_page(
                 cfg,
                 url,
                 max_chars=max_chars_per_page,
                 cache=cache,
                 refresh=refresh,
+                ai_extract=ai_extract,
             )
 
     fetched = 0
@@ -425,10 +427,17 @@ def _collect_sources(
                 # a single monster page cannot eat earlier-listed sources.
                 allowance = min(max_chars_per_page, total_budget - fetched)
                 try:
-                    # (#21 residual) The shared cache goes INTO scrape_page so
+                    # (#21 residual) The shared cache goes INTO the fetch so
                     # the entry is written ONCE, with the FULL extraction; the
                     # allowance below is this caller's VIEW of it.
-                    page = scrape_page(cfg, url, max_chars=allowance, cache=cache, refresh=refresh)
+                    page = _fetch_page(
+                        cfg,
+                        url,
+                        max_chars=allowance,
+                        cache=cache,
+                        refresh=refresh,
+                        ai_extract=ai_extract,
+                    )
                 except ScrapeError as exc:
                     source.error = str(exc)
                     sources[position] = source
@@ -1064,6 +1073,48 @@ def _iso(ts: float | None) -> str | None:
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _fetch_page(
+    cfg: BridgeConfig,
+    url: str,
+    *,
+    max_chars: int,
+    cache: ResearchCache | None,
+    refresh: bool,
+    ai_extract: str,
+) -> Any:
+    """One research page fetch: ``scrape_page``, or ``ai_scrape`` with AI on.
+
+    ``ai_extract="never"`` (the default) is byte-identical to the previous
+    behavior. Otherwise the page goes through
+    :func:`freegem.ai_scrape.ai_scrape` -- the same deterministic pipeline
+    underneath (same guards, same ``smart=False`` posture research always
+    had), plus the gated AI rescue rung for poor extractions and the AI
+    wall rung for pages whose fetch itself fails. A failed fetch raises
+    :class:`ScrapeError` exactly as ``scrape_page`` would, so every budget
+    and error decision above is unchanged. AI views are never cached: only
+    the underlying heuristic extraction ever reaches the shared cache.
+    """
+    if ai_extract == "never":
+        from .web_scraper import scrape_page as _scrape_page
+
+        return _scrape_page(cfg, url, max_chars=max_chars, cache=cache, refresh=refresh)
+    from .ai_scrape import ai_scrape
+    from .web_scraper import ScrapeError as _ScrapeError
+
+    result = ai_scrape(
+        cfg,
+        url,
+        ai_extract=ai_extract,
+        max_chars=max_chars,
+        smart=False,
+        cache=cache,
+        refresh=refresh,
+    )
+    if not result.ok:
+        raise _ScrapeError(result.error or "fetch failed")
+    return result
+
+
 def research(
     cfg: BridgeConfig,
     question: str,
@@ -1076,6 +1127,7 @@ def research(
     refresh: bool = False,
     concurrency: int | None = None,
     evidence: bool = True,
+    ai_extract: str = "never",
 ) -> ResearchResult:
     """Fetch the pages, answer ``question`` from them, and cite [S#] sources.
 
@@ -1114,6 +1166,7 @@ def research(
             cache=cache,
             refresh=refresh,
             concurrency=cfg.research_concurrency if concurrency is None else concurrency,
+            ai_extract=ai_extract,
         )
     metrics.bump("pages_ok", sum(1 for s in sources if s.ok))
     metrics.bump("pages_skipped", sum(1 for s in sources if not s.ok and s.skipped))
@@ -1316,6 +1369,7 @@ def research_cli(
     refresh: bool = False,
     fetch_concurrency: int | None = None,
     evidence: bool | None = None,
+    ai_extract: str = "never",
 ) -> str:
     """One-shot research for the CLI: renders in the requested format."""
     cache = None if no_cache else ResearchCache(ResearchCache.default_path(), cache_ttl)
@@ -1330,6 +1384,7 @@ def research_cli(
         refresh=refresh,
         concurrency=fetch_concurrency,
         evidence=cfg.research_evidence if evidence is None else evidence,
+        ai_extract=ai_extract,
     )
     if fmt == "json":
         return render_json(result)
