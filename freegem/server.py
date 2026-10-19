@@ -477,20 +477,28 @@ class GeminiHandler(BaseHTTPRequestHandler):
           A value of ``cross-site`` is the browser itself swearing the request
           was initiated from another site -- the exact CSRF shape the Origin
           check catches -- so refusing it adds a third, independent gate that
-          also covers cases where Origin is present but oddly formed. Missing
-          header means a non-browser client (curl, an SDK, tests) and is
-          allowed; ``same-site``/``same-origin``/``none`` are allowed.
+          also covers cases where Origin is present but oddly formed. The one
+          exception is a loopback ``Origin``: a local UI on another port of
+          this machine (``localhost:3000`` -> this server) is cross-site by
+          origin rules yet is the documented friend-of-the-operator case, so
+          it is allowed -- and the Origin layer below still vetoes any
+          non-loopback Origin it carries. ``cross-site`` with a missing
+          Origin is refused: the header is browser-sworn and a browser always
+          sends Origin on a cross-site POST, so its absence is not a normal
+          client shape. Missing ``Sec-Fetch-Site`` header means a non-browser
+          client (curl, an SDK, tests) and is allowed;
+          ``same-site``/``same-origin``/``none`` are allowed.
         - Content-Type: browsers cannot attach ``application/json`` to a
           simple request -- the spec forces a preflight for it -- so requiring
           JSON blocks the text/plain forgery even if a future caller forgets
           the Origin check.
         """
         site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
-        if site == "cross-site":
-            log(self.cfg, "rejected cross-site POST (Sec-Fetch-Site: cross-site)")
+        origin = self.headers.get("Origin")
+        if site == "cross-site" and (origin is None or not _origin_is_loopback(origin)):
+            log(self.cfg, f"rejected cross-site POST (Origin {origin!r})")
             self._reject_request("cross-site POSTs are not allowed", 403)
             return False
-        origin = self.headers.get("Origin")
         if origin is not None and not _origin_is_loopback(origin):
             log(self.cfg, f"rejected cross-origin POST from Origin {origin!r}")
             self._reject_request("cross-origin POSTs are not allowed", 403)
@@ -1312,6 +1320,13 @@ class ThreadedServer(ThreadingMixIn, HTTPServer):
 
     daemon_threads = True
     allow_reuse_address = True
+
+    # Kernel accept backlog. socketserver's default is 5: a burst of real
+    # clients (64 quick POSTs against the concurrency cap) overflows it and
+    # the kernel resets connections before the admission queue below can
+    # shed them politely with 503s. 128 absorbs the burst; the concurrency
+    # cap and the admission queue still bound what actually executes.
+    request_queue_size = 128
 
     # The default cap. Plenty for one user's local bridge; configure by
     # constructing ThreadedServer(..., max_concurrent_requests=N).

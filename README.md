@@ -92,10 +92,10 @@ endpoint, subject to Google's availability, rate limits, and policies. Read
 Requires Python 3.10+.
 
 ```bash
-pip install freegem              # core: HTTP API, CLI, web tools
-pip install "freegem[full]"      # + streaming (httpx) and MCP
-pip install "freegem[mcp]"       # + MCP only
-pip install "freegem[dev]"       # + pytest, ruff, mypy for development
+pip install "freegem @ git+https://github.com/plokmklo/freegem.git"  # core: HTTP API, CLI, web tools
+pip install "freegem[full] @ git+https://github.com/plokmklo/freegem.git"  # + streaming (httpx) and MCP
+pip install "freegem[mcp] @ git+https://github.com/plokmklo/freegem.git"  # + MCP only
+pip install "freegem[dev] @ git+https://github.com/plokmklo/freegem.git"  # + pytest, ruff, mypy for development
 ```
 
 Optional heavy dependencies (`playwright`, `selenium`, `redis`, `pika`,
@@ -204,7 +204,7 @@ Exposes Gemini and the web layer as tools an agent can call:
 | `freegem_manage_profile` | Session storage-state profiles |
 
 ```bash
-pip install "freegem[mcp]"
+pip install "freegem[mcp] @ git+https://github.com/plokmklo/freegem.git"
 
 # stdio: your client launches it
 freegem mcp --transport stdio

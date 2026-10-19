@@ -4,8 +4,8 @@
 
 | Version | Supported |
 |---|---|
-| 2.0.x | Yes |
-| < 2.0 | No |
+| 2.9.x | Yes |
+| < 2.9 | No |
 
 ## Reporting a Vulnerability
 
@@ -89,6 +89,21 @@ control, not an access control against a **browser** — pages reach
    when the request's `Origin` is loopback, and it echoes that origin —
    never `*`. Non-browser clients (OpenAI SDK, Codex, Gemini CLI, curl)
    send no `Origin` and need no CORS headers at all.
+3. **POST gates (CSRF).** Every POST must carry `Content-Type:
+   application/json` (browsers cannot attach it to a preflight-free
+   "simple" request), a loopback `Origin` when an `Origin` is present at
+   all, and — for browsers that send Fetch Metadata — `Sec-Fetch-Site`
+   values other than `cross-site`. A `cross-site` POST from a loopback
+   `Origin` is allowed: a local UI on another port of this machine
+   (`localhost:3000` -> this server) is cross-site by origin rules and is
+   the intended case. `cross-site` with a foreign, `null`, lookalike, or
+   missing `Origin` is a 403.
+
+Under load the server sheds instead of dying: in-flight work is capped
+(default 32, configurable per server); beyond the cap a 503 with
+`Retry-After` is written before any thread is spawned. The kernel accept
+backlog is 128 so a burst of real clients is absorbed at connect time and
+then answered by the cap's shed rather than reset by the operating system.
 
 Request bodies are capped at 32 MB (413 beyond), malformed or negative
 lengths are rejected (400) with the connection closed, and client-supplied

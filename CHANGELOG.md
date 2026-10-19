@@ -5,6 +5,24 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Server**: `Sec-Fetch-Site: cross-site` POSTs are refused only when the
+  request does not carry a loopback `Origin`. A local UI on another port of
+  this machine (`localhost:3000` -> this server) is cross-site by origin
+  rules and works again; cross-site with a foreign, `null`, lookalike, or
+  missing `Origin` stays a 403 before generate() runs.
+- **Server**: the kernel accept backlog is 128 (socketserver's silent
+  default is 5). A 64-client burst against the concurrency cap no longer
+  has connections reset by the operating system at the accept queue;
+  saturation is still answered by the server's own 503 shed.
+- **Docs**: install instructions use the GitHub URL — the package is not on
+  PyPI, and the previous `pip install freegem` line 404s. SECURITY.md's
+  supported version is now 2.9.x, and it documents the POST gates and the
+  load-shedding path.
+
 ## [2.9.3] — 2026-10-18
 
 ### Fixed

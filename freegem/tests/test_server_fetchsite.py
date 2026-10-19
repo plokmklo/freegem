@@ -1,14 +1,21 @@
-"""Sec-Fetch-Site: cross-site POST refusal.
+"""Sec-Fetch-Site: cross-site POST gate, loopback-aware.
 
 Fetch Metadata gives the server a third, independent signal that a POST was
 born on another site -- and unlike ``Origin`` it cannot be withheld or forged
 by page scripts. These tests pin the gate:
 
-* ``Sec-Fetch-Site: cross-site`` is a 403 before generate() is reached, no
-  matter what Origin or Content-Type say;
+* ``Sec-Fetch-Site: cross-site`` with a **loopback** ``Origin`` passes -- a
+  local UI on another port of this machine (``localhost:3000`` -> this
+  server) is cross-site by origin rules and is the documented
+  friend-of-the-operator case;
+* ``cross-site`` with a foreign, ``null``, or lookalike Origin is a 403
+  before generate() is reached;
+* ``cross-site`` with **no** Origin at all is a 403 too: the header is
+  browser-sworn (a forbidden header name) and a browser always sends Origin
+  on a cross-site POST, so its absence is not a normal client shape;
 * the other legal values (``same-origin``, ``same-site``, ``none``) pass;
-* an absent header (curl, SDKs, tests) passes -- non-browser clients never
-  send Fetch Metadata.
+* an absent ``Sec-Fetch-Site`` header (curl, SDKs, tests) passes --
+  non-browser clients never send Fetch Metadata.
 """
 
 from __future__ import annotations
@@ -26,14 +33,37 @@ class SecFetchSiteTests(EndpointTestCase):
     }
 
     @mock.patch("freegem.server.generate")
-    def test_cross_site_header_403_even_with_clean_origin(self, generate: Any) -> None:
-        """A browser swearing 'cross-site' is refused before anything else."""
+    def test_cross_site_with_loopback_origin_passes(self, generate: Any) -> None:
+        """A local UI on another loopback port is cross-site but welcome."""
+        generate.return_value = "ok"
+        for origin in (
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://[::1]:3000",
+        ):
+            with self.subTest(origin=origin):
+                generate.reset_mock()
+                status, _, _ = self.post(
+                    "/v1/chat/completions",
+                    self.BODY,
+                    headers={
+                        "Sec-Fetch-Site": "cross-site",
+                        "Origin": origin,
+                        "Content-Type": "application/json",
+                    },
+                )
+                self.assertEqual(status, 200)
+                generate.assert_called_once()
+
+    @mock.patch("freegem.server.generate")
+    def test_cross_site_with_foreign_origin_403(self, generate: Any) -> None:
+        """A browser swearing cross-site from a foreign origin is refused."""
         status, _, raw = self.post(
             "/v1/chat/completions",
             self.BODY,
             headers={
                 "Sec-Fetch-Site": "cross-site",
-                "Origin": "http://127.0.0.1",
+                "Origin": "https://evil.example",
                 "Content-Type": "application/json",
             },
         )
@@ -42,8 +72,38 @@ class SecFetchSiteTests(EndpointTestCase):
         generate.assert_not_called()
 
     @mock.patch("freegem.server.generate")
+    def test_cross_site_with_null_origin_403(self, generate: Any) -> None:
+        """``Origin: null`` (sandboxed iframes, redirected posts) is refused."""
+        status, _, _raw = self.post(
+            "/v1/chat/completions",
+            self.BODY,
+            headers={
+                "Sec-Fetch-Site": "cross-site",
+                "Origin": "null",
+                "Content-Type": "application/json",
+            },
+        )
+        self.assertEqual(status, 403)
+        generate.assert_not_called()
+
+    @mock.patch("freegem.server.generate")
+    def test_cross_site_with_lookalike_origin_403(self, generate: Any) -> None:
+        """A lookalike hostname is not loopback just because it starts alike."""
+        status, _, _raw = self.post(
+            "/v1/chat/completions",
+            self.BODY,
+            headers={
+                "Sec-Fetch-Site": "cross-site",
+                "Origin": "http://localhost.evil.example",
+                "Content-Type": "application/json",
+            },
+        )
+        self.assertEqual(status, 403)
+        generate.assert_not_called()
+
+    @mock.patch("freegem.server.generate")
     def test_cross_site_header_403_without_origin(self, generate: Any) -> None:
-        """Header alone is enough; no Origin header to correlate against."""
+        """Browser-sworn cross-site with no Origin is an abnormal client."""
         status, _, _raw = self.post(
             "/v1/chat/completions",
             self.BODY,
