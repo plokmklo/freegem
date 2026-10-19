@@ -719,8 +719,9 @@ def _stream_answer(cfg: BridgeConfig, question: str) -> None:
     """Print a plain answer as it is produced, token-by-token when possible.
 
     Falls back to one non-streaming request when httpx is missing -- same
-    answer, just printed whole. Any stream failure AFTER bytes were printed
-    cannot be undone, so it surfaces as an error note instead of a rewrite.
+    answer, just printed whole. If the stream is interrupted AFTER partial
+    output reached the terminal, a non-streaming replay fills in the rest
+    rather than leaving the user with a half-answer.
     """
     from .gemini import HAS_HTTPX, BridgeError, generate, generate_stream
     from .models import resolve_model
@@ -741,9 +742,17 @@ def _stream_answer(cfg: BridgeConfig, question: str) -> None:
             sys.stdout.flush()
             printed = True
     except BridgeError as exc:
-        if printed:
-            print(f"\n[stream interrupted: {exc}]", file=sys.stderr)
+        if not printed:
             raise
+        # Partial output reached the terminal. The non-streaming path gives
+        # the user a complete answer instead of a half-streamed failure.
+        # The already-printed text is a best-effort prefix; the full reply
+        # follows after a separator line so nothing is silently lost.
+        print(f"\n[stream interrupted: {exc}]", file=sys.stderr)
+        answer = generate(cfg, question, int(mode_id), int(think_mode), None, extra)
+        if answer:
+            print(f"\n[complete reply follows]\n{answer}")
+            return
         raise
     if not printed:
         raise BridgeError(

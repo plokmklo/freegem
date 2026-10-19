@@ -12,7 +12,7 @@ import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
-from typing import Any
+from typing import Any, Iterator
 from unittest import mock
 
 from freegem.cli import main
@@ -125,6 +125,26 @@ class AskCommandTests(unittest.TestCase):
             code, _, err = self.run_cli(["ask", "hello"])
         self.assertEqual(code, 1)
         self.assertIn("no session", err)
+
+    def test_ask_stream_interrupt_falls_back_to_nonstream(self) -> None:
+        """When streaming fails after partial output, ask falls back to a
+        non-streaming replay so the user gets a complete answer instead of
+        half a reply. (Benchmark: fixes 'stream interrupted' failures.)"""
+        from freegem.gemini import BridgeError
+
+        def _fake_stream(*args: Any, **kwargs: Any) -> Iterator[str]:
+            yield "half of it"
+            raise BridgeError("Gemini rewrote an already-streamed block")
+
+        with (
+            mock.patch("freegem.gemini.generate_stream", side_effect=_fake_stream),
+            mock.patch("freegem.gemini.generate", return_value="half of it and the rest") as gen,
+        ):
+            code, out, err = self.run_cli(["ask", "hello"])
+        self.assertEqual(code, 0, f"should recover, got stderr: {err}")
+        self.assertIn("complete reply", out)
+        self.assertIn("and the rest", out)
+        self.assertTrue(gen.called, "non-streaming generate() must be called on recovery")
 
     def test_empty_prompt_rejected(self) -> None:
         code, _, _ = self.run_cli(["ask", "   "])

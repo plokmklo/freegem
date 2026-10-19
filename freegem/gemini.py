@@ -117,6 +117,18 @@ def _classify_empty_answer(body: str) -> str:
     return "rate_limit"
 
 
+class _StreamRewriteError(BridgeError):
+    """A Gemini streaming snapshot did not extend the previous one.
+
+    Gemini serves progressively longer snapshots rather than true deltas. When a
+    snapshot does not begin with what was already emitted (the model's output
+    was rewritten mid-stream), retrying the whole request is safe ONLY if no
+    meaningful output reached the client yet. If ``emitted`` is empty, this
+    behaves as a transient retry; if non-empty, the stream aborts to avoid
+    duplicating partial output.
+    """
+
+
 class _StaleBuildTagError(BridgeError):
     """The upstream answered with a ``BardErrorInfo`` marker.
 
@@ -813,7 +825,7 @@ def generate_stream(
                             if text == emitted or emitted.startswith(text):
                                 continue
                             if not text.startswith(emitted):
-                                raise BridgeError(
+                                raise _StreamRewriteError(
                                     "Gemini rewrote an already-streamed block; "
                                     "aborting to avoid corrupting the answer."
                                 )
@@ -829,7 +841,7 @@ def generate_stream(
                         if text == emitted or emitted.startswith(text):
                             continue
                         if not text.startswith(emitted):
-                            raise BridgeError(
+                            raise _StreamRewriteError(
                                 "Gemini rewrote an already-streamed block; "
                                 "aborting to avoid corrupting the answer."
                             )
@@ -864,6 +876,26 @@ def generate_stream(
             # Same one-time recovery as the non-streaming path.
             _refresh_build_tag_once(cfg)
             raise
+        except _StreamRewriteError:
+            # Gemini rewrote a snapshot that was never emitted. If nothing
+            # reached the client (emitted is empty), retry is safe -- but
+            # in practice the rewrite check only fires after at least one
+            # chunk was extracted, so this usually falls through to the
+            # BridgeError path and the CLI's non-streaming fallback handles
+            # recovery. Keep the guard so a parser refactor cannot silently
+            # duplicate partial output.
+            if emitted:
+                raise
+            last_error = sys.exc_info()[1]
+            if attempt < cfg.retry_attempts:
+                delay = _backoff_delay(cfg.retry_delay_sec, attempt, None)
+                note_gemini_retry()
+                log(
+                    cfg,
+                    f"stream attempt {attempt}/{cfg.retry_attempts} had a "
+                    f"mid-stream rewrite before any output; retrying in {delay:.1f}s",
+                )
+                time.sleep(delay)
         except BridgeError:
             raise
         except Exception as exc:
