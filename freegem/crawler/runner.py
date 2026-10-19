@@ -38,12 +38,13 @@ from typing import Any
 from ..config import BridgeConfig
 from .distill import DISTILL_THRESHOLD_BYTES, distill_text
 from .extract import ExtractionStats, Field, FieldError, Schema, extract_items
-from .fetch import FetchOutcome, crawl_fetch
+from .fetch import _BASE_HEADERS, FetchOutcome, crawl_fetch
 from .frontier import Frontier, FrontierItem
 from .hardening import HtmlDom, ResourceLimits, parse_xml, redact_secrets
 from .output import make_writer
 from .resilient import HostPacer, fetch_resilient
 from .urls import Budget, Scope, normalize_url, url_origin
+from .warc import WarcWriter
 
 __all__ = ["Counters", "CrawlSpec", "PlanReport", "load_schema", "plan", "run"]
 
@@ -87,6 +88,9 @@ class CrawlSpec:
     append_output: bool = False
     schema_path: str = ""
     artifacts_dir: str = ""
+    #: WARC 1.1 evidence file: every fetch (wins, walls, and dead ends) is
+    #: recorded as request/response/metadata records with sha-256 digests.
+    warc_path: str = ""
     #: Where spilled oversized bodies go (defaults beside the state file).
     spill_dir: str = ""
     state_path: str = ""
@@ -288,6 +292,23 @@ def run(
         if spec.output_path
         else None
     )
+    warc: WarcWriter | None = None
+    if spec.warc_path:
+        from .. import __version__
+
+        warc = WarcWriter(
+            spec.warc_path,
+            software=f"freegem/{__version__} (+https://github.com/plokmklo/freegem)",
+            robots_stance="robots.txt never fetched or consulted (attacker-controlled "
+            "text; see docs/NON_GOALS.md)",
+            crawl_note=f"delay_ms={spec.delay_ms}; max_pages={spec.scope.max_pages}",
+        )
+        warc.warcinfo(
+            {
+                "freegem-delay-ms": str(spec.delay_ms),
+                "freegem-max-pages": str(spec.scope.max_pages),
+            }
+        )
     started = time.monotonic()
 
     # Recover in-flight rows from a previous crashed/killed run.
@@ -323,6 +344,7 @@ def run(
             on_event,
             started,
             pacer,
+            warc,
         )
     finally:
         frontier.set_meta("finished_at", str(int(time.time())))
@@ -330,6 +352,8 @@ def run(
         frontier.checkpoint()
         if writer is not None:
             writer.close()
+        if warc is not None:
+            warc.close()
         _emit(
             on_event,
             {"event": "done", "counters": counters.as_dict(), "extraction": stats.as_dict()},
@@ -350,6 +374,7 @@ def _crawl_loop(
     on_event: Callable[[dict[str, Any]], None] | None,
     started: float,
     pacer: HostPacer,
+    warc: WarcWriter | None = None,
 ) -> None:
     """Claim-fetch-process loop; single or small worker pool."""
     workers = max(1, min(spec.concurrency, 8))
@@ -373,6 +398,7 @@ def _crawl_loop(
                 cancel,
                 on_event,
                 pacer,
+                warc,
             )
         return
     lock = threading.Lock()
@@ -411,6 +437,7 @@ def _crawl_loop(
                 cancel,
                 on_event,
                 pacer,
+                warc,
             )
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -473,6 +500,7 @@ def _process(
     cancel: threading.Event,
     on_event: Callable[[dict[str, Any]], None] | None,
     pacer: HostPacer,
+    warc: WarcWriter | None = None,
 ) -> None:
     """Fetch one claimed URL, record every branch, queue its links."""
     url = item.url
@@ -525,6 +553,8 @@ def _process(
         )
     counters.note_outcome(outcome)
     counters.bytes_in += outcome.body_size or len(outcome.body or b"")
+    if warc is not None:
+        _warc_capture(warc, url, outcome, conditional)
     # A body larger than ``spill_bytes`` lives in a temp file inside the
     # spill dir. Whatever happens below -- an early return, a raise, an
     # artifact store that already holds this content -- that temp file must
@@ -571,6 +601,7 @@ def _process(
                 retry=retryable,
                 max_retries=spec.limits.max_retries,
                 retry_after=outcome.retry_after,
+                http_status=outcome.status,
             )
             if will_retry:
                 counters.retries += 1
@@ -649,6 +680,72 @@ def _process(
         if spill_tmp and os.path.exists(spill_tmp):
             with contextlib.suppress(OSError):
                 os.unlink(spill_tmp)
+
+
+def _warc_capture(
+    warc: WarcWriter,
+    url: str,
+    outcome: FetchOutcome,
+    request_headers: dict[str, str],
+) -> None:
+    """Record one fetch outcome into the WARC evidence file.
+
+    Every branch lands in the archive: HTTP answers (wins, redirects, 304
+    revalidations, and 4xx/5xx walls) become request+response record pairs;
+    fetches that never got an HTTP answer (DNS death, timeout, SSRF refusal)
+    become request+metadata pairs carrying the outcome taxonomy. Escalation
+    notes (ladder fallbacks, unverified TLS) ride along as warc-fields so
+    the archive shows not just WHAT arrived but HOW it was obtained.
+    """
+    request_id = warc.request(
+        url,
+        headers={
+            "User-Agent": _BASE_HEADERS["User-Agent"],
+            "Accept-Encoding": _BASE_HEADERS["Accept-Encoding"],
+            "Accept": _BASE_HEADERS["Accept"],
+            **{
+                k: v
+                for k, v in request_headers.items()
+                if k in ("If-None-Match", "If-Modified-Since")
+            },
+        },
+    )
+    if outcome.status is None:
+        warc.metadata(
+            url,
+            {
+                "freegem-outcome-kind": outcome.kind,
+                "freegem-error": outcome.error or "",
+                "freegem-fallback": outcome.fallback,
+                "freegem-attempts": str(outcome.attempts),
+            },
+            concurrent_to=request_id,
+        )
+        return
+    truncated = "length" if outcome.kind == "too_large" else None
+    warc.response(
+        url,
+        status=outcome.status,
+        headers=dict(outcome.headers),
+        body=outcome.body,
+        body_path=outcome.body_path,
+        truncated=truncated,
+        request_id=request_id,
+    )
+    notes: dict[str, str] = {"freegem-outcome-kind": outcome.kind}
+    if outcome.fallback:
+        notes["freegem-fallback"] = outcome.fallback
+    if outcome.tls_unverified:
+        notes["freegem-tls-unverified"] = "true"
+    if outcome.blocked:
+        wall_class = {401: "auth_wall", 403: "bot_check", 429: "rate_limited"}.get(
+            outcome.status, f"http_{outcome.status}"
+        )
+        notes["freegem-wall-class"] = wall_class
+        if outcome.retry_after is not None:
+            notes["freegem-retry-after-sec"] = f"{outcome.retry_after:.0f}"
+    if len(notes) > 1 or outcome.blocked:
+        warc.metadata(url, notes, concurrent_to=request_id)
 
 
 def _polite_sleep(seconds: float, cancel: threading.Event) -> None:

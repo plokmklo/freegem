@@ -223,6 +223,7 @@ class Frontier:
         max_retries: int = 2,
         backoff_sec: float = 5.0,
         retry_after: float | None = None,
+        http_status: int | None = None,
     ) -> bool:
         """Record a failure; schedule a retry when allowed.
 
@@ -231,7 +232,9 @@ class Frontier:
         to hammer the same host again on the same second. When the server
         sent ``Retry-After`` (429/503), that value IS the delay -- the site
         told us when it can take us back, and ignoring it is how polite
-        crawlers get upgraded to banned crawlers.
+        crawlers get upgraded to banned crawlers. ``http_status`` records
+        the wire status of wall answers (401/403/429) so receipts and
+        reports can count walls without re-parsing error strings.
         """
         with self._lock:
             row = self._db.execute("SELECT attempts FROM frontier WHERE url=?", (url,)).fetchone()
@@ -243,14 +246,15 @@ class Frontier:
                 else:
                     delay = backoff_sec * (2 ** (attempts - 1)) * (0.5 + random.random())
                 self._db.execute(
-                    "UPDATE frontier SET status=?, attempts=?, error=?, next_attempt_at=?"
-                    " WHERE url=?",
-                    (PENDING, attempts, error[:500], time.time() + delay, url),
+                    "UPDATE frontier SET status=?, attempts=?, error=?, next_attempt_at=?,"
+                    " http_status=? WHERE url=?",
+                    (PENDING, attempts, error[:500], time.time() + delay, http_status, url),
                 )
             else:
                 self._db.execute(
-                    "UPDATE frontier SET status=?, attempts=?, error=?, fetched_at=? WHERE url=?",
-                    (ERROR, attempts, error[:500], time.time(), url),
+                    "UPDATE frontier SET status=?, attempts=?, error=?, fetched_at=?,"
+                    " http_status=? WHERE url=?",
+                    (ERROR, attempts, error[:500], time.time(), http_status, url),
                 )
             self._db.execute(
                 "UPDATE host_state SET err_count=err_count+1 WHERE host="

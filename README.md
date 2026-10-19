@@ -3,7 +3,7 @@
 [![CI](https://github.com/plokmklo/freegem/actions/workflows/ci.yml/badge.svg)](https://github.com/plokmklo/freegem/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Version](https://img.shields.io/badge/version-2.9.3-blueviolet)
+![Version](https://img.shields.io/badge/version-2.12.0-blueviolet)
 
 **A local bridge for Gemini Web, presented through the interfaces you already use.**
 
@@ -469,6 +469,35 @@ nothing succeeded.
 through the site's own `action=parse` API: the complete rendered article,
 tables included, instead of the extract API's capped plain text.
 
+**Tables** — HTML `<table>` elements render as GitHub-flavored markdown
+(header separator row, pipes escaped, ragged rows padded) instead of
+flattening into word soup, and `freegem.tables.extract_tables(dom)` exposes
+them as rectangular frames (`to_markdown()` / `to_csv()`) for callers that
+want the data, not the prose. `colspan`/`rowspan` are counted, never
+expanded — a span is reported, not silently duplicated.
+
+**RAG chunks** — `--chunks N` (single URL) splits the extracted text into
+N-character chunks at paragraph/sentence boundaries with overlap. With
+`--format jsonl` each record carries `index`, `start_char`, `end_char`,
+`text`, `total` — so a vector store can cite `url#chunk-3` and verify the
+quote against the page's own character range. Pure transform of the already-
+extracted text: no AI, no re-fetch, no cache writes.
+
+**Map** — `freegem map URL [--limit N] [--format jsonl]` fetches ONE page
+and lists the URLs it links to — `<a href>` links plus the `fetch()`/XHR
+endpoints the page's own scripts volunteer — each scored by the best-first
+prioritizer with `sources` provenance. Nothing else is fetched: the output
+is a plan for a later `scrape`/`crawl`, not a mini-crawl.
+
+### Fetch-codec honesty
+
+`Accept-Encoding` only ever advertises what the streaming reader can decode
+cap-enforced: `gzip, deflate` from the stdlib, plus `br`/`zstd` when the
+optional extras are installed (`pip install 'freegem[brotli]' 'freegem[zstd]'`).
+A server answering with an encoding we never advertised is an honest
+failure, not raw bytes stored as text. `Retry-After` is honored in both
+RFC forms (delay-seconds and HTTP-date) on 429/503.
+
 ### Security model
 
 **Validation is a feature, not a default — and it is default-on everywhere
@@ -821,6 +850,41 @@ www↔apex swaps, and one TLS-relaxed retry flagged `tls_unverified` for broken
 certificate chains. 401/402/451 are never bypassed. Oversized pages (≥ 2 MB)
 can be distilled to their important content by Gemini (`CrawlSpec.distill`)
 with an extractive fallback.
+
+### Evidence capture (`--warc`)
+
+`crawl run --warc evidence.warc` writes every fetch as a WARC 1.1
+(ISO 28500) record set — the same archival format Heritrix, wget2, and
+Browsertrix produce, written stdlib-only:
+
+- a `warcinfo` record with the software version, the crawl parameters, and
+  the honest robots stance (never fetched, never consulted —
+  `docs/NON_GOALS.md`);
+- a `request` + `response` record pair per HTTP answer — wins, redirects,
+  304 revalidations, AND 4xx/5xx walls — each with `WARC-Block-Digest` and
+  `WARC-Payload-Digest` (sha-256) so tampering is detectable;
+- a `metadata` record for fetches that never got an HTTP answer (DNS death,
+  timeout, SSRF refusal) and for escalation notes (ladder fallbacks,
+  unverified TLS, wall class: `auth_wall` / `bot_check` / `rate_limited`).
+
+`freegem.crawler.warc.verify(path)` re-checks every Content-Length and both
+digests (works on files any WARC producer wrote); `summary(path)` counts
+record types, targets, truncations, and wall classes. "We hold the bytes we
+quote" becomes a checkable claim, replayable with warcio/pywb. Files are
+written uncompressed; compress externally if storage matters.
+
+### Politeness receipts (`crawl report`)
+
+`freegem crawl report --state state.db [--delay-ms 250] [--format json]`
+turns the frontier into a per-host **receipt**: request counts, status
+histograms (2xx / 3xx / 304 revalidations / 4xx / 5xx), wall counts
+(401/403/429), retry volume, observed inter-fetch intervals (min / median /
+max), and — when the crawl's `--delay-ms` is supplied — whether the minimum
+observed gap is consistent with the configured per-host delay. The report
+carries the exact User-Agent, the robots stance, and a sha-256 digest over
+its canonical JSON, so a receipt can be quoted and compared across runs.
+Most crawlers treat politeness as a private config knob; freegem emits the
+evidence.
 
 ---
 

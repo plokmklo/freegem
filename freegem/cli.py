@@ -200,6 +200,41 @@ def _build_parser() -> argparse.ArgumentParser:
         '"price":"number","status":{"enum":["in_stock","sold_out"]}}\' '
         "(implies --ai; fields land in the jsonl record)",
     )
+    scrape.add_argument(
+        "--chunks",
+        type=int,
+        default=None,
+        metavar="N",
+        help="split the extracted text into RAG-ready chunks of N chars, "
+        "boundaries at paragraph/sentence edges, overlap kept (single URL; "
+        "jsonl emits one record per chunk with offsets)",
+    )
+    scrape.add_argument(
+        "--chunk-overlap",
+        type=int,
+        default=150,
+        metavar="N",
+        help="overlap characters between consecutive chunks (default 150)",
+    )
+
+    map_p = sub.add_parser(
+        "map",
+        help="discover a page's URLs (links + JS endpoints), scored, no content fetches",
+        parents=[common],
+    )
+    map_p.add_argument("url", metavar="URL", help="the page to map")
+    map_p.add_argument(
+        "--limit", type=int, default=100, metavar="N", help="max URLs to output (default 100)"
+    )
+    map_p.add_argument("--format", choices=("text", "jsonl"), default="text", help="output format")
+    map_p.add_argument("--timeout", type=float, default=20.0, metavar="SEC", help="(default 20)")
+    map_p.add_argument(
+        "--max-bytes",
+        type=int,
+        default=5 * 1024 * 1024,
+        metavar="N",
+        help="page byte cap (default 5 MiB)",
+    )
 
     research = sub.add_parser(
         "research",
@@ -508,9 +543,33 @@ def _build_parser() -> argparse.ArgumentParser:
             "resilient fetcher's business -- no model calls on dead URLs"
         ),
     )
+    run_p.add_argument(
+        "--warc",
+        metavar="PATH",
+        default="",
+        help="write WARC 1.1 evidence to this file: every fetch becomes "
+        "request/response records with sha-256 digests; walls and dead ends "
+        "carry their classification as metadata records",
+    )
 
     status_p = crawl_sub.add_parser("status", help="show frontier stats for a state file")
     status_p.add_argument("--state", metavar="PATH", required=True, help="frontier SQLite file")
+
+    report_p = crawl_sub.add_parser(
+        "report",
+        help="politeness receipts: per-host evidence of how the crawl behaved",
+    )
+    report_p.add_argument("--state", metavar="PATH", required=True, help="frontier SQLite file")
+    report_p.add_argument(
+        "--format", choices=("markdown", "json"), default="markdown", help="output format"
+    )
+    report_p.add_argument(
+        "--delay-ms",
+        type=int,
+        default=None,
+        metavar="MS",
+        help="the crawl's per-host delay, to check observed gaps against (optional)",
+    )
 
     watch = sub.add_parser(
         "watch",
@@ -879,6 +938,17 @@ def cmd_scrape(cfg: BridgeConfig, args: argparse.Namespace) -> int:
         if args.ask:
             kwargs["query"] = args.ask
         result = ai_scrape(cfg, args.url[0], **kwargs)
+        if args.chunks is not None:
+            if not result.ok:
+                print(f"error: {result.error}", file=sys.stderr)
+                return 1
+            return _emit_chunks_output(
+                result.url,
+                result.text,
+                max_chars=args.chunks,
+                overlap=args.chunk_overlap,
+                fmt=args.format,
+            )
         if args.format == "jsonl":
             print(json.dumps(result.as_dict(), ensure_ascii=False))
             return 0 if result.ok else 1
@@ -973,6 +1043,41 @@ def _cmd_scrape_classic(cfg: BridgeConfig, args: argparse.Namespace) -> int:
         max_chars = 200_000 if args.ask else 50_000
     smart = not args.no_smart and getattr(cfg, "smart_fetch", True)
     cache = None if args.no_cache else ResearchCache(ResearchCache.default_path(), args.cache_ttl)
+
+    if args.chunks is not None:
+        if len(args.url) != 1:
+            print("error: --chunks works with a single URL", file=sys.stderr)
+            return 2
+        if args.ask or want_ai_clean:
+            print(
+                "error: --chunks is a deterministic text transform; "
+                "it conflicts with --ask/--ai-clean",
+                file=sys.stderr,
+            )
+            return 2
+        from .web_scraper import ScrapeError, scrape_page
+
+        try:
+            page = scrape_page(
+                cfg,
+                args.url[0],
+                max_chars=max_chars,
+                ignore_robots=not args.respect_robots,
+                smart=smart,
+                cache=cache,
+                refresh=args.refresh,
+                allow_local=True,
+            )
+        except ScrapeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        return _emit_chunks_output(
+            page.url,
+            page.text,
+            max_chars=args.chunks,
+            overlap=args.chunk_overlap,
+            fmt=args.format,
+        )
 
     try:
         if len(args.url) == 1 and args.format == "text" and not want_ai_clean:
@@ -1099,6 +1204,133 @@ def _cmd_scrape_classic(cfg: BridgeConfig, args: argparse.Namespace) -> int:
     failed = sum(1 for item in items if not item.ok)
     if failed == len(items) and items:
         return 1  # nothing succeeded: say so through the exit code
+    return 0
+
+
+def _emit_chunks_output(
+    url: str,
+    text: str,
+    *,
+    max_chars: int,
+    overlap: int,
+    fmt: str,
+) -> int:
+    """--chunks output: RAG-ready chunk records with citation offsets.
+
+    jsonl gives one record per chunk (``type/url/index/start_char/end_char/
+    text/total``) so a vector store can cite ``url#chunk-3`` and verify the
+    quote against ``start_char:end_char`` of the cached page. text/markdown
+    render human-readable sections. Chunking is a pure transform of the
+    already-extracted text -- no AI, no re-fetch, no cache writes.
+    """
+    from .text_pipeline import chunk_text
+
+    chunks = chunk_text(text, max_chars=max_chars, overlap=overlap)
+    if not chunks:
+        print(f"error: {url} yielded no text to chunk", file=sys.stderr)
+        return 1
+    if fmt == "jsonl":
+        for chunk in chunks:
+            print(
+                json.dumps(
+                    {
+                        "type": "chunk",
+                        "url": url,
+                        "index": chunk.index,
+                        "start_char": chunk.start_char,
+                        "end_char": chunk.end_char,
+                        "text": chunk.text,
+                        "total": len(chunks),
+                    },
+                    ensure_ascii=False,
+                )
+            )
+    else:
+        for chunk in chunks:
+            print(
+                f"--- chunk {chunk.index + 1}/{len(chunks)} (chars {chunk.start_char}-{chunk.end_char}) ---"
+            )
+            print(chunk.text)
+            print()
+    return 0
+
+
+def cmd_map(cfg: BridgeConfig, args: argparse.Namespace) -> int:
+    """Map one page: URLs it links to (or fetches from JS), scored, no fetches.
+
+    Firecrawl's ``map`` proved agents want URL discovery without content;
+    freegem's version is one guarded fetch of the page, then pure parsing:
+    ``<a href>`` links and the fetch/XHR endpoints the page's own scripts
+    volunteer (discovery.py), ranked by the best-first scorer. Nothing else
+    is fetched -- the output is a plan, not a crawl.
+    """
+    # A map's output feeds future fetches; discovered URLs demand strictness.
+    cfg = _strict_guard(cfg)
+    from .crawler.discovery import BestFirstPrioritizer, discover_js_endpoints
+    from .crawler.fetch import crawl_fetch
+    from .crawler.hardening import HtmlDom, ResourceLimits
+    from .crawler.urls import normalize_url, url_origin
+
+    try:
+        url = normalize_url(args.url)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    outcome = crawl_fetch(
+        cfg,
+        url,
+        limits=ResourceLimits(timeout_sec=args.timeout, max_bytes=args.max_bytes),
+    )
+    if not outcome.ok or outcome.not_modified:
+        print(
+            f"error: map failed on {url}: {outcome.error or outcome.kind}",
+            file=sys.stderr,
+        )
+        return 1
+    text = outcome.text()
+    dom = HtmlDom(max_nodes=100_000, max_depth=200)
+    dom.feed(text)
+
+    candidates: dict[str, set[str]] = {}
+
+    def add_target(raw: str, source: str) -> None:
+        if not raw or raw.startswith(("mailto:", "javascript:", "tel:", "#")):
+            return
+        try:
+            target = normalize_url(raw, base=url)
+        except ValueError:
+            return
+        if target == url:
+            return
+        candidates.setdefault(target, set()).add(source)
+
+    for node in dom.root.iter():
+        if node.tag == "a":
+            href = node.attrs.get("href")
+            if href:
+                add_target(href, "link")
+    for endpoint in discover_js_endpoints(text, base_url=url):
+        add_target(endpoint, "js_endpoint")
+
+    prioritizer = BestFirstPrioritizer(origin=url_origin(url), top_k=max(1, args.limit))
+    plan = prioritizer.enqueue_plan(list(candidates))
+    if args.format == "jsonl":
+        for entry in plan:
+            print(
+                json.dumps(
+                    {
+                        "url": entry["url"],
+                        "score": entry["score"],
+                        "priority": entry["priority"],
+                        "sources": sorted(candidates.get(entry["url"], set())),
+                    },
+                    ensure_ascii=False,
+                )
+            )
+    else:
+        for entry in plan:
+            sources = ", ".join(sorted(candidates.get(entry["url"], set())))
+            print(f"{entry['score']:5.2f}  {entry['url']}  [{sources}]")
     return 0
 
 
@@ -1295,6 +1527,7 @@ def _crawl_spec(args: argparse.Namespace) -> Any:
         artifacts_dir=getattr(args, "artifacts", "") or "",
         state_path=args.state or "",
         ai_rescue=bool(getattr(args, "ai_rescue", False)),
+        warc_path=getattr(args, "warc", "") or "",
     )
 
 
@@ -1309,6 +1542,23 @@ def cmd_crawl(cfg: BridgeConfig, args: argparse.Namespace) -> int:
     from .crawler import run as run_crawl
 
     mode = args.crawl_cmd
+    if mode == "report":
+        if not args.state or not os.path.exists(args.state):
+            print("crawl report needs --state pointing at an existing state file", file=sys.stderr)
+            return 2
+        from .crawler.fetch import _BASE_HEADERS
+        from .crawler.receipts import build_receipts, render_markdown
+
+        receipt = build_receipts(
+            args.state,
+            delay_ms=args.delay_ms,
+            user_agent=_BASE_HEADERS["User-Agent"],
+        )
+        if args.format == "json":
+            print(json.dumps(receipt, indent=2, ensure_ascii=False))
+        else:
+            print(render_markdown(receipt))
+        return 0
     if mode == "status":
         if not args.state or not os.path.exists(args.state):
             print("crawl status needs --state pointing at an existing state file", file=sys.stderr)
@@ -1553,6 +1803,7 @@ def main(argv: list[str] | None = None) -> int:
         "ask",
         "models",
         "scrape",
+        "map",
         "research",
         "verify",
         "crawl",
@@ -1598,6 +1849,7 @@ def main(argv: list[str] | None = None) -> int:
         "ask": cmd_ask,
         "models": cmd_models,
         "scrape": cmd_scrape,
+        "map": cmd_map,
         "research": cmd_research,
         "verify": cmd_verify,
         "crawl": cmd_crawl,
