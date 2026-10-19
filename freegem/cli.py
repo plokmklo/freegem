@@ -140,6 +140,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="disable the smart-fetch fallback ladder (direct fetch only)",
     )
     scrape.add_argument(
+        "--ai-clean",
+        action="store_true",
+        help="after the fetch, one bounded Gemini pass returns the page's main "
+        "readable content (navigation/cookie/boilerplate dropped); AI-mediated "
+        "view, labeled in the output, never cached as a verbatim extraction "
+        "(single-URL text/markdown mode)",
+    )
+    scrape.add_argument(
         "--guard",
         action="store_true",
         help="enable the SSRF guard (scheme + public-IP checks, pinned dial); "
@@ -491,7 +499,9 @@ def _build_parser() -> argparse.ArgumentParser:
         epilog="exit codes: 0 baseline/no change (or clean Ctrl-C), 3 changed (--once), "
         "1 fetch/error, 2 usage",
     )
-    watch.add_argument("url", metavar="URL", help="the page to watch (http/https)")
+    watch.add_argument(
+        "url", nargs="?", default=None, metavar="URL", help="the page to watch (http/https)"
+    )
     watch.add_argument(
         "--interval",
         metavar="DUR",
@@ -514,6 +524,34 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=("text", "json"),
         default="text",
         help="output format (default text)",
+    )
+    watch.add_argument(
+        "--list",
+        action="store_true",
+        help="list every stored watch (url, last check, state file) and exit",
+    )
+    watch.add_argument(
+        "--forget",
+        action="store_true",
+        help="with a URL: drop that URL's baseline and exit",
+    )
+    watch.add_argument(
+        "--forget-all",
+        action="store_true",
+        help="drop EVERY watch baseline (and stale tmp files) and exit",
+    )
+    watch.add_argument(
+        "--max-age",
+        metavar="DUR",
+        default=None,
+        help="before checking: drop watch entries not polled within DUR (e.g. 30d)",
+    )
+    watch.add_argument(
+        "--max-entries",
+        type=int,
+        metavar="N",
+        default=None,
+        help="before checking: keep at most N watch entries, evicting the oldest-checked",
     )
 
     sub.add_parser("models", help="list available models", parents=[common])
@@ -891,6 +929,18 @@ def _cmd_scrape_classic(cfg: BridgeConfig, args: argparse.Namespace) -> int:
     if getattr(args, "guard", False):
         cfg = cfg.replace(guard=True)
 
+    want_ai_clean = getattr(args, "ai_clean", False)
+    if want_ai_clean and args.ask:
+        print("error: --ai-clean and --ask are both AI transformations; pick one", file=sys.stderr)
+        return 2
+    if want_ai_clean and (len(args.url) > 1 or args.format == "jsonl"):
+        print(
+            "error: --ai-clean works with a single URL in text/markdown mode "
+            "(the cleaned view is caller-specific and never cached as a verbatim extraction)",
+            file=sys.stderr,
+        )
+        return 2
+
     max_chars = args.max_chars
     if max_chars is None:
         # Question mode is the signal for "give me more content".
@@ -899,7 +949,7 @@ def _cmd_scrape_classic(cfg: BridgeConfig, args: argparse.Namespace) -> int:
     cache = None if args.no_cache else ResearchCache(ResearchCache.default_path(), args.cache_ttl)
 
     try:
-        if len(args.url) == 1 and args.format == "text":
+        if len(args.url) == 1 and args.format == "text" and not want_ai_clean:
             output = scrape_cli(
                 cfg,
                 url=args.url[0],
@@ -919,10 +969,10 @@ def _cmd_scrape_classic(cfg: BridgeConfig, args: argparse.Namespace) -> int:
             print("error: --ask works with a single URL only", file=sys.stderr)
             return 2
 
-        if len(args.url) == 1 and args.format == "markdown":
-            # Single-URL markdown: render the extracted page as a document
-            # (H1 title, body, optional link list) instead of the plain-text
-            # wrapper. Same fetch path, guards, cache, and ladder as text.
+        if len(args.url) == 1 and args.format in ("text", "markdown"):
+            # Single-URL text/markdown: render the extracted page (plain or
+            # as a document). --ai-clean adds one bounded Gemini pass over
+            # the extracted text and prints the labeled AI-mediated view.
             from .web_scraper import scrape_page
 
             page = scrape_page(
@@ -935,16 +985,45 @@ def _cmd_scrape_classic(cfg: BridgeConfig, args: argparse.Namespace) -> int:
                 refresh=args.refresh,
                 allow_local=True,
             )
-            print(
-                _scrape_markdown(
-                    url=page.url,
-                    title=page.title,
-                    text=page.text,
-                    truncated=page.truncated,
-                    links=page.links if args.links else None,
+            if want_ai_clean:
+                from .smart_fetch import ai_clean
+
+                # The cleaned view is caller-specific: computed per run,
+                # NEVER written into the fetch cache (#21 discipline), and
+                # labeled where no reader can miss it.
+                cleaned = ai_clean(cfg, page.url, page.text)
+                if args.format == "markdown":
+                    print(
+                        _scrape_markdown(
+                            url=page.url,
+                            title=page.title,
+                            text=cleaned,
+                            truncated=False,
+                            links=page.links if args.links else None,
+                        )
+                    )
+                    print()
+                    print(
+                        "<!-- ai-clean: AI-mediated cleanup of the extracted page text; not a verbatim fetch -->"
+                    )
+                else:
+                    print(f"title: {page.title}  (ai-clean view of {page.url})")
+                    print(
+                        "note: AI-mediated cleanup -- navigation and boilerplate dropped by Gemini; not a verbatim fetch\n"
+                    )
+                    print(cleaned)
+                return 0
+            if args.format == "markdown":
+                print(
+                    _scrape_markdown(
+                        url=page.url,
+                        title=page.title,
+                        text=page.text,
+                        truncated=page.truncated,
+                        links=page.links if args.links else None,
+                    )
                 )
-            )
-            return 0
+                return 0
 
         items = scrape_many(
             cfg,
@@ -1293,11 +1372,79 @@ def cmd_watch(cfg: BridgeConfig, args: argparse.Namespace) -> int:
     once per invocation: exit 0 (baseline/no change), 3 (changed), 1 (fetch
     failure -- the fetch path is the ordinary guarded scraper, and its
     ScrapeError comes through here as an honest error line). With --interval
-    the command loops until Ctrl-C and exits 0 on the interrupt.
+    the command loops until Ctrl-C and exits 0 on the interrupt; (#52) one
+    failed poll inside the loop is a recorded line and a retry, not a crash.
+
+    (#55) State management: ``--list`` shows every stored watch, ``--forget
+    URL`` drops one baseline, ``--forget-all`` clears the state dir, and
+    ``--max-age`` / ``--max-entries`` sweep stale entries before a check.
     """
     # Watch targets come from a config file, not the keyboard; stay strict.
     cfg = _strict_guard(cfg)
-    from .watch import parse_interval, render_text, watch_poll
+    from .watch import (
+        forget_all_watches,
+        forget_watch,
+        list_watches,
+        parse_interval,
+        prune_watches,
+        render_text,
+        watch_poll,
+    )
+
+    # ── state-management modes (no URL, no fetch) ──
+    if args.list:
+        entries = list_watches()
+        if not entries:
+            print("no watches stored")
+            return 0
+        import time as _time
+
+        for entry in entries:
+            if entry["corrupt"]:
+                print(
+                    f"CORRUPT  {entry['path']}  ({entry['bytes']} bytes) -- use --forget-all or delete the file"
+                )
+                continue
+            when = _time.strftime("%Y-%m-%d %H:%M:%S", _time.gmtime(entry["checked_at"]))
+            changed = (
+                _time.strftime("%Y-%m-%d %H:%M:%S", _time.gmtime(entry["last_changed_at"]))
+                if entry["last_changed_at"]
+                else "never"
+            )
+            print(
+                f"{when}  last changed {changed}  {entry['url']}\n  state: {entry['path']} ({entry['bytes']} bytes)"
+            )
+        return 0
+    if args.forget_all:
+        removed = forget_all_watches()
+        print(f"forgot {removed} watch state file(s)")
+        return 0
+    if args.forget:
+        if not args.url:
+            print("error: --forget needs a URL argument", file=sys.stderr)
+            return 2
+        if forget_watch(args.url):
+            print(f"forgot: {args.url}")
+            return 0
+        print(f"no stored watch for {args.url}")
+        return 1
+
+    if not args.url:
+        print("error: watch needs a URL (or --list / --forget-all)", file=sys.stderr)
+        return 2
+
+    # ── optional pre-check sweeps (#55) ──
+    max_age_sec: float | None = None
+    if args.max_age is not None:
+        try:
+            max_age_sec = parse_interval(args.max_age)
+        except ValueError as exc:
+            print(f"error: --max-age {args.max_age!r}: {exc}", file=sys.stderr)
+            return 2
+    if max_age_sec is not None or args.max_entries is not None:
+        removed = prune_watches(max_age_sec=max_age_sec, max_entries=args.max_entries)
+        if removed:
+            print(f"pruned {removed} stale watch state file(s)", file=sys.stderr)
 
     interval_sec: float | None = None
     if args.interval is not None:
@@ -1308,6 +1455,7 @@ def cmd_watch(cfg: BridgeConfig, args: argparse.Namespace) -> int:
             return 2
     single_check = args.once or interval_sec is None
     last = None
+    saw_error = False
     try:
         for result in watch_poll(
             args.url,
@@ -1316,6 +1464,8 @@ def cmd_watch(cfg: BridgeConfig, args: argparse.Namespace) -> int:
             max_polls=1 if single_check else None,
         ):
             last = result
+            if result.error is not None:
+                saw_error = True
             if args.format == "json":
                 print(json.dumps(result.to_dict(), ensure_ascii=False), flush=True)
             else:
@@ -1326,6 +1476,8 @@ def cmd_watch(cfg: BridgeConfig, args: argparse.Namespace) -> int:
     except (BridgeError, OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    if single_check and saw_error:
+        return 1  # machine-grep-able "poll failed" for --once scripts
     if last is not None and last.changed:
         return 3  # machine-grep-able "changed" for --once scripts
     return 0

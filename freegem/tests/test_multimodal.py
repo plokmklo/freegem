@@ -140,7 +140,9 @@ class FetchImageBytesTests(unittest.TestCase):
         opener.open.return_value.read.side_effect = [b"imagedata", b""]
         with (
             mock.patch("freegem.multimodal._host_resolves_public", return_value=True),
-            mock.patch("freegem.multimodal.urllib.request.build_opener", return_value=opener),
+            # (#63) fetch_image_bytes dials through the hand-built guarded
+            # opener; the seam is build_guarded_opener itself now.
+            mock.patch("freegem.multimodal.build_guarded_opener", return_value=opener),
         ):
             result = fetch_image_bytes(self.cfg, "https://example.com/pic.png")
         self.assertEqual(result, b"imagedata")

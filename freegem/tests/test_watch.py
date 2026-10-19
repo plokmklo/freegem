@@ -121,7 +121,9 @@ class WatchCoreTests(unittest.TestCase):
             url=URL,
             text="some text",
             text_hash=hashlib.sha256(b"some text").hexdigest(),
-            simhash=12345678901234567890,
+            # (#56) load() now re-verifies the simhash against the text, so
+            # the round trip must store the text's real simhash.
+            simhash=Simhash.from_text("some text").value,
             checked_at=42.0,
             first_seen=7.0,
             last_changed_at=None,
@@ -368,6 +370,8 @@ class CliWatchTests(unittest.TestCase):
         self.assertTrue(payload["changed_blocks"])
 
     def test_fetch_failure_exits_nonzero_with_honest_stderr(self) -> None:
+        """(#52) A failed --once poll is a RECORDED LINE (the baseline is
+        kept, a watcher script gets exit 1), not a crash traceback."""
         from freegem.web_scraper import ScrapeError
 
         with mock.patch(
@@ -376,9 +380,10 @@ class CliWatchTests(unittest.TestCase):
         ):
             code, out, err = self.run_cli(["watch", URL, "--once"])
         self.assertEqual(code, 1)
-        self.assertEqual(out, "")
-        self.assertIn("error:", err)
-        self.assertIn("HTTP 503", err)
+        self.assertIn("fetch failed: https://example.com/status", out)
+        self.assertIn("HTTP 503", out)
+        self.assertIn("no verdict this poll; the stored baseline is kept", out)
+        self.assertEqual(err, "")
 
     def test_bad_interval_is_a_usage_error(self) -> None:
         code, _, err = self.run_cli(["watch", URL, "--interval", "nonsense", "--once"])

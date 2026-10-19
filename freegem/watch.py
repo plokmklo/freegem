@@ -37,11 +37,13 @@ Deliberate choices:
 
 from __future__ import annotations
 
+import contextlib
 import difflib
 import hashlib
 import json
 import os
 import re
+import tempfile
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -50,14 +52,19 @@ from typing import Any
 
 from .config import BridgeConfig
 from .dedup import Simhash
+from .web_scraper import ScrapeError
 
 __all__ = [
     "DEFAULT_INTERVAL_SEC",
     "DiffBlock",
     "WatchResult",
     "WatchState",
+    "forget_all_watches",
+    "forget_watch",
+    "list_watches",
     "normalize_text",
     "parse_interval",
+    "prune_watches",
     "render_text",
     "state_path_for",
     "watch_poll",
@@ -70,8 +77,8 @@ DEFAULT_INTERVAL_SEC = 3600.0
 #: Diff blocks the TEXT report shows before pointing at ``--delta``.
 _SUMMARY_BLOCK_LIMIT = 5
 
-_WORD_INTERVAL_RE = re.compile(r"(\d+(?:\.\d+)?)\s*([smh]?)")
-_UNIT_SECONDS = {"": 1.0, "s": 1.0, "m": 60.0, "h": 3600.0}
+_WORD_INTERVAL_RE = re.compile(r"(\d+(?:\.\d+)?)\s*([smhd]?)")
+_UNIT_SECONDS = {"": 1.0, "s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
 
 
 # ─── state ────────────────────────────────────────────────────────────────────
@@ -139,14 +146,29 @@ class WatchState:
         }
 
     def save(self, path: str | os.PathLike[str]) -> None:
-        """Persist atomically (tmp + rename), the same way the research cache
-        does: a crash mid-write leaves the previous baseline, never a half
-        file that would masquerade as "no change"."""
+        """Persist atomically (unique tmp + rename), the same way the research
+        cache does: a crash mid-write leaves the previous baseline, never a
+        half file that would masquerade as "no change".
+
+        (#54) The tmp name is UNIQUE per write (mkstemp), not a fixed
+        ``<name>.tmp``: two concurrent watches of the same URL used to
+        interleave writes into the SAME tmp file and tear the JSON, which
+        ``load`` then read as corrupt and silently reset to a fresh
+        baseline. Unique tmp + ``os.replace`` means every rename installs a
+        COMPLETE file; last writer still wins, but no writer ever wins with
+        garbage.
+        """
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_name(target.name + ".tmp")
-        tmp.write_text(json.dumps(self.to_dict(), ensure_ascii=False), encoding="utf-8")
-        tmp.replace(target)
+        fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=target.name + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps(self.to_dict(), ensure_ascii=False))
+            os.replace(tmp_name, target)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_name)
+            raise
 
     @classmethod
     def load(cls, path: str | os.PathLike[str]) -> WatchState | None:
@@ -154,8 +176,12 @@ class WatchState:
 
         A corrupt state file must degrade to a fresh baseline, never crash
         and never compare against garbage: missing file, unparseable JSON,
-        wrong shapes, or a text whose stored hash does not match (a damaged
-        or hand-edited entry) all load as None.
+        wrong shapes, a text whose stored hash does not match (a damaged or
+        hand-edited entry), or (#56) a stored simhash that the text does not
+        actually hash to -- ``text_hash`` gates the change VERDICT, but the
+        simhash drives the reported distance, and a tampered or stale
+        simhash used to sail through load and skew every report. Both are
+        now recomputed/checked; either mismatch loads as None.
         """
         try:
             data = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -179,6 +205,12 @@ class WatchState:
         if last_changed is not None and not isinstance(last_changed, (int, float)):
             return None
         if _sha256(text) != digest:
+            return None
+        # (#56) The sibling integrity check: the stored simhash must be what
+        # the stored text actually hashes to. Recomputing a 64-bit simhash
+        # is cheap next to the wrong-numbers report a tampered field would
+        # produce.
+        if Simhash.from_text(text).value != simhash:
             return None
         return cls(
             url=url,
@@ -253,6 +285,14 @@ class WatchResult:
     changed_blocks: tuple[DiffBlock, ...] = field(default_factory=tuple)
     checked_at: float = 0.0
     state_path: str = ""
+    #: (#52) Set when the POLL ITSELF failed (fetch error): no verdict this
+    #: round; the interval loop records it and retries next poll. None on a
+    #: poll that produced a verdict (baseline / changed / no change).
+    error: str | None = None
+    #: (#53) Set when the fetch SUCCEEDED but the page read as junk (an empty
+    #: shell, a bot-challenge page): no verdict, and the stored baseline is
+    #: KEPT untouched so a transient wall never poisons future diffs.
+    junk_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """The machine-readable shape of ``--format json``."""
@@ -268,6 +308,8 @@ class WatchResult:
             "changed_blocks": [block.to_dict() for block in self.changed_blocks],
             "checked_at": self.checked_at,
             "state_path": self.state_path,
+            "error": self.error,
+            "junk_reason": self.junk_reason,
         }
 
 
@@ -277,6 +319,26 @@ def render_text(result: WatchResult, *, delta: bool = False) -> str:
     ``delta=True`` prints every diff block; without it only the first
     :data:`_SUMMARY_BLOCK_LIMIT` are shown and the rest are counted.
     """
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(result.checked_at))
+    if result.error is not None:
+        # (#52) One failed poll is a LINE, not a crash: interval watchers
+        # stay up and retry next round.
+        return "\n".join(
+            [
+                f"fetch failed: {result.url}  (checked {stamp})",
+                f"  {result.error}",
+                "  no verdict this poll; the stored baseline is kept",
+            ]
+        )
+    if result.junk_reason is not None:
+        # (#53) The page answered but what came back is not page content.
+        return "\n".join(
+            [
+                f"no verdict: {result.url}  (checked {stamp})",
+                f"  {result.junk_reason}",
+                "  the stored baseline is kept; diffing resumes when the real page returns",
+            ]
+        )
     if result.baseline:
         return "\n".join(
             [
@@ -285,7 +347,6 @@ def render_text(result: WatchResult, *, delta: bool = False) -> str:
                 "  future runs diff against this snapshot",
             ]
         )
-    stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(result.checked_at))
     if result.changed is False:
         return f"no change: {result.url}  (checked {stamp})"
     distance = result.simhash_distance if result.simhash_distance is not None else 0
@@ -322,6 +383,33 @@ def _default_fetcher(cfg: BridgeConfig, url: str) -> str:
     return page.text
 
 
+def _junk_reason(text: str) -> str | None:
+    """(#53) Why this poll's text must not touch the baseline, or None.
+
+    Two junk shapes are guarded -- the two a watch actually meets:
+
+    * EMPTY text: an extracted zero (a JS shell, a blank soft-200). As a
+      baseline it is useless; as a diff target it would report the whole
+      page as removed.
+    * A BOT-CHALLENGE page: the soft-200 interstitial ("Just a moment...",
+      "Enable JavaScript and cookies"). A site behind a challenge wall
+      serves these intermittently; accepting one as a baseline (or as a
+      CHANGED target) overwrites good state and then false-diffs forever.
+
+    Deliberately NOT guarded: short-but-real pages (a number, a one-line
+    status) and honest site restructures to a stub -- the first are real
+    baselines, the second is a change worth REPORTING, and the diff stays
+    computed against the last good snapshot either way.
+    """
+    if not text.strip():
+        return "poll extracted zero readable text (empty page or JS shell)"
+    from .smart_fetch import _looks_like_challenge
+
+    if _looks_like_challenge(text):
+        return "poll returned a bot-challenge page, not content"
+    return None
+
+
 def watch_url(
     url: str,
     cfg: BridgeConfig,
@@ -346,6 +434,29 @@ def watch_url(
     text = normalize_text(fetch(url))
     fingerprint = Simhash.from_text(text)
     prior = WatchState.load(path)
+
+    # (#53) The minimum-content guard runs BEFORE any state decision: junk
+    # never becomes a baseline and never overwrites one. A good baseline
+    # survives challenge storms intact; diffing resumes when the real page
+    # returns.
+    junk = _junk_reason(text)
+    if junk is not None:
+        if prior is None:
+            raise ScrapeError(
+                f"watch refused to baseline {url!r}: {junk} -- nothing worth "
+                "comparing against was fetched; retry when the page reads"
+            )
+        return WatchResult(
+            url=url,
+            baseline=False,
+            changed=None,
+            simhash_before=prior.simhash,
+            simhash_after=fingerprint.value,
+            simhash_distance=None,
+            checked_at=ts,
+            state_path=str(path),
+            junk_reason=junk,
+        )
 
     if prior is None:
         state = WatchState(
@@ -428,13 +539,173 @@ def watch_poll(
     sleep_fn = time.sleep if sleep is None else sleep
     polls = 0
     while max_polls is None or polls < max_polls:
-        yield watch_url(url, cfg, fetcher=fetcher, state_dir=state_dir)
+        try:
+            result = watch_url(url, cfg, fetcher=fetcher, state_dir=state_dir)
+        except ScrapeError as exc:
+            # (#52) A monitor is FOR the flaky moments: one 503, one blip,
+            # one refusal must yield a recorded failed poll and a retry on
+            # the next tick -- not kill the watcher. Programming errors and
+            # KeyboardInterrupt still propagate.
+            result = WatchResult(
+                url=url,
+                baseline=False,
+                changed=None,
+                simhash_before=None,
+                simhash_after=0,
+                simhash_distance=None,
+                checked_at=time.time(),
+                state_path=str(state_path_for(url, state_dir)),
+                error=str(exc),
+            )
+        yield result
         polls += 1
         if stop is not None and stop():
             return
         if max_polls is not None and polls >= max_polls:
             return
         sleep_fn(interval_sec)
+
+
+# ─── state management (#55) ──────────────────────────────────────────────────
+#
+# Watch state used to be write-only from the user's point of view: one JSON
+# blob per URL forever, no way to see what is being watched, no way to drop
+# a watch, no bound on growth. A long-lived install accumulated stale
+# baselines and large page texts without limit. These four functions are the
+# management surface; the CLI wires them to ``watch --list``, ``watch
+# --forget URL``, ``watch --forget-all``, and the ``--max-age`` /
+# ``--max-entries`` sweeps.
+
+
+def list_watches(state_dir: str | os.PathLike[str] | None = None) -> list[dict[str, Any]]:
+    """Every stored watch, oldest-check first.
+
+    Each entry carries the URL, the timestamps, and the state file's path
+    and size. A CORRUPT state file is listed too (``corrupt: True``): hiding
+    it would leave a file the user cannot see but every poll trips over
+    (load() treats it as a fresh baseline). Corrupt entries sort first so
+    they are impossible to miss.
+    """
+    root = resolve_state_dir(state_dir)
+    entries: list[dict[str, Any]] = []
+    if not root.is_dir():
+        return entries
+    for path in sorted(root.glob("*.json")):
+        state = WatchState.load(path)
+        if state is None:
+            entries.append(
+                {
+                    "url": None,
+                    "corrupt": True,
+                    "path": str(path),
+                    "bytes": path.stat().st_size,
+                    "checked_at": None,
+                    "first_seen": None,
+                    "last_changed_at": None,
+                }
+            )
+            continue
+        entries.append(
+            {
+                "url": state.url,
+                "corrupt": False,
+                "path": str(path),
+                "bytes": path.stat().st_size,
+                "checked_at": state.checked_at,
+                "first_seen": state.first_seen,
+                "last_changed_at": state.last_changed_at,
+            }
+        )
+    entries.sort(key=lambda e: (e["checked_at"] is not None, e["checked_at"] or 0.0))
+    return entries
+
+
+def forget_watch(url: str, state_dir: str | os.PathLike[str] | None = None) -> bool:
+    """Drop one URL's watch state. True when a baseline was actually removed."""
+    path = state_path_for(url, state_dir)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    # (#54) Sweep any abandoned tmp siblings of this entry while we are here.
+    with contextlib.suppress(OSError):
+        for stale in path.parent.glob(path.name + ".*.tmp"):
+            stale.unlink()
+    return True
+
+
+def forget_all_watches(state_dir: str | os.PathLike[str] | None = None) -> int:
+    """Drop EVERY watch state (and abandoned tmp files). Returns the count."""
+    root = resolve_state_dir(state_dir)
+    removed = 0
+    if not root.is_dir():
+        return removed
+    for path in root.iterdir():
+        if path.suffix not in (".json", ".tmp"):
+            continue
+        try:
+            path.unlink()
+            removed += 1
+        except OSError:
+            pass
+    return removed
+
+
+def prune_watches(
+    state_dir: str | os.PathLike[str] | None = None,
+    *,
+    max_age_sec: float | None = None,
+    max_entries: int | None = None,
+    now: float | None = None,
+) -> int:
+    """(#55) Evict stale watches; returns how many state files were removed.
+
+    Two independent sweeps, applied in order:
+
+    * ``max_age_sec``: entries not POLLED within this window are dropped.
+      A watched page that stopped being checked is the definition of stale;
+      its baseline text (often a full page) serves nobody.
+    * ``max_entries``: beyond this many entries the OLDEST-CHECKED are
+      evicted first -- the soft size cap. A soft cap, not a hard quota: it
+      bounds file COUNT, and with typical page-text sizes that bounds disk
+      use well enough.
+
+    A corrupt state file counts as checked-never (0.0), so it is always
+    first out the door under either sweep.
+    """
+    root = resolve_state_dir(state_dir)
+    if not root.is_dir():
+        return 0
+    ts = time.time() if now is None else now
+    entries: list[tuple[float, Path]] = []
+    for path in root.glob("*.json"):
+        state = WatchState.load(path)
+        checked = state.checked_at if state is not None else 0.0
+        entries.append((checked, path))
+
+    removed = 0
+    if max_age_sec is not None and max_age_sec > 0:
+        cutoff = ts - max_age_sec
+        kept: list[tuple[float, Path]] = []
+        for checked, path in entries:
+            if checked < cutoff:
+                try:
+                    path.unlink()
+                    removed += 1
+                except OSError:
+                    kept.append((checked, path))
+            else:
+                kept.append((checked, path))
+        entries = kept
+    if max_entries is not None and max_entries >= 0 and len(entries) > max_entries:
+        entries.sort(key=lambda pair: pair[0])
+        for _checked, path in entries[: len(entries) - max_entries]:
+            try:
+                path.unlink()
+                removed += 1
+            except OSError:
+                pass
+    return removed
 
 
 # ─── interval parsing ─────────────────────────────────────────────────────────

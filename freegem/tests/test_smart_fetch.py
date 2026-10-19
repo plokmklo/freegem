@@ -123,6 +123,7 @@ class FallbackLadderTests(unittest.TestCase):
             strategy: str,
             max_chars: int,
             ignore_robots: bool,
+            budget: float | None = None,
         ) -> object:
             if expect_order is not None:
                 expect_order.append(strategy)
@@ -243,9 +244,12 @@ class FallbackLadderTests(unittest.TestCase):
         message = str(caught.exception)
         self.assertIn("every read path refused", message)
         self.assertIn("direct: HTTP 403", message)
-        for name in STRATEGIES:
+        # (#60) Gated-off rungs drop out of the ladder entirely: the default
+        # config has browser-render off, so the walk is the other four.
+        expected = [s for s in STRATEGIES if s != "browser-render"]
+        for name in expected:
             self.assertIn(name, message)
-        self.assertEqual(len(order), len(STRATEGIES))
+        self.assertEqual(order, expected)
 
     def test_challenge_page_is_not_content(self) -> None:
         """A 'successful' fetch of a Cloudflare-style wall continues the ladder."""
@@ -291,7 +295,10 @@ class FallbackLadderTests(unittest.TestCase):
                 fallback_scrape(
                     self.cfg, "https://x.example/", max_chars=100, first_error="HTTP 403"
                 )
-        self.assertEqual(len(order), len(STRATEGIES))
+        # (#60) The gated-off render rung is dropped before the walk, so the
+        # four allowed rungs (incl. ai-search) are all attempted.
+        self.assertEqual(len(order), len(STRATEGIES) - 1)
+        self.assertNotIn("browser-render", order)
         self.assertIn("ai-search", str(caught.exception))
 
     def test_reader_headers_carry_key_only_when_configured(self) -> None:
@@ -319,17 +326,19 @@ class FallbackLadderTests(unittest.TestCase):
         from freegem.smart_fetch import _ai_read
 
         def wedged_run_tool(cfg: Any, name: Any, kwargs: Any) -> str:
-            time.sleep(1.0)
+            time.sleep(1.2)
             return "a late answer that will be discarded"
 
+        # (#59) The rung skips sub-second bounds outright (a 0.1s wait would
+        # only abandon a thread); the bound is exercised at 1.0s instead.
         with (
-            mock.patch("freegem.smart_fetch._AI_SEARCH_TIMEOUT_SEC", 0.1),
+            mock.patch("freegem.smart_fetch._AI_SEARCH_TIMEOUT_SEC", 1.0),
             mock.patch("freegem.mcp_tools.run_tool", side_effect=wedged_run_tool),
         ):
             started = time.monotonic()
             with self.assertRaises(ScrapeError) as caught:
                 _ai_read(BridgeConfig(guard=True, log_requests=False), "https://x.example/", 1000)
-        self.assertLess(time.monotonic() - started, 0.9, "the bound held")
+        self.assertLess(time.monotonic() - started, 2.0, "the bound held")
         self.assertIn("timed out", str(caught.exception))
 
     def test_ai_search_returns_within_the_bound(self) -> None:
@@ -380,7 +389,8 @@ class FallbackLadderTests(unittest.TestCase):
                 )
         self.assertEqual(order, [], "no rung may run once the budget is gone")
         message = str(caught.exception)
-        self.assertEqual(message.count("ladder budget was exhausted"), len(STRATEGIES))
+        # (#60) Only the four rungs the config allows get a (skipped) slot.
+        self.assertEqual(message.count("ladder budget was exhausted"), len(STRATEGIES) - 1)
         self.assertIn("skipped", message)
 
     def test_healthy_ladder_still_runs_inside_the_budget(self) -> None:
@@ -563,7 +573,12 @@ class WaybackSnapshotTests(unittest.TestCase):
         }
 
         def try_strategy(
-            cfg: Any, url: Any, strategy: Any, max_chars: Any, ignore_robots: Any
+            cfg: Any,
+            url: Any,
+            strategy: Any,
+            max_chars: Any,
+            ignore_robots: Any,
+            budget: float | None = None,
         ) -> Any:
             order.append(strategy)
             outcome = scripted[strategy]
@@ -577,9 +592,11 @@ class WaybackSnapshotTests(unittest.TestCase):
             mock.patch("freegem.smart_fetch.time.sleep"),
         ):
             result = fallback_scrape(cfg, "https://w.example/", max_chars=100, first_error="403")
+        # (#60) The default config gates browser-render off: the rung is
+        # dropped from the walk, not merely failed by its own config check.
         self.assertEqual(
             order,
-            ["browser-headers", "reader", "browser-render", "wayback", "ai-search"],
+            ["browser-headers", "reader", "wayback", "ai-search"],
         )
         self.assertEqual(result.text, "rescued after wayback")
 

@@ -89,6 +89,15 @@ DEFAULT_CONFIG: Mapping[str, Any] = MappingProxyType(
         # (a fresh render beats an old snapshot) and is a plain headless
         # browser: SSRF-guarded per request, no stealth, NON_GOALS hold.
         "smart_fetch_browser_render": False,
+        # AI-assisted content cleanup: one bounded model pass over an
+        # already-fetched page's text that returns the main readable content
+        # (navigation, cookie banners, and related-link walls dropped).
+        # OFF by default -- it transforms a successful read, so it is an
+        # explicit choice (like browser-render), always labeled ("ai-clean"
+        # in CLI output), never cached as a verbatim extraction, and
+        # probabilistic per NON_GOALS. `freegem scrape URL --ai-clean`
+        # enables it per run.
+        "smart_fetch_ai_clean": False,
         # SSRF guard for network fetches: scheme + public-IP checks, pinned
         # dial, redirect re-checks. OFF by default -- validation is a FEATURE,
         # not a gate (user directive 2026-10-17): plain `scrape` should just
@@ -163,6 +172,7 @@ _BOOL_FIELDS = frozenset(
         "smart_fetch",
         "smart_fetch_ai",
         "smart_fetch_browser_render",
+        "smart_fetch_ai_clean",
         "guard",
     }
 )
@@ -307,6 +317,7 @@ class BridgeConfig:
     smart_fetch: bool = DEFAULT_CONFIG["smart_fetch"]
     smart_fetch_ai: bool = DEFAULT_CONFIG["smart_fetch_ai"]
     smart_fetch_browser_render: bool = DEFAULT_CONFIG["smart_fetch_browser_render"]
+    smart_fetch_ai_clean: bool = DEFAULT_CONFIG["smart_fetch_ai_clean"]
     guard: bool = DEFAULT_CONFIG["guard"]
     api_key: str | None = DEFAULT_CONFIG["api_key"]
     brave_api_key: str = DEFAULT_CONFIG["brave_api_key"]

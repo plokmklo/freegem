@@ -28,6 +28,11 @@ class PlaywrightOptions:
     wait_selector: str | None = None
     wait_until: str = "networkidle"  # "domcontentloaded", "load", "networkidle"
     wait_timeout_ms: int = 30000
+    #: (#61) Extra settle beat AFTER navigation/wait_selector, before
+    #: extraction: SPA frameworks hydrate once the DOM event fires, and a
+    #: domcontentloaded-based fetch needs one breath of JS time before
+    #: page.content() sees the rendered text. 0 keeps the old behavior.
+    settle_ms: int = 0
     viewport_width: int = 1280
     viewport_height: int = 800
     user_agent: str | None = None
@@ -179,6 +184,12 @@ def fetch_with_playwright(opts: PlaywrightOptions) -> PlaywrightResult:
 
                 if opts.wait_selector:
                     page.wait_for_selector(opts.wait_selector, timeout=opts.wait_timeout_ms)
+                if opts.settle_ms > 0:
+                    # (#61) The hydration beat: give the SPA's JS one breath
+                    # before the DOM is snapshot. Deliberately INSIDE the
+                    # try: a wedged page here still unwinds through the
+                    # context/browser close below.
+                    page.wait_for_timeout(opts.settle_ms)
 
                 title = page.title()
                 html_content = page.content()

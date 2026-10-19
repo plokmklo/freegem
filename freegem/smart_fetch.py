@@ -54,6 +54,7 @@ import urllib.parse
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 from .config import BridgeConfig
 from .web_scraper import ScrapeError, ScrapeResult, scrape_page
@@ -61,6 +62,7 @@ from .web_scraper import ScrapeError, ScrapeResult, scrape_page
 __all__ = [
     "STRATEGIES",
     "StrategyMemory",
+    "ai_clean",
     "classify_failure",
     "default_memory_path",
     "fallback_scrape",
@@ -91,17 +93,41 @@ _LADDER_BUDGET_SEC = 60.0
 _AI_SEARCH_TIMEOUT_SEC = 30.0
 
 #: Wall-clock bound for the optional browser-render rung (#14). The render
-#: runs in a worker thread (the #25 discipline): OUR wait is bounded so a
-#: wedged launch cannot hold the ladder slot. Playwright's own navigation
-#: wait (``_BROWSER_RENDER_WAIT_MS``) fires first for the normal slow-page
-#: case; this bound additionally covers everything around it. RESIDUAL
-#: (documented, deliberate): the thread is abandoned, not killed -- threads
-#: cannot be killed -- until Playwright's own bounds end it.
+#: runs in a daemon worker thread (the #25 discipline): OUR wait is bounded
+#: so a wedged launch cannot hold the ladder slot. Playwright's own
+#: navigation wait (``_BROWSER_RENDER_WAIT_MS``) fires first for the normal
+#: slow-page case; this bound additionally covers everything around it.
+#: RESIDUAL (documented, deliberate): the thread is abandoned, not killed --
+#: threads cannot be killed -- until Playwright's own bounds end it; the
+#: thread is a DAEMON now (#58), so even a driver wedged past every bound
+#: can no longer block interpreter exit.
 _BROWSER_RENDER_TIMEOUT_SEC = 20.0
 
 #: Playwright navigation wait for the render rung: headroom under the rung
 #: wall-clock bound above.
 _BROWSER_RENDER_WAIT_MS = 15_000
+
+#: (#61) Phase-one navigation wait. ``networkidle`` is the semantically
+#: "fully rendered" wait, but on pages with long-polling, websockets, or
+#: periodic XHR it NEVER fires -- the one rung designed for JS-heavy pages
+#: timed out hardest on exactly them. The rung now renders in two phases:
+#: a SHORT quiet-phase attempt (quiet pages settle in a second or two; if
+#: networkidle fires here, this is the best render), then a
+#: ``domcontentloaded`` phase with a settle beat for chatty pages whose DOM
+#: is ready but whose network never goes quiet.
+_BROWSER_RENDER_QUIET_MS = 6_000
+
+#: (#61) The domcontentloaded phase's settle beat: SPA frameworks hydrate
+#: after the event fires; this gives them one breath before extraction.
+_BROWSER_RENDER_SETTLE_MS = 1_200
+
+#: (#58) Process-wide cap on CONCURRENT headless renders. Every render is a
+#: whole Chromium process; a concurrent batch scrape (up to 16 workers) used
+#: to be able to stack 16 of them outside any tracking. Two slots keep the
+#: orphan ceiling at two abandoned processes per 20s window while leaving
+#: real parallelism for batch runs.
+_MAX_CONCURRENT_RENDERS = 2
+_RENDER_SLOTS = threading.BoundedSemaphore(_MAX_CONCURRENT_RENDERS)
 
 #: A response that is tiny AND challenge-shaped is not content.
 _CHALLENGE_RE = re.compile(
@@ -110,6 +136,14 @@ _CHALLENGE_RE = re.compile(
     re.IGNORECASE,
 )
 _CHALLENGE_MAX_CHARS = 800
+
+#: (#57) A LONG page that is still mostly challenge boilerplate must not
+#: pass the gate just because it cleared the length check. An interstitial
+#: carrying >800 chars of explanatory/legalese text repeats its phrases:
+#: "Just a moment", "Enable JavaScript and cookies", "Verify you are
+#: human". Three or more marker hits inside the head window is boilerplate
+#: repetition, not an article that happened to mention a word.
+_CHALLENGE_DENSITY_HITS = 3
 
 #: The AI step's "I could not read that page" phrasing. An answer that says
 #: it could not access the page is a HONEST non-answer -- the ladder records
@@ -152,11 +186,13 @@ def classify_failure(error: str) -> str:
     """Bucket one ScrapeError message for the ladder's gate.
 
     ``http`` / ``network`` / ``type`` engage the ladder; ``refused`` (SSRF
-    guard, robots opt-in) and ``cap`` (size limits) are OUR refusals, not
-    the site's -- no alternate path may bypass them, so the original error
-    is re-raised as-is.
+    guard, robots opt-in, non-http schemes) and ``cap`` (size limits) are
+    OUR refusals, not the site's -- no alternate path may bypass them, so
+    the original error is re-raised as-is.
     """
     if "SSRF guard" in error or "robots.txt" in error:
+        return "refused"
+    if "refusing scheme" in error:
         return "refused"
     if "exceeds" in error and "cap" in error:
         return "cap"
@@ -168,11 +204,33 @@ def classify_failure(error: str) -> str:
 
 
 def _looks_like_challenge(text: str) -> bool:
-    """True when a 'successful' fetch actually returned a bot wall."""
+    """True when a 'successful' fetch actually returned a bot wall.
+
+    (#57) The old rule was a hard fail-open past 800 chars: a rendered JS
+    interstitial with a long explanatory body passed as content, got
+    ``remember()``ed as a browser-render WIN, and poisoned that host's
+    ladder position for every future fetch. The gate now works in two
+    stages over the head window:
+
+    * no challenge language at all in the head -> content, whatever the
+      length (a 50k article mentioning nothing challenge-shaped never
+      scans further);
+    * challenge language within ``_CHALLENGE_MAX_CHARS``: a SHORT page is
+      a wall (the original rule -- those pages are only ever walls), a
+      LONG one is decided by phrase DENSITY. One or two hits in 800 chars
+      is an article about challenges, CAPTCHAs, or bot protection; three
+      or more is an interstitial repeating its boilerplate.
+    """
     stripped = text.strip()
-    if len(stripped) > _CHALLENGE_MAX_CHARS:
+    if not stripped:
         return False
-    return bool(_CHALLENGE_RE.search(stripped[:_CHALLENGE_MAX_CHARS]))
+    head = stripped[:_CHALLENGE_MAX_CHARS]
+    hits = len(_CHALLENGE_RE.findall(head))
+    if hits == 0:
+        return False
+    if len(stripped) <= _CHALLENGE_MAX_CHARS:
+        return True
+    return hits >= _CHALLENGE_DENSITY_HITS
 
 
 def _looks_like_ai_nonanswer(text: str) -> bool:
@@ -280,9 +338,25 @@ def _ladder_lock(host: str) -> threading.Lock:
 # ─── strategies ──────────────────────────────────────────────────────────────
 
 
-def _strategy_order(host: str) -> list[str]:
-    """The ladder with any remembered winning step moved to the front."""
-    order = list(STRATEGIES)
+#: Strategies whose config gate is open. (#60) The ladder must not spend a
+#: slot (or front-rank a remembered win) on a rung that would refuse
+#: instantly: ``_strategy_order`` drops gated-off rungs the same way it
+#: drops unknown remembered strategies, and a config flip no longer needs
+#: memory invalidation -- the stale entry simply stops ranking while the
+#: gate is closed and comes back if the gate reopens.
+def _gated_off(cfg: BridgeConfig) -> set[str]:
+    off: set[str] = set()
+    if not getattr(cfg, "smart_fetch_browser_render", False):
+        off.add("browser-render")
+    if not getattr(cfg, "smart_fetch_ai", True):
+        off.add("ai-search")
+    return off
+
+
+def _strategy_order(host: str, cfg: BridgeConfig) -> list[str]:
+    """The ladder with gated-off rungs dropped and any remembered winning
+    step (among the rungs still allowed) moved to the front."""
+    order = [s for s in STRATEGIES if s not in _gated_off(cfg)]
     remembered = _MEMORY.get(host)
     if remembered in order:
         order.remove(remembered)
@@ -296,8 +370,15 @@ def _try_strategy(
     strategy: str,
     max_chars: int,
     ignore_robots: bool,
+    budget: float | None = None,
 ) -> ScrapeResult:
-    """One ladder step. Raises ScrapeError when that step cannot read the page."""
+    """One ladder step. Raises ScrapeError when that step cannot read the page.
+
+    ``budget`` (#59) is the ladder's remaining wall-clock in seconds (None
+    when the caller does not track one). The expensive rungs size their own
+    wait by it, so a rung entered at deadline-epsilon can no longer add its
+    full 20-30s on top of an exhausted budget.
+    """
     if strategy == "browser-headers":
         return scrape_page(
             cfg,
@@ -320,13 +401,13 @@ def _try_strategy(
         )
         return _parse_reader_output(result, url, max_chars)
     if strategy == "browser-render":
-        return _browser_render_read(cfg, url, max_chars)
+        return _browser_render_read(cfg, url, max_chars, budget=budget)
     if strategy == "wayback":
         snapshot = _wayback_snapshot(cfg, url)
         result = scrape_page(cfg, snapshot, max_chars=max_chars, ignore_robots=True)
         return replace(result, via="wayback")
     if strategy == "ai-search":
-        return _ai_read(cfg, url, max_chars)
+        return _ai_read(cfg, url, max_chars, budget=budget)
     raise ScrapeError(f"unknown smart-fetch strategy {strategy!r}")
 
 
@@ -382,7 +463,50 @@ def _parse_reader_output(result: ScrapeResult, original_url: str, max_chars: int
 _WAYBACK_PATH_RE = re.compile(r"^/web/\d{4,14}[a-z_]*/(?:https?://)?(.+)$", re.IGNORECASE)
 
 
-def _browser_render_read(cfg: BridgeConfig, url: str, max_chars: int) -> ScrapeResult:
+def _render_once(opts: Any, wall_sec: float) -> Any:
+    """One render attempt in a DAEMON thread, our wait bounded by ``wall_sec``.
+
+    (#58) The old rung submitted to a ``ThreadPoolExecutor`` whose threads
+    are non-daemon and joined at interpreter exit: a wedged
+    ``sync_playwright()``/driver blocked PROCESS EXIT entirely, and the
+    abandoned chromium stacked up unbounded across a batch. A plain daemon
+    thread fixes the exit-blocking half (the interpreter never joins
+    daemons), the semaphore around the rung fixes the stacking half, and a
+    result box replaces the future. Playwright's own navigation timeout
+    still fires first for the normal slow-page case; the join bound covers
+    everything around it. RESIDUAL (documented, deliberate): a timed-out
+    render's thread is abandoned, not killed -- threads cannot be killed --
+    until Playwright's own bounds end it and its ``finally`` closes the
+    browser.
+    """
+    import threading
+
+    from .playwright_fetcher import fetch_with_playwright
+
+    box: dict[str, Any] = {}
+
+    def _work() -> None:
+        try:
+            box["result"] = fetch_with_playwright(opts)
+        except BaseException as exc:  # re-raised in the caller below
+            box["error"] = exc
+
+    worker = threading.Thread(target=_work, name="freegem-browser-render", daemon=True)
+    worker.start()
+    worker.join(timeout=wall_sec)
+    if worker.is_alive():
+        raise ScrapeError(f"browser-render timed out after {wall_sec:g}s for {opts.url!r}")
+    if "error" in box:
+        exc = box["error"]
+        raise ScrapeError(
+            f"browser-render failed for {opts.url!r}: {type(exc).__name__}: {exc}"
+        ) from exc
+    return box["result"]
+
+
+def _browser_render_read(
+    cfg: BridgeConfig, url: str, max_chars: int, *, budget: float | None = None
+) -> ScrapeResult:
     """Render the page in a headless browser and extract its text (#14).
 
     The optional ladder rung, OFF by default: only runs when config
@@ -392,49 +516,87 @@ def _browser_render_read(cfg: BridgeConfig, url: str, max_chars: int) -> ScrapeR
     (the same public entry the background-job API uses): default identity,
     SSRF-guarded per request inside the fetcher, no stealth flags.
 
+    Two structural bounds (#58): a process-wide semaphore caps CONCURRENT
+    renders (Chromium processes are heavy; a batch used to stack them
+    unbounded), and the rung's wall-clock is sized by the ladder's
+    REMAINING budget (#59) instead of always spending its full 20s cap.
+
+    Two render phases (#61): first a SHORT ``networkidle`` attempt (quiet
+    pages settle fast and get the best render), then -- only if the page's
+    network never goes quiet (SPA long-polling, websockets) -- a
+    ``domcontentloaded`` attempt with a settle beat. The old single
+    ``networkidle`` attempt failed hardest on exactly the JS-heavy pages
+    this rung exists for. Both attempts are recorded honestly on total
+    failure.
+
     Every failure is a clean ScrapeError so the ladder records it and moves
-    on to wayback; nothing raises through. Bounded twice: Playwright's own
-    navigation wait, then the wall-clock bound on OUR wait for the render
-    thread (see ``_BROWSER_RENDER_TIMEOUT_SEC``).
+    on to wayback; nothing raises through.
     """
     if not getattr(cfg, "smart_fetch_browser_render", False):
         raise ScrapeError("browser-render disabled (smart_fetch_browser_render=false)")
 
-    from concurrent.futures import ThreadPoolExecutor
-    from concurrent.futures import TimeoutError as FuturesTimeout
-
-    from .playwright_fetcher import (
-        PlaywrightOptions,
-        fetch_with_playwright,
-        is_playwright_available,
-    )
+    from .playwright_fetcher import PlaywrightOptions, is_playwright_available
     from .web_scraper import _clean_text, _parse_html
 
     if not is_playwright_available():
         raise ScrapeError(f"browser-render unavailable for {url!r}: playwright is not installed")
 
-    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="browser-render")
-    try:
-        future = pool.submit(
-            fetch_with_playwright,
-            PlaywrightOptions(url=url, wait_timeout_ms=_BROWSER_RENDER_WAIT_MS),
+    now = time.monotonic()
+    wall = (
+        _BROWSER_RENDER_TIMEOUT_SEC if budget is None else min(_BROWSER_RENDER_TIMEOUT_SEC, budget)
+    )
+    if wall < 1.0:
+        raise ScrapeError(
+            f"browser-render skipped for {url!r}: only {max(wall, 0.0):.2f}s of ladder budget remain"
         )
+
+    # (#58) Bounded slot wait: a batch worker whose two render slots are held
+    # waits at most ``wall`` seconds for one, then reports honestly instead
+    # of stacking a seventeenth chromium.
+    if not _RENDER_SLOTS.acquire(timeout=wall):
+        raise ScrapeError(
+            f"browser-render busy: {_MAX_CONCURRENT_RENDERS} concurrent renders hold "
+            f"all slots (waited {wall:g}s) for {url!r}"
+        )
+
+    failures: list[str] = []
+    try:
+        # Phase 1: the quiet render. Six seconds of networkidle -- enough
+        # for every well-behaved page, cheap enough to leave phase-2 room.
+        quiet_ms = min(_BROWSER_RENDER_QUIET_MS, int(wall * 1000))
         try:
-            rendered = future.result(timeout=_BROWSER_RENDER_TIMEOUT_SEC)
-        except FuturesTimeout as exc:
-            raise ScrapeError(
-                f"browser-render timed out after {_BROWSER_RENDER_TIMEOUT_SEC:g}s for {url!r}"
-            ) from exc
-        except Exception as exc:
-            # A not-installed race, a launch failure, anything: the rung
-            # fails cleanly and the ladder continues to the next rung.
-            raise ScrapeError(
-                f"browser-render failed for {url!r}: {type(exc).__name__}: {exc}"
-            ) from exc
+            rendered = _render_once(
+                PlaywrightOptions(url=url, wait_until="networkidle", wait_timeout_ms=quiet_ms),
+                wall,
+            )
+        except ScrapeError as exc:
+            failures.append(f"networkidle: {exc}")
+            rendered = None
+        if rendered is None:
+            remaining = wall - (time.monotonic() - now)
+            if remaining < 1.0:
+                raise ScrapeError(
+                    f"browser-render failed for {url!r}: {'; '.join(failures)}"
+                ) from None
+            # Phase 2: the chatty page's render. The DOM is there; give the
+            # SPA one settle beat, then extract.
+            try:
+                rendered = _render_once(
+                    PlaywrightOptions(
+                        url=url,
+                        wait_until="domcontentloaded",
+                        wait_timeout_ms=min(_BROWSER_RENDER_WAIT_MS, int(remaining * 1000)),
+                        settle_ms=_BROWSER_RENDER_SETTLE_MS,
+                    ),
+                    remaining,
+                )
+            except ScrapeError as exc:
+                failures.append(f"domcontentloaded: {exc}")
+                raise ScrapeError(
+                    f"browser-render failed for {url!r}: {'; '.join(failures)}"
+                ) from exc
     finally:
-        # Do NOT wait: the whole point is that a wedged render cannot hold
-        # the ladder (or a batch worker) hostage.
-        pool.shutdown(wait=False, cancel_futures=True)
+        _RENDER_SLOTS.release()
 
     if rendered.error:
         raise ScrapeError(f"browser-render refused for {url!r}: {rendered.error}")
@@ -515,35 +677,47 @@ def _wayback_snapshot(cfg: BridgeConfig, url: str) -> str:
     return snapshot
 
 
-def _ai_search_answer(cfg: BridgeConfig, prompt: str, url: str) -> str:
+def _ai_search_answer(
+    cfg: BridgeConfig, prompt: str, url: str, *, budget: float | None = None
+) -> str:
     """One bounded model call for the ai-search rung (#25).
 
     A thread is the only way to bound a synchronous call: ``run_tool`` ->
     ``generate`` carries its own retry/backoff budget, but nothing a caller
     can wait on. ``result(timeout=...)`` bounds OUR wait; the generation
     thread itself is abandoned (see ``_AI_SEARCH_TIMEOUT_SEC``).
+
+    (#59) ``budget`` (the ladder's remaining wall-clock, when the caller
+    tracks one) sizes that wait together with the fixed cap, so a rung
+    entered near the ladder deadline can no longer overrun it by up to the
+    full 30s.
     """
     from concurrent.futures import ThreadPoolExecutor
     from concurrent.futures import TimeoutError as FuturesTimeout
 
     from .mcp_tools import run_tool
 
+    timeout = _AI_SEARCH_TIMEOUT_SEC if budget is None else min(_AI_SEARCH_TIMEOUT_SEC, budget)
+    if timeout < 1.0:
+        raise ScrapeError(
+            f"ai-search skipped for {url!r}: only {max(timeout, 0.0):.2f}s of ladder budget remain"
+        )
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ai-search")
     try:
         future = pool.submit(run_tool, cfg, "gemini_search", {"query": prompt})
         try:
-            return future.result(timeout=_AI_SEARCH_TIMEOUT_SEC)
+            return future.result(timeout=timeout)
         except FuturesTimeout as exc:
-            raise ScrapeError(
-                f"ai-search timed out after {_AI_SEARCH_TIMEOUT_SEC:g}s for {url!r}"
-            ) from exc
+            raise ScrapeError(f"ai-search timed out after {timeout:g}s for {url!r}") from exc
     finally:
         # Do NOT wait: the whole point is that a wedged generation cannot
         # hold the ladder (or a batch worker) hostage.
         pool.shutdown(wait=False, cancel_futures=True)
 
 
-def _ai_read(cfg: BridgeConfig, url: str, max_chars: int) -> ScrapeResult:
+def _ai_read(
+    cfg: BridgeConfig, url: str, max_chars: int, *, budget: float | None = None
+) -> ScrapeResult:
     """Ask the bridge's own Gemini search tool for the page's content.
 
     The result is an AI-mediated answer with citations, labeled
@@ -562,7 +736,7 @@ def _ai_read(cfg: BridgeConfig, url: str, max_chars: int) -> ScrapeResult:
         "URL. If you cannot access the page content, say exactly that "
         "instead of summarizing from memory."
     )
-    answer = _ai_search_answer(cfg, prompt, url).strip()
+    answer = _ai_search_answer(cfg, prompt, url, budget=budget).strip()
     if not answer or len(answer) < 80:
         raise ScrapeError(f"ai-search produced no usable content for {url!r}")
     text = answer[:max_chars]
@@ -607,7 +781,7 @@ def fallback_scrape(
     with _ladder_lock(host):
         attempts: list[str] = [f"direct: {first_error}"]
         deadline = time.monotonic() + _LADDER_BUDGET_SEC
-        for strategy in _strategy_order(host):
+        for strategy in _strategy_order(host, cfg):
             if time.monotonic() >= deadline:
                 # (#25) The budget exists so four slow rungs cannot stack
                 # into minutes of silence. Skipped rungs are recorded just
@@ -620,7 +794,17 @@ def fallback_scrape(
                 progress(f"smart-fetch: direct failed ({first_error}); trying {strategy}")
             time.sleep(_PAUSE_SEC)
             try:
-                result = _try_strategy(cfg, url, strategy, max_chars, ignore_robots)
+                result = _try_strategy(
+                    cfg,
+                    url,
+                    strategy,
+                    max_chars,
+                    ignore_robots,
+                    # (#59) The rung sizes its own expensive wait by what is
+                    # actually left, so entering at deadline-epsilon cannot
+                    # add a fresh 20-30s overrun past the budget.
+                    budget=max(0.0, deadline - time.monotonic()),
+                )
             except ScrapeError as exc:
                 attempts.append(f"{strategy}: {exc}")
                 continue
@@ -641,3 +825,85 @@ def fallback_scrape(
     raise ScrapeError(
         f"every read path refused {url!r} — honest failure taxonomy [{kind}]: {taxonomy}"
     )
+
+
+# ─── AI-assisted content cleanup ──────────────────────────────────────────
+
+
+#: One bounded model call for ai-clean (#25 discipline).
+_AI_CLEAN_TIMEOUT_SEC = 30.0
+
+#: Below this there is nothing worth cleaning: the extractor already
+#: returned a page small enough to read by hand.
+_AI_CLEAN_MIN_CHARS = 400
+
+#: Page text fed to the model, head-trimmed: a 50k dump would spend the
+#: model's attention on boilerplate the extractor already mis-ranked.
+_AI_CLEAN_MAX_INPUT_CHARS = 20_000
+
+
+def ai_clean(cfg: BridgeConfig, url: str, text: str, *, budget: float | None = None) -> str:
+    """One bounded model pass that returns the page's MAIN readable content.
+
+    AI-assisted scraping, stated honestly. The input is an already-fetched
+    page's extracted text -- navigation menus, cookie notices, and related-
+    link walls often surround the article. The bridge's own session is
+    asked to return the article body verbatim, dropping the boilerplate.
+    The output is an AI-mediated VIEW of the page: labeled ``ai-clean`` by
+    the callers, never written to the fetch cache (cache entries hold
+    verbatim extractions, #21), never presented as a verbatim fetch, and
+    probabilistic by nature -- exactly what NON_GOALS says LLM extraction
+    is. OFF by default (config ``smart_fetch_ai_clean``): a transformation
+    of a successful read must be an explicit choice, like browser-render.
+
+    Bounded like every model call here (#25): our wait is capped at
+    ``_AI_CLEAN_TIMEOUT_SEC`` (or the caller's remaining ``budget``), the
+    generation thread is abandoned on timeout, and an "I could not read
+    that" answer is a clean ScrapeError, never content.
+    """
+    if not getattr(cfg, "smart_fetch_ai_clean", False):
+        raise ScrapeError("ai-clean disabled (smart_fetch_ai_clean=false)")
+    stripped = text.strip()
+    if len(stripped) < _AI_CLEAN_MIN_CHARS:
+        raise ScrapeError(
+            f"ai-clean skipped for {url!r}: page text is only {len(stripped)} chars "
+            f"(minimum {_AI_CLEAN_MIN_CHARS}) -- nothing worth cleaning"
+        )
+    prompt = (
+        "The following is the extracted text of the web page " + url + ".\n"
+        "Return ONLY the page's main readable content (the article, post, or "
+        "documentation body), as verbatim as you can, in reading order. Drop "
+        "navigation menus, cookie banners, subscription prompts, related-link "
+        "walls, and footer boilerplate. Do not summarize, do not add commentary, "
+        "do not answer questions about the text. If the text below is only "
+        "boilerplate with no main content, say exactly: NO MAIN CONTENT.\n\n"
+        "[PAGE TEXT]\n" + stripped[:_AI_CLEAN_MAX_INPUT_CHARS] + "\n[/PAGE TEXT]"
+    )
+    timeout = _AI_CLEAN_TIMEOUT_SEC if budget is None else min(_AI_CLEAN_TIMEOUT_SEC, budget)
+    if timeout < 1.0:
+        raise ScrapeError(
+            f"ai-clean skipped for {url!r}: only {max(timeout, 0.0):.2f}s of budget remain"
+        )
+    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import TimeoutError as FuturesTimeout
+
+    from .llm_extract import BridgeProvider
+
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ai-clean")
+    try:
+        future = pool.submit(BridgeProvider(cfg).complete, prompt)
+        try:
+            answer = future.result(timeout=timeout)
+        except FuturesTimeout as exc:
+            raise ScrapeError(f"ai-clean timed out after {timeout:g}s for {url!r}") from exc
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    answer = (answer or "").strip()
+    # Refusal shapes FIRST: "NO MAIN CONTENT" is short BY DESIGN (the prompt
+    # tells the model to say exactly that), so the length gate must not
+    # reclassify an honest "nothing here" as a production failure.
+    if _looks_like_ai_nonanswer(answer) or answer == "NO MAIN CONTENT":
+        raise ScrapeError(f"ai-clean found no main content in {url!r}")
+    if not answer or len(answer) < _AI_CLEAN_MIN_CHARS // 2:
+        raise ScrapeError(f"ai-clean produced no usable content for {url!r}")
+    return answer

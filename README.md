@@ -356,6 +356,7 @@ freegem scrape ./notes.html                            # local files are first-c
 freegem scrape https://example.com --no-cache          # skip the shared fetch cache
 freegem scrape https://example.com --respect-robots    # opt into legacy robots honoring
 freegem scrape https://example.com --no-smart          # direct fetch only, no fallbacks
+freegem scrape https://example.com --ai-clean          # one bounded Gemini pass drops nav/cookie boilerplate
 ```
 
 ### Local files
@@ -372,11 +373,34 @@ freegem scrape ./a.html ./b.html ./c.html --format jsonl   # local batch, no net
 ```
 
 A local read touches no network, so the SSRF guard's IP checks do not apply
-to it — but the guard itself is unchanged: `file://server/share` (a UNC/SMB
-fetch in disguise) is still refused, the 100 MB body cap still applies, and
-`web_scrape`/server tool surfaces stay http(s)-only (a prompt-injected agent
-must not become an arbitrary-file-read primitive; local reads are a CLI
-feature because the human typed the path).
+to it — but the guard itself is unchanged: `file://server/share` and bare
+UNC targets (`\\host\share`, `//host/share`, the `\\?\UNC\...` form) are
+refused — a network share is a network fetch, not a disk read — the 100 MB
+body cap still applies, and `web_scrape`/server tool surfaces stay
+http(s)-only (a prompt-injected agent must not become an arbitrary-file-read
+primitive; local reads are a CLI feature because the human typed the path).
+
+### AI-assisted cleanup (--ai-clean)
+
+Extracted pages often carry navigation menus, cookie banners, and
+related-link walls around the article. `--ai-clean` adds one bounded Gemini
+pass over the already-fetched text that returns the page's main readable
+content with the boilerplate dropped:
+
+```bash
+freegem scrape https://example.com/article --ai-clean
+freegem scrape https://example.com/article --ai-clean --format markdown
+```
+
+It is an explicit, OFF-by-default choice (config `smart_fetch_ai_clean`),
+composes with neither `--ask` nor batch mode, and is labeled where no reader
+can miss it: the output is headed `ai-clean view`, and markdown mode carries
+an `<!-- ai-clean ... -->` note. The cleaned view is AI-mediated and
+probabilistic — it is NEVER written to the shared fetch cache (which holds
+verbatim extractions only), never presented as the verbatim fetch, and a
+model answer that says it could not read the page is recorded as an honest
+failure, not shown as content. The wait is bounded (30 s cap, sized to the
+caller's budget) like every other model call.
 
 ### Smart fetching
 
@@ -389,7 +413,11 @@ instead of giving up:
    client (many 403s are naive UA matching, not policy);
 2. **reader** — the r.jina.ai public reader service;
 3. **browser-render** — optional Playwright rung (`smart_fetch_browser_render`);
-   off by default because it costs a browser launch;
+   off by default because it costs a browser launch. Renders in two phases
+   (a short `networkidle` attempt for quiet pages, then `domcontentloaded`
+   with a settle beat for chatty SPAs), capped at two concurrent Chromium
+   processes per interpreter, on daemon threads so a wedged driver cannot
+   block exit, and sized to the ladder's remaining wall-clock budget;
 4. **wayback** — the Internet Archive's closest snapshot;
 5. **ai-search** — the bridge's own Gemini search, asked for the page's
    content with citations (last, session-gated, labeled `via="ai-search"`,
@@ -397,7 +425,12 @@ instead of giving up:
 
 The working path is remembered per host
 (`~/.cache/freegem/smart_fetch_memory.json`), so repeat fetches go straight
-there. Every failure is reported with its honest taxonomy — each attempted
+there. Rungs whose config gate is closed never occupy a ladder slot (and a
+remembered winner cannot front-rank while gated off). A "successful" fetch
+that actually returned a bot wall is decided by phrase density, not length
+alone: a long interstitial repeating "Just a moment" three or more times is
+a wall, a long article that mentions a captcha once is content. Every
+failure is reported with its honest taxonomy — each attempted
 path and its exact refusal. No CAPTCHA is ever solved and no challenge
 answered: a page whose only door is a bot wall stays unread, and the error
 says exactly that. `--no-smart` (or config `smart_fetch: false`) keeps the
@@ -775,18 +808,37 @@ freegem watch https://example.com/status              # one check, diff vs last
 freegem watch https://example.com/status --interval 30m   # poll until Ctrl-C
 freegem watch https://example.com/status --once       # single check even with --interval
 freegem watch https://example.com/status --format json
+
+freegem watch --list                                  # every stored watch (url, last check, state file)
+freegem watch https://example.com/status --forget     # drop that URL's baseline
+freegem watch --forget-all                            # drop every baseline and stale tmp file
+freegem watch https://example.com/status --max-age 30d --max-entries 100   # sweep before checking
 ```
 
 - **Simhash diffing** — a 64-bit simhash over word 5-shingles decides
   whether the page meaningfully changed; only then are line-level diff
   blocks rendered. Boilerplate churn (clocks, CSRF tokens, rotating ads)
-  does not manufacture diffs.
+  does not manufacture diffs. The stored simhash is re-verified against
+  the stored text on load, so a damaged or hand-edited state file
+  degrades to a fresh baseline instead of skewing every report.
 - **Local state** — fingerprints and the last seen text live under
-  `~/.config/freegem/watch/` (per-URL); nothing is sent anywhere.
+  `~/.config/freegem/watch/` (per-URL); nothing is sent anywhere. Saves
+  are atomic via a unique temp file per write, so two concurrent watches
+  of the same URL can never tear the state.
+- **State management** — `--list` shows every stored watch (corrupt state
+  files are listed, not hidden), `--forget URL` drops one baseline,
+  `--forget-all` clears the state dir, and `--max-age` / `--max-entries`
+  evict stale entries (oldest-checked first) before a check. Intervals
+  accept `d` days (`30d`).
+- **Failed polls are recorded, not fatal** — inside an interval loop one
+  fetch failure (a 503, a blip) is a printed line and a retry on the next
+  tick, not a crash. A poll that answers with junk (an empty JS shell, a
+  bot-challenge page) records no verdict and KEEPS the stored baseline, so
+  a transient wall never poisons future diffs. `--once` exits `1` on a
+  failed poll — machine-grepable.
 - **Exit-code contract** — `0` when nothing changed (or on first sighting,
-  which establishes the baseline), `3` when a change was detected, non-zero
-  with an honest stderr on fetch failure. A cron job can act on the exit
-  code alone.
+  which establishes the baseline), `3` when a change was detected, `1` on a
+  failed single check. A cron job can act on the exit code alone.
 - **Formats** — `text` (default: a few diff blocks) or `json` (machine
   contract); `--all` prints every diff block instead of the first few.
 

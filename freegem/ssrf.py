@@ -484,15 +484,45 @@ def build_guarded_opener(
     cookie_handler: list[urllib.request.BaseHandler] = (
         [urllib.request.HTTPCookieProcessor(cookie_jar)] if cookie_jar is not None else []
     )
+    # (#63) A HAND-BUILT OpenerDirector, not build_opener: stdlib
+    # build_opener silently installs the default handler stack -- FTPHandler,
+    # FileHandler, DataHandler, UnknownHandler -- none of which run the
+    # pinned/checked dial. `freegem scrape ftp://169.254.169.254/` used to
+    # reach the cloud metadata service over FTP with NO resolve-check and NO
+    # pin, in BOTH modes, because guard=False skips only the URL policy
+    # pre-flight while the pinned-dial guarantee lives in these handlers.
+    # A manual opener installs ONLY audited handlers: http/https resolve,
+    # check, and pin (direct mode) or the preflighted proxy (proxy mode),
+    # redirect checks, the HTTP error machinery, and an optional cookie
+    # processor. Every other scheme fails with an honest URLError.
     if proxy:
-        return urllib.request.build_opener(
+        opener = urllib.request.OpenerDirector()
+        for handler in (
+            urllib.request.HTTPErrorProcessor(),
+            urllib.request.HTTPDefaultErrorHandler(),
             PreflightedProxyHandler(proxy),
+            # (#63) In proxy mode the ProxyHandler REWRITES the request to
+            # the proxy and defers ("let other handlers take care of it") --
+            # something must actually dial. build_opener used to supply the
+            # default HTTP(S)Handler silently; installed explicitly now.
+            # The proxy is operator-configured (trusted dial target); the
+            # SSRF posture in proxy mode is the PreflightedProxyHandler
+            # preflight plus SafeRedirect, both present.
+            urllib.request.HTTPHandler(),
+            urllib.request.HTTPSHandler(context=tls),
             SafeRedirect(),
             *cookie_handler,
-        )
-    return urllib.request.build_opener(
+        ):
+            opener.add_handler(handler)
+        return opener
+    opener = urllib.request.OpenerDirector()
+    for handler in (
+        urllib.request.HTTPErrorProcessor(),
+        urllib.request.HTTPDefaultErrorHandler(),
         PinnedHTTPHandler(resolver),
         PinnedHTTPSHandler(tls, resolver),
         SafeRedirect(),
         *cookie_handler,
-    )
+    ):
+        opener.add_handler(handler)
+    return opener

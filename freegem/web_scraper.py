@@ -223,19 +223,24 @@ def _network_opener(cfg: BridgeConfig) -> urllib.request.OpenerDirector:
     """Single opener path, always SSRF-pinned.
 
     The pinned opener resolves-and-checks the host once (close the DNS-rebind
-    window) and dials ONLY the verified-public IPs. That behavior exists in
-    BOTH modes; the ONLY difference between guard=False and guard=True is
-    whether we additionally run ``url_allowed`` pre-validation and REFUSE on a
-    bad host:
+    window) and dials ONLY the verified-public IPs. That IP boundary is
+    ALWAYS ON (wave-2 review, #64): it lives inside the opener's pinned
+    handlers, in BOTH guard modes, and does not depend on any config flag.
+    The guard setting changes ONLY whether the ``url_allowed`` URL-policy
+    pre-flight runs and REFUSES before any packet leaves:
 
-    * ``guard=False`` (default): resolve publicly, dial checked IPs — fetch
-      operator-chosen URLs and hand text to the caller/AI. Validation is a
-      feature, not a gate (user directive 2026-10-17).
-    * ``guard=True``: same opener, plus ``url_allowed`` refusal of
-      loopback/private/link-local/metadata hosts, non-http(s) schemes, and
-      embedded credentials — before any packet leaves.
+    * ``guard=False`` (default): resolve publicly, dial checked IPs -- fetch
+      operator-chosen http(s) URLs and hand text to the caller/AI. No
+      ``url_allowed`` pre-flight. Validation is a feature, not a gate (user
+      directive 2026-10-17).
+    * ``guard=True``: the same opener and the same always-on IP pinning,
+      plus ``url_allowed`` refusal of non-http(s) schemes, embedded
+      credentials, and malformed hosts.
 
-    Server/MCP surfaces force ``guard=True`` in cmd_serve/cmd_mcp.
+    Either way an IP that resolves non-public is refused by the handlers
+    themselves -- loopback/private/link-local/metadata targets are refused
+    with the guard OFF exactly as they are with it ON. Server/MCP surfaces
+    force ``guard=True`` in cmd_serve/cmd_mcp.
     """
     return build_guarded_opener(cfg.proxy, _ssl_ctx())
 
@@ -253,6 +258,17 @@ def _fetch(
     if headers:
         request_headers = dict(headers)
         request_headers.setdefault("Accept-Encoding", "gzip")
+    # (#63) Scheme gate, before the opener: the guarded opener installs ONLY
+    # http/https handlers, so a non-http URL must be refused HERE with a
+    # clear message instead of falling into an unhandled-scheme error. The
+    # scraper is an HTTP reader; local files go through the local-file path
+    # (``allow_local``), and no other scheme is a web page.
+    scheme = (urllib.parse.urlsplit(url).scheme or "").lower()
+    if scheme not in ("http", "https"):
+        raise ScrapeError(
+            f"refusing scheme {scheme or 'none'!r} for {url!r}: the scraper reads "
+            "http(s) URLs only (local files are a 'freegem scrape' target)"
+        )
     request = urllib.request.Request(url, headers=request_headers)
     try:
         return _network_opener(cfg).open(request, timeout=timeout)
@@ -687,6 +703,16 @@ def _decode_body(raw: bytes, content_type: str) -> str:
 #: check the URL parser read ``C:`` as scheme ``c`` and refused (#50).
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
 
+#: (#62) UNC / network-share intent: two leading slashes in either spelling
+#: (``\\\\host\\share``, ``//host/share``), which also covers the
+#: ``\\\\?\\UNC\\host\\share`` extended-length form. A path like this names
+#: a REMOTE share -- os.path.exists() on it dials the network before any
+#: check of ours could run, so it must be refused by shape, before the
+#: exists() probe, on every platform (POSIX "//host/share" is
+#: implementation-defined at best; as a scrape target it is always
+#: ambiguous, and ambiguity loses to the honest refusal).
+_UNC_PATH_RE = re.compile(r"^(?:\\\\|//)[^/\\]+[\\/][^/\\]+")
+
 #: Classic MS-DOS device names resolve as DEVICES even when used as a path
 #: (``con`` reads the console and can hang a fetch; ``nul`` "succeeds"
 #: empty). Checked on Windows only -- on POSIX these are legal file names.
@@ -735,11 +761,25 @@ def _local_target(target: str) -> str | None:
     - anything that already exists on this filesystem (POSIX absolute and
       relative paths).
 
+    (#62) UNC paths -- ``\\\\host\\share\\file``, the ``//host/share/file``
+    spelling, and the ``\\\\?\\UNC\\...`` extended form -- are REFUSED, not
+    treated as local: they name a network share, so "reading" one is an SMB
+    network fetch wearing a disk-read costume, and ``os.path.exists`` would
+    happily dial the share before we could check anything. The local-file
+    contract is "a disk read, never network"; a UNC target breaks that
+    contract in both directions at once (remote bytes labeled local-file,
+    and the no-remote rule silently bypassed).
+
     Everything else -- http/https and every other scheme -- returns None
     and stays on the network path with the SSRF guard fully in force.
     """
     if target.lower().startswith("file:"):
         return _file_url_to_path(target)
+    if _UNC_PATH_RE.match(target):
+        raise ScrapeError(
+            f"refusing UNC/network path {target!r}: local reads are THIS-machine "
+            "disk reads only; a \\\\host\\share target is a network fetch"
+        )
     if _WINDOWS_DRIVE_RE.match(target):
         return target
     if os.path.exists(target):

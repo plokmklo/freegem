@@ -48,6 +48,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`freegem scrape --ai-clean` / config `"smart_fetch_ai_clean"`** — one
+  bounded Gemini pass over an already-fetched page's extracted text that
+  returns the page's main readable content (navigation, cookie banners,
+  subscription prompts, and related-link walls dropped). OFF by default;
+  single-URL text/markdown only; mutually exclusive with `--ask`; labeled
+  in the output (`ai-clean view`, an HTML comment in markdown mode); never
+  written to the shared fetch cache (#21 discipline); a model answer that
+  admits it could not read the page — or says exactly `NO MAIN CONTENT` —
+  is an honest failure, not content. The wait is capped (30 s) and sized
+  to the caller's remaining budget; a refusal-shaped short answer
+  classifies as "no main content" before the length gate can mislabel it.
+- **watch state management (#55)**: `freegem watch --list` (every stored
+  watch; corrupt state files are listed first, not hidden),
+  `--forget URL`, `--forget-all`, and pre-check sweeps `--max-age DUR`
+  (intervals now accept `d` days) and `--max-entries N` (evicts the
+  oldest-checked). Corrupt entries count as never-checked so they are
+  always first out under either sweep.
+- **`freegem scrape --ai-clean` / config `"smart_fetch_ai_clean"`** — one
+  bounded Gemini pass over an already-fetched page's extracted text that
+  returns the page's main readable content (navigation, cookie banners,
+  subscription prompts, and related-link walls dropped). OFF by default;
+  single-URL text/markdown only; mutually exclusive with `--ask`; labeled
+  in the output (`ai-clean view`, an HTML comment in markdown mode); never
+  written to the shared fetch cache (#21 discipline); a model answer that
+  admits it could not read the page — or says exactly `NO MAIN CONTENT` —
+  is an honest failure, not content. The wait is capped (30 s) and sized
+  to the caller's remaining budget; a refusal-shaped short answer
+  classifies as "no main content" before the length gate can mislabel it.
+- **watch state management (#55)**: `freegem watch --list` (every stored
+  watch; corrupt state files are listed first, not hidden),
+  `--forget URL`, `--forget-all`, and pre-check sweeps `--max-age DUR`
+  (intervals now accept `d` days) and `--max-entries N` (evicts the
+  oldest-checked). Corrupt entries count as never-checked so they are
+  always first out under either sweep.
 - **OpenAI-client compatibility round** (grounded in what Reddit's bridge
   users actually send these tools): legacy `POST /v1/completions` (one
   prompt, non-streaming, honest 400s for stream/multi-prompt),
@@ -70,8 +104,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ask --search`, `crawl`, `watch` — forces the guard ON (a prompt-injected
   agent cannot read local files or probe the internal network through them).
 
+- **watch (#52) one failed poll inside an interval loop is a recorded line
+  and a retry on the next tick — not a crash.** A `--once` poll that fails
+  still exits `1`, now with the honest line (`fetch failed: ... no verdict
+  this poll; the stored baseline is kept`) on stdout instead of only an
+  error on stderr.
+- **watch (#53) a poll that answers with junk records no verdict and keeps
+  the baseline**: an empty extraction (JS shell, blank soft-200) or a
+  bot-challenge page never becomes a baseline and never overwrites one;
+  diffing resumes when the real page returns. Short-but-real pages (a
+  number, a one-line status) are still legitimate baselines.
+- **smart-fetch (#57) the challenge gate decides by phrase density, not
+  length alone**: the old rule failed open past 800 chars, so a rendered
+  JS interstitial with a long explanatory body passed as content, got
+  remembered as a browser-render WIN, and poisoned that host's ladder
+  position. A long page with 3+ challenge-marker hits in the head window
+  is a wall; a long article that mentions a captcha once is content.
+- **smart-fetch (#58) browser renders are daemon-threaded and capped at
+  two concurrent Chromium processes.** The old ThreadPoolExecutor's
+  non-daemon threads let a wedged `sync_playwright()` block PROCESS EXIT,
+  and a 16-worker batch could stack 16 browsers unbounded. A timed-out
+  render's thread is still abandoned (threads cannot be killed) — it can
+  no longer block exit, and the slot cap bounds the orphan ceiling.
+- **smart-fetch (#59) expensive rungs size their wait to the ladder's
+  remaining wall-clock budget**, and a rung entered with under a second of
+  budget is SKIPPED with an honest message instead of stacking its full
+  20–30 s on top of an exhausted ladder.
+- **smart-fetch (#60) gated-off rungs leave the ladder entirely**: with
+  `smart_fetch_browser_render=false` (the default) or `smart_fetch_ai=false`
+  the rung is dropped from the walk and its slot is not spent; a remembered
+  winning strategy cannot front-rank while its gate is closed, and a config
+  flip no longer needs memory invalidation.
+- **smart-fetch (#61) the browser-render rung renders in two phases**: a
+  short `networkidle` attempt (quiet pages settle fast and get the best
+  render), then — only when the network never goes quiet (SPA
+  long-polling, websockets) — a `domcontentloaded` attempt with a settle
+  beat for SPA hydration. The old single `networkidle` wait timed out
+  hardest on exactly the JS-heavy pages the rung exists for. Both attempts
+  are recorded honestly on total failure.
+
 ### Fixed
 
+- **watch (#54) concurrent saves can no longer tear a state file**: the
+  atomic-write temp name is UNIQUE per write (mkstemp + `os.replace`), not
+  a fixed `<name>.tmp` two writers of the same URL shared — the old
+  interleaving produced half files that `load` read as corrupt and
+  silently reset to fresh baselines. A failed save removes its temp file.
+- **watch (#56) the stored simhash must be what the stored text actually
+  hashes to**: `text_hash` gates the verdict, but the simhash drives the
+  reported distance, and a tampered or stale simhash used to sail through
+  load and skew every report. Either mismatch loads as None (fresh
+  baseline).
+- **scraper (#62) UNC / network-share targets are refused by shape** —
+  `\\host\share`, the `//host/share` spelling, and the `\\?\UNC\...`
+  extended form raise an honest error BEFORE any `os.path.exists` probe,
+  which would otherwise dial the share: "reading" one is an SMB network
+  fetch wearing a disk-read costume, breaking the local-file contract in
+  both directions at once.
+- **scraper (#63) the guarded opener is HAND-BUILT**: stdlib
+  `build_opener` silently installed `FTPHandler`, `FileHandler`,
+  `DataHandler`, and `UnknownHandler` — none of which run the pinned
+  dial — so `scrape ftp://169.254.169.254/` could reach the cloud metadata
+  service with NO resolve-check and NO pin in BOTH guard modes. The manual
+  opener installs only audited http/https handlers (plus redirect checks
+  and the optional cookie processor); every other scheme fails with an
+  honest error before any packet leaves (the scheme gate also gives a
+  clear refusal message instead of an unhandled-scheme traceback).
+- **scraper (#64) the IP-pinning boundary is documented as ALWAYS ON**: it
+  lives inside the opener's pinned handlers in both guard modes and does
+  not depend on any config flag; the `guard` setting changes only whether
+  the URL-policy pre-flight runs.
 - **Server**: `Sec-Fetch-Site: cross-site` POSTs are refused only when the
   request does not carry a loopback `Origin`. A local UI on another port of
   this machine (`localhost:3000` -> this server) is cross-site by origin
