@@ -16,9 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **validation loosened to opt-in**: the SSRF guard no longer pre-refuses
-  targets on the CLI by default; only the server/MCP tool surfaces stay strict
-  (a prompt-injected agent cannot read local files through them).
+- **validation loosened to opt-in on exactly one surface**: `freegem scrape`
+  no longer pre-refuses targets by default (the operator typed them). Every
+  other surface — `serve`, `mcp`, `research`, `verify --discover`,
+  `ask --search`, `crawl`, `watch` — forces the guard ON (a prompt-injected
+  agent cannot read local files or probe the internal network through them).
 
 ### Fixed
 

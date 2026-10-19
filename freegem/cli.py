@@ -519,13 +519,24 @@ def _apply_overrides(cfg: BridgeConfig, args: argparse.Namespace) -> BridgeConfi
 # ── commands ──────────────────────────────────────────────────────────────────
 
 
+def _strict_guard(cfg: BridgeConfig) -> BridgeConfig:
+    """Force the SSRF guard ON for every surface except ``freegem scrape``.
+
+    The config default is off so a plain scrape -- where the operator typed
+    each target -- just fetches (validation is a feature, not a default).
+    Every other surface fetches URLs nobody typed at the keyboard: search
+    discovery (research, verify, ask --search), crawl frontiers, watch lists,
+    server clients and MCP tools. Those stay strict, exactly like the
+    server/MCP surfaces have always been.
+    """
+    return cfg.replace(guard=True)
+
+
 def cmd_serve(cfg: BridgeConfig, args: argparse.Namespace) -> int:
     from .server import ThreadedServer
 
-    # Network-facing surface: the SSRF guard is forced ON here regardless of
-    # the config default (which is off so the CLI just fetches). A server
-    # fetches URLs its clients chose -- that stays strict.
-    cfg = cfg.replace(guard=True)
+    # Network-facing surface: strict regardless of the config default.
+    cfg = _strict_guard(cfg)
 
     if args.port:
         cfg = cfg.replace(port=args.port)
@@ -566,9 +577,9 @@ def cmd_serve(cfg: BridgeConfig, args: argparse.Namespace) -> int:
 
 
 def cmd_mcp(cfg: BridgeConfig, args: argparse.Namespace) -> int:
-    # Network-facing surface: SSRF guard forced ON (see cmd_serve note). The
-    # MCP web_scrape tool answers URLs an agent's prompt chose -- strict.
-    cfg = cfg.replace(guard=True)
+    # Network-facing surface: strict (see _strict_guard note). The MCP
+    # web_scrape tool answers URLs an agent's prompt chose.
+    cfg = _strict_guard(cfg)
     server = build_server(cfg, name=args.name)
     log(
         cfg,
@@ -610,6 +621,8 @@ def _looks_like_soft_failure(text: str) -> bool:
 
 
 def cmd_ask(cfg: BridgeConfig, args: argparse.Namespace) -> int:
+    # --search fetches URLs a search engine chose; stay strict.
+    cfg = _strict_guard(cfg)
     question = " ".join(args.prompt).strip()
     if not question:
         print("nothing to ask", file=sys.stderr)
@@ -848,6 +861,8 @@ def cmd_scrape(cfg: BridgeConfig, args: argparse.Namespace) -> int:
 
 def cmd_research(cfg: BridgeConfig, args: argparse.Namespace) -> int:
     """Fetch several pages (guarded, cached, budgeted) and print a cited answer."""
+    # Sources can come from discovery, not just the operator's argv.
+    cfg = _strict_guard(cfg)
     from .web_research import research_cli
 
     try:
@@ -874,6 +889,8 @@ def cmd_research(cfg: BridgeConfig, args: argparse.Namespace) -> int:
 
 def cmd_verify(cfg: BridgeConfig, args: argparse.Namespace) -> int:
     """Verify claims against fetched sources with per-claim statuses."""
+    # --discover fetches URLs a search engine chose; stay strict.
+    cfg = _strict_guard(cfg)
     from .claim_verify import verify_cli
 
     try:
@@ -1037,6 +1054,8 @@ def _crawl_spec(args: argparse.Namespace) -> Any:
 
 
 def cmd_crawl(cfg: BridgeConfig, args: argparse.Namespace) -> int:
+    # A crawl frontier is discovered, never typed; the crawler stays guarded.
+    cfg = _strict_guard(cfg)
     import threading
     import time as _time
 
@@ -1138,6 +1157,8 @@ def cmd_watch(cfg: BridgeConfig, args: argparse.Namespace) -> int:
     ScrapeError comes through here as an honest error line). With --interval
     the command loops until Ctrl-C and exits 0 on the interrupt.
     """
+    # Watch targets come from a config file, not the keyboard; stay strict.
+    cfg = _strict_guard(cfg)
     from .watch import parse_interval, render_text, watch_poll
 
     interval_sec: float | None = None

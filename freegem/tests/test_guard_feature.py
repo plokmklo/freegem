@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from typing import Any
 from unittest import mock
 
 from freegem.config import BridgeConfig
@@ -113,6 +114,142 @@ class CliWiringTests(unittest.TestCase):
 
         args = _build_parser().parse_args(["scrape", "http://example.com"])
         self.assertFalse(args.guard)
+
+
+class SurfaceForcingTests(unittest.TestCase):
+    """Every non-scrape command flips the guard back ON.
+
+    ``freegem scrape`` is the one surface where the operator typed each
+    target, so it alone honors the off default. research, verify, ask
+    (--search), crawl (frontier), and watch (config-file lists) fetch URLs
+    nobody typed at the keyboard, so they must force the guard on even when
+    the config file (or the default) says off.
+    """
+
+    def _cfg(self) -> BridgeConfig:
+        return BridgeConfig(log_requests=False)
+
+    def _parse(self, *argv: str) -> Any:
+        from freegem.cli import _build_parser
+
+        return _build_parser().parse_args(list(argv))
+
+    def _capture(self, seen: dict[str, bool]) -> Any:
+        from freegem import cli as cli_module
+
+        def force(cfg: BridgeConfig) -> BridgeConfig:
+            seen["input"] = cfg.guard
+            return cfg.replace(guard=True)
+
+        return mock.patch.object(cli_module, "_strict_guard", side_effect=force)
+
+    def test_research_forces_guard(self) -> None:
+        from freegem import cli as cli_module
+
+        seen: dict[str, bool] = {}
+        worker: dict[str, bool] = {}
+
+        def fake_research_cli(cfg: BridgeConfig, **_kw: Any) -> str:
+            worker["guard"] = cfg.guard
+            return "ok"
+
+        with (
+            self._capture(seen),
+            mock.patch("freegem.web_research.research_cli", side_effect=fake_research_cli),
+        ):
+            rc = cli_module.cmd_research(
+                self._cfg(), self._parse("research", "http://example.com", "-q", "question")
+            )
+        self.assertEqual(rc, 0)
+        self.assertFalse(seen["input"], "config default arrives off")
+        self.assertTrue(worker["guard"], "the worker must receive guard=True")
+
+    def test_verify_forces_guard(self) -> None:
+        from freegem import cli as cli_module
+
+        seen: dict[str, bool] = {}
+        worker: dict[str, bool] = {}
+
+        def fake_verify_cli(cfg: BridgeConfig, **_kw: Any) -> str:
+            worker["guard"] = cfg.guard
+            return "ok"
+
+        with (
+            self._capture(seen),
+            mock.patch("freegem.claim_verify.verify_cli", side_effect=fake_verify_cli),
+        ):
+            rc = cli_module.cmd_verify(
+                self._cfg(), self._parse("verify", "the sky is blue", "http://example.com")
+            )
+        self.assertEqual(rc, 0)
+        self.assertFalse(seen["input"])
+        self.assertTrue(worker["guard"])
+
+    def test_ask_search_forces_guard(self) -> None:
+        from freegem import cli as cli_module
+
+        seen: dict[str, bool] = {}
+        worker: dict[str, bool] = {}
+
+        def fake_run_tool(cfg: BridgeConfig, _tool: str, _params: dict[str, Any]) -> str:
+            worker["guard"] = cfg.guard
+            return "an answer"
+
+        with (
+            self._capture(seen),
+            mock.patch.object(cli_module, "run_tool", side_effect=fake_run_tool),
+        ):
+            rc = cli_module.cmd_ask(
+                self._cfg(), self._parse("ask", "--search", "what is the sky color")
+            )
+        self.assertEqual(rc, 0)
+        self.assertFalse(seen["input"])
+        self.assertTrue(worker["guard"])
+
+    def test_crawl_forces_guard(self) -> None:
+        from freegem import cli as cli_module
+
+        seen: dict[str, bool] = {}
+        # `crawl status` without a state file exits 2 early -- but AFTER the
+        # force at the top of the command, which is exactly what we pin.
+        with self._capture(seen):
+            rc = cli_module.cmd_crawl(
+                self._cfg(),
+                self._parse("crawl", "status", "--state", "/nonexistent/freegem-state.db"),
+            )
+        self.assertEqual(rc, 2)
+        self.assertFalse(seen["input"])
+
+    def test_watch_forces_guard(self) -> None:
+        from freegem import cli as cli_module
+        from freegem.watch import WatchResult
+
+        seen: dict[str, bool] = {}
+        worker: dict[str, bool] = {}
+
+        result = WatchResult(
+            url="http://example.com",
+            baseline=True,
+            changed=None,
+            simhash_before=None,
+            simhash_after=0,
+            simhash_distance=None,
+        )
+
+        def fake_watch_poll(url: str, cfg: BridgeConfig, **_kw: Any) -> Any:
+            worker["guard"] = cfg.guard
+            yield result
+
+        with (
+            self._capture(seen),
+            mock.patch("freegem.watch.watch_poll", side_effect=fake_watch_poll),
+        ):
+            rc = cli_module.cmd_watch(
+                self._cfg(), self._parse("watch", "http://example.com", "--once")
+            )
+        self.assertEqual(rc, 0)
+        self.assertFalse(seen["input"])
+        self.assertTrue(worker["guard"])
 
 
 if __name__ == "__main__":
