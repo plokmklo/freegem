@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **OpenAI-client compatibility round** (grounded in what Reddit's bridge
+  users actually send these tools): legacy `POST /v1/completions` (one
+  prompt, non-streaming, honest 400s for stream/multi-prompt),
+  `POST /v1/embeddings` answering an honest 501 with the reason and the
+  alternative instead of the chat catch-all's baffling 400, an honest 400
+  for `n > 1` (the session makes one choice), and config
+  `"model_aliases"` (JSON object or compact `alias=model` string) to pin
+  where hardcoded client model names route. Unknown names keep falling
+  back to `default_model` (Codex CLI compat).
 - **`freegem scrape --guard` / config `"guard": true`** — opt into the SSRF guard
   (scheme allowlist + public-IP checks + pinned dial + redirect re-checks) as a
   feature instead of a default gate. Plain `scrape` fetches and hands text to

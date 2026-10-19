@@ -671,6 +671,13 @@ class GeminiHandler(BaseHTTPRequestHandler):
             path = self.path.split("?", 1)[0]
             if path == "/v1/chat/completions":
                 self._handle_chat()
+            elif path == "/v1/completions":
+                # Legacy completions: real handling, not the chat catch-all.
+                self._handle_completions()
+            elif path == "/v1/embeddings":
+                # Must precede the chat catch-all: an embeddings request has
+                # no messages and would die there as a baffling 400.
+                self._handle_embeddings()
             elif path == "/v1/responses":
                 self._handle_responses()
             elif path == "/v1/jobs":
@@ -707,9 +714,13 @@ class GeminiHandler(BaseHTTPRequestHandler):
     # ── shared core ──────────────────────────────────────────────────────────
 
     def _resolve(self, requested: str | None) -> tuple[str, int, int, dict] | None:
-        name, mode_id, think_mode, err, extra = resolve_model(
-            requested or self.cfg.default_model, self.cfg.default_model
-        )
+        wanted = requested or self.cfg.default_model
+        # Config aliases let a client's hardcoded name (gpt-4o, a roleplay
+        # app's custom id) pin a specific Gemini model instead of falling
+        # back to the default with everyone else.
+        aliases = getattr(self.cfg, "model_aliases", None) or {}
+        wanted = aliases.get(wanted, wanted)
+        name, mode_id, think_mode, err, extra = resolve_model(wanted, self.cfg.default_model)
         if err:
             self.send_error_json(err, 400)
             return None
@@ -737,6 +748,74 @@ class GeminiHandler(BaseHTTPRequestHandler):
         req = self._json_body()
         if req is None:
             return
+        self._run_chat(req)
+
+    def _handle_completions(self) -> None:
+        """Legacy POST /v1/completions: one prompt in, one text completion out.
+
+        Kept non-streaming and single-choice on purpose: the web session
+        generates one answer per request. A one-element prompt list is
+        accepted because many clients wrap even single prompts in a list.
+        """
+        req = self._json_body()
+        if req is None:
+            return
+        if req.get("stream"):
+            self.send_error_json(
+                "freegem serves legacy /v1/completions non-streaming only; "
+                "use /v1/chat/completions for streaming",
+                400,
+            )
+            return
+        prompt = req.get("prompt")
+        if isinstance(prompt, list):
+            if len(prompt) != 1:
+                self.send_error_json(
+                    "freegem generates one completion per request; pass one prompt string",
+                    400,
+                )
+                return
+            prompt = prompt[0]
+        if not isinstance(prompt, str) or not prompt.strip():
+            self.send_error_json("prompt must be a non-empty string", 400)
+            return
+        legacy = dict(req)
+        legacy["messages"] = [{"role": "user", "content": prompt}]
+        # Completions predates tools; the fields mean nothing here.
+        legacy.pop("tools", None)
+        legacy.pop("tool_choice", None)
+        self._run_chat(legacy, legacy_completions=True)
+
+    def _handle_embeddings(self) -> None:
+        """POST /v1/embeddings: an honest 501, not a baffling 400.
+
+        freegem bridges a Gemini WEB SESSION, which generates text; it has
+        no embeddings surface at all. RAG stacks probing this endpoint
+        deserve the real reason and the real alternative instead of the
+        chat catch-all's "no prompt content".
+        """
+        if self._json_body() is None:
+            return  # body drained; keep-alive stays consistent
+        self.send_error_json(
+            "freegem bridges a Gemini web session, which cannot produce "
+            "embeddings. Use the official Gemini API (text-embedding-*) or a "
+            "local embedder for RAG.",
+            501,
+        )
+
+    def _run_chat(self, req: dict[str, Any], legacy_completions: bool = False) -> None:
+        n = req.get("n", 1)
+        try:
+            choices_wanted = int(n)
+        except (TypeError, ValueError):
+            choices_wanted = 1
+        if choices_wanted > 1:
+            self.send_error_json(
+                "freegem generates one choice per request (n=1); call the "
+                "endpoint once per choice instead",
+                400,
+            )
+            return
         resolved = self._resolve(req.get("model"))
         if resolved is None:
             return
@@ -757,7 +836,11 @@ class GeminiHandler(BaseHTTPRequestHandler):
 
         stream = bool(req.get("stream"))
         use_tools = bool(tools) and tool_choice != "none"
-        completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+        completion_id = (
+            f"cmpl-{uuid.uuid4().hex[:12]}"
+            if legacy_completions
+            else f"chatcmpl-{uuid.uuid4().hex[:12]}"
+        )
         created = int(time.time())
 
         # Streaming with tools is emulated: the full answer is generated first,
@@ -806,6 +889,19 @@ class GeminiHandler(BaseHTTPRequestHandler):
                 },
             )
             self._sse_done()
+            return
+
+        if legacy_completions:
+            self.send_json(
+                {
+                    "id": completion_id,
+                    "object": "text_completion",
+                    "created": created,
+                    "model": model_name,
+                    "choices": [{"index": 0, "text": text or "", "finish_reason": finish}],
+                    "usage": estimate_tokens(prompt, text or ""),
+                }
+            )
             return
 
         self.send_json(

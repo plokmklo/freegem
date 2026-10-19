@@ -21,7 +21,7 @@ import os
 import sys
 import urllib.parse
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any
 
@@ -42,6 +42,10 @@ DEFAULT_CONFIG: Mapping[str, Any] = MappingProxyType(
         "auth_user": None,
         "xsrf_token": None,
         "default_model": "gemini-3.6-flash",
+        # alias -> canonical registry name. Clients hardcode OpenAI-style
+        # model names (SillyTavern, JanitorAI, legacy stacks); an alias pins
+        # which Gemini model such a name routes to instead of the fallback.
+        "model_aliases": {},
         "cookie_file": None,
         "proxy": None,
         "temporary_chats": False,
@@ -150,6 +154,7 @@ _INT_FIELDS = frozenset(
     }
 )
 _FLOAT_FIELDS = frozenset({"request_queue_wait_sec"})
+_DICT_FIELDS = frozenset({"model_aliases"})
 _BOOL_FIELDS = frozenset(
     {
         "temporary_chats",
@@ -197,6 +202,28 @@ def _coerce_value(name: str, value: Any) -> Any:
     documented default applies -- a bad value must not crash startup NOR
     silently mean the opposite of what was written.
     """
+    if name in _DICT_FIELDS:
+        if isinstance(value, dict):
+            coerced: dict[str, str] = {}
+            for k, v in value.items():
+                ks, vs = str(k).strip(), str(v).strip()
+                if ks and vs:
+                    coerced[ks] = vs
+            return coerced  # a fresh copy: instances never share alias maps
+        if isinstance(value, str) and value.strip():
+            # compact form: "gpt-4o=gemini-3.6-pro, my-writer=gemini-3.6-flash-think"
+            coerced = {}
+            for part in value.split(","):
+                if "=" not in part:
+                    return _DROP  # one malformed pair poisons the whole map
+                k, v = part.split("=", 1)
+                ks, vs = k.strip(), v.strip()
+                if ks and vs:
+                    coerced[ks] = vs
+            return coerced
+        if isinstance(value, str):
+            return {}  # empty string means "no aliases"
+        return _DROP
     if name in _BOOL_FIELDS:
         if isinstance(value, bool):
             return value
@@ -264,6 +291,8 @@ class BridgeConfig:
     auth_user: str | None = DEFAULT_CONFIG["auth_user"]
     xsrf_token: str | None = DEFAULT_CONFIG["xsrf_token"]
     default_model: str = DEFAULT_CONFIG["default_model"]
+    # alias -> canonical name; built fresh per instance (never shared).
+    model_aliases: dict[str, str] = field(default_factory=dict)
     cookie_file: str | None = DEFAULT_CONFIG["cookie_file"]
     proxy: str | None = DEFAULT_CONFIG["proxy"]
     temporary_chats: bool = DEFAULT_CONFIG["temporary_chats"]
@@ -309,7 +338,12 @@ class BridgeConfig:
             coerced = _coerce_value(key, value)
             if coerced is not _DROP:
                 known[key] = coerced
-        cfg = cls(**{**dict(DEFAULT_CONFIG), **known})
+        base = {**dict(DEFAULT_CONFIG), **known}
+        if "model_aliases" not in known:
+            # Absent: let default_factory build a fresh map instead of
+            # sharing the DEFAULT_CONFIG dict object between instances.
+            base.pop("model_aliases", None)
+        cfg = cls(**base)
 
         env = os.environ.get("FREEGEM_CONFIG")
         if env and not data:

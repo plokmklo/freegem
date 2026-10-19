@@ -152,6 +152,8 @@ freegem doctor
 | Endpoint | For |
 | --- | --- |
 | `POST /v1/chat/completions` | OpenAI clients |
+| `POST /v1/completions` | Legacy OpenAI clients (non-streaming, one prompt) |
+| `POST /v1/embeddings` | Honest 501 — a web session cannot produce embeddings |
 | `POST /v1/responses` | OpenAI Codex CLI |
 | `GET /v1/models` | OpenAI model discovery |
 | `POST /v1beta/models/{model}:generateContent` | Gemini CLI, non-streaming |
@@ -161,6 +163,25 @@ freegem doctor
 | `GET /health` | Liveness, session status, `non_guarantees` labels |
 | `GET /metrics` | Latency percentiles, status counts, retries, memory |
 | `GET /v1/about` | Full assumption/reality boundary detail |
+
+#### Client compatibility notes
+
+- **Model names.** Unknown names (Codex CLI sends retired identifiers; roleplay
+  apps hardcode `gpt-4o`) fall back to `default_model`, and the response echoes
+  the model that actually ran. To pin where a specific name routes, set
+  `"model_aliases": {"gpt-4o": "gemini-3.1-pro"}` (a JSON object or a compact
+  `"gpt-4o=gemini-3.1-pro, x=gemini-3.6-flash"` string) in the config.
+- **Sampling parameters** (`temperature`, `top_p`, `frequency_penalty`, …) are
+  accepted and ignored: a Gemini web session samples server-side and exposes no
+  sampling controls. This is a property of the bridge, not a bug.
+- **`n` is 1.** One choice per request — the session generates one answer;
+  request n>1 with an honest 400 telling you to call again.
+- **Function calling** maps to Gemini's tool protocol: declared `tools` are
+  enforced, undeclared fenced calls are dropped, and `role: "tool"` results
+  round-trip.
+- **Embeddings are impossible here — and reported honestly:** a web session
+  has no embeddings surface, so `/v1/embeddings` answers 501 with the reason
+  and the alternative instead of pretending.
 
 The server is loopback-only and assumes no auth, so it hardens its own
 surface: POST bodies must be `Content-Type: application/json`; any request
