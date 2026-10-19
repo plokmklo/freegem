@@ -75,3 +75,5 @@ firecrawl_results.json
 AUTOPILOT_CRON.md
 AUTOPILOT_LOG.md
 *.patch
+auto_update_freegem.py
+.freegem_upstream_sha
