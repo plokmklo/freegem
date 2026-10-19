@@ -156,6 +156,7 @@ class Fix52PollErrorTests(_StateDirTestCase):
                 "freegem.watch._default_fetcher",
                 side_effect=ScrapeError("HTTP 500 fetching 'u'"),
             ),
+            mock.patch("freegem.cli.find_config", return_value=None),
             redirect_stdout(out),
             redirect_stderr(err),
         ):

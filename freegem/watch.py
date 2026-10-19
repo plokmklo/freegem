@@ -80,8 +80,32 @@ _SUMMARY_BLOCK_LIMIT = 5
 _WORD_INTERVAL_RE = re.compile(r"(\d+(?:\.\d+)?)\s*([smhd]?)")
 _UNIT_SECONDS = {"": 1.0, "s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
 
+# ── atomic replace with retry ────────────────────────────────────────────────
+# Windows holds an exclusive lock on a file across an in-flight os.replace,
+# so concurrent savers of the SAME target can get PermissionError. Retry
+# briefly; if it still loses, the caller's error-collection path decides.
+_MAX_REPLACE_RETRIES = 8
+
 
 # ─── state ────────────────────────────────────────────────────────────────────
+
+
+def _atomic_replace(tmp_name: str, target: Path) -> None:
+    """``os.replace`` with a short retry loop for Windows file-locking races.
+
+    On Windows, concurrent ``os.replace`` calls on the same target can race
+    for the OS-level exclusive lock and raise ``PermissionError``. A brief
+    retry absorbs the race; the rename is still atomic on success.
+    """
+    for attempt in range(_MAX_REPLACE_RETRIES):
+        try:
+            os.replace(tmp_name, target)
+            return
+        except PermissionError:
+            if attempt == _MAX_REPLACE_RETRIES - 1:
+                raise
+            time.sleep(0.05 * (attempt + 1))
+    raise OSError("unreachable: retry loop exited without returning or raising")
 
 
 def _sha256(text: str) -> str:
@@ -164,7 +188,7 @@ class WatchState:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write(json.dumps(self.to_dict(), ensure_ascii=False))
-            os.replace(tmp_name, target)
+            _atomic_replace(tmp_name, target)
         except BaseException:
             with contextlib.suppress(OSError):
                 os.unlink(tmp_name)
