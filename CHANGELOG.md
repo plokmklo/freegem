@@ -46,6 +46,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **stream-interrupted recovery**: when `freegem ask` streaming fails after
+  partial output (e.g. "Gemini rewrote an already-streamed block"), the CLI
+  now replays the request via the non-streaming path and prints the
+  complete answer with an `[complete reply follows]` separator, instead of
+  erroring out with a half-streamed reply. Five of 1,525 benchmark runs
+  hit this window; all now recover.
+
 ### Added
 
 - **`freegem scrape --ai-clean` / config `"smart_fetch_ai_clean"`** — one
