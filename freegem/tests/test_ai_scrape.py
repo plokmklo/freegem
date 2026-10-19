@@ -303,7 +303,7 @@ class AiScrapeTests(_SiteCase):
         self.assertTrue(any("rejected" in n for n in res.notes))
 
     def test_rate_limited_rescue_is_an_honest_note(self) -> None:
-        model = _Model(exc=RateLimitError("429", kind=1))
+        model = _Model(exc=RateLimitError("429", kind="rate_limit"))
         res = self.scrape("/navgunk", ai_extract="auto", complete=model)
         self.assertFalse(res.ai_used)
         self.assertTrue(any("ai-extract failed" in n for n in res.notes))
@@ -348,7 +348,7 @@ class AiScrapeTests(_SiteCase):
 
     def test_failing_answer_is_an_honest_note(self) -> None:
         model = _Model(_OK_TEXT)
-        model.exc = RateLimitError("429", kind=1)
+        model.exc = RateLimitError("429", kind="rate_limit")
         res = self.scrape("/article", ai_extract="never", complete=model, query="hello?")
         self.assertIsNone(res.answer)
         self.assertTrue(any("ai-answer failed" in n for n in res.notes))
@@ -385,9 +385,8 @@ class AiScrapeTests(_SiteCase):
                 "/navgunk", ai_extract="auto", complete=_Model(_OK_TEXT), memory=mem
             )
             self.assertTrue(first.ai_used)
-            self.assertEqual(
-                mem.get(urllib.parse.urlsplit(self.url("/navgunk")).hostname), "ai-extract"
-            )
+            host = urllib.parse.urlsplit(self.url("/navgunk")).hostname or ""
+            self.assertEqual(mem.get(host), "ai-extract")
             second = self.scrape("/article", ai_extract="auto", complete=_Model("x"), memory=mem)
             self.assertTrue(any("AI rescue" in n for n in second.notes))
 
@@ -395,9 +394,8 @@ class AiScrapeTests(_SiteCase):
         with tempfile.TemporaryDirectory() as tmp:
             mem = AiMemory(Path(tmp) / "mem.json")
             self.scrape("/article", ai_extract="auto", complete=_Model("x"), memory=mem)
-            self.assertEqual(
-                mem.get(urllib.parse.urlsplit(self.url("/article")).hostname), "heuristic"
-            )
+            host = urllib.parse.urlsplit(self.url("/article")).hostname or ""
+            self.assertEqual(mem.get(host), "heuristic")
 
     def test_ai_view_never_enters_the_shared_cache(self) -> None:
         from freegem.web_research import ResearchCache
