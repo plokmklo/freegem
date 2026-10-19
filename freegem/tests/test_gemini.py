@@ -849,34 +849,45 @@ class BackoffTests(unittest.TestCase):
     """Retries wait exponentially and honor the server's Retry-After."""
 
     def test_backoff_is_exponential(self) -> None:
-        self.assertEqual(_backoff_delay(2, 1), 2.0)
-        self.assertEqual(_backoff_delay(2, 2), 4.0)
-        self.assertEqual(_backoff_delay(2, 3), 8.0)
+        # With jitter the value is no longer exact, but it stays within
+        # ±50% of the exponential curve.
+        self.assertAlmostEqual(_backoff_delay(2, 1), 2.0, delta=1.0)
+        self.assertAlmostEqual(_backoff_delay(2, 2), 4.0, delta=2.0)
+        self.assertAlmostEqual(_backoff_delay(2, 3), 8.0, delta=4.0)
 
     def test_backoff_is_capped(self) -> None:
         # 2 * 2^19 is ~1M seconds; the cap must win long before that.
-        self.assertEqual(_backoff_delay(2, 20), _RETRY_BACKOFF_CAP_SEC)
-        self.assertLessEqual(_backoff_delay(2, 20), 120.0)
+        # At the cap, jitter is suppressed so the delay is exactly the cap.
+        self.assertEqual(_backoff_delay(2, 20, retry_after=None), _RETRY_BACKOFF_CAP_SEC)
+        self.assertLessEqual(_backoff_delay(2, 20, retry_after=None), 120.0)
 
     def test_retry_after_ninety_is_honored_not_truncated(self) -> None:
         # Regression: the old 30s cap truncated a server's explicit "come
         # back in 90s" to 30s, which just bought another 429. 90s must now
         # pass through intact -- that is the whole point of Retry-After.
+        # Retry-After overrides jitter.
         self.assertEqual(_backoff_delay(2, 1, retry_after=90.0), 90.0)
 
     def test_cap_sits_above_typical_retry_after_windows(self) -> None:
         self.assertEqual(_RETRY_BACKOFF_CAP_SEC, 120.0)
 
     def test_retry_after_overrides_when_longer(self) -> None:
+        # Retry-After overrides both the exponential curve and the jitter.
         self.assertEqual(_backoff_delay(2, 1, retry_after=7.0), 7.0)
+
+    def test_jitter_prevents_lockstep_retries(self) -> None:
+        """Concurrent workers must not all sleep the exact same duration."""
+        delays = [_backoff_delay(2, 1) for _ in range(100)]
+        self.assertGreater(len(set(round(d, 3) for d in delays)), 1,
+                           "jitter must produce varied delays")
 
     def test_retry_after_also_capped(self) -> None:
         self.assertEqual(_backoff_delay(2, 1, retry_after=3600.0), _RETRY_BACKOFF_CAP_SEC)
 
     def test_retry_after_ignored_when_shorter(self) -> None:
         # attempt 2 with base 2 waits 4s; a 3s Retry-After asks for less, so
-        # the exponential delay stands.
-        self.assertEqual(_backoff_delay(2, 2, retry_after=3.0), 4.0)
+        # the exponential delay stands (±50% jitter applied to the curve).
+        self.assertAlmostEqual(_backoff_delay(2, 2, retry_after=3.0), 4.0, delta=2.0)
 
     def test_retry_after_delay_seconds_form(self) -> None:
         self.assertEqual(_retry_after_seconds({"Retry-After": "7"}), 7.0)
@@ -942,7 +953,13 @@ class BackoffTests(unittest.TestCase):
         ):
             with self.assertRaises(BridgeError):
                 generate(cfg, "hi", 1, 0)
-        self.assertEqual([c.args[0] for c in sleep.call_args_list], [2.0, 4.0])
+        # With jitter, sleep durations are non-deterministic; verify the
+        # retry loop called sleep twice and the values are in ballpark
+        # (exponential curve 2, 4 with ±50% jitter).
+        sleeps = [c.args[0] for c in sleep.call_args_list]
+        self.assertEqual(len(sleeps), 2, "two retries = two sleep calls")
+        self.assertAlmostEqual(sleeps[0], 2.0, delta=1.0)
+        self.assertAlmostEqual(sleeps[1], 4.0, delta=2.0)
 
     def test_generate_upstream_http_status_is_retried_not_fatal(self) -> None:
         """A transient 429 recovers on the next attempt instead of failing."""

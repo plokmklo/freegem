@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import random
 import re
 import ssl
 import threading
@@ -273,11 +274,28 @@ def _backoff_delay(base: float, attempt: int, retry_after: float | None = None) 
     honored when it asks for more than the exponential delay would -- the
     server knows its own capacity better than our curve does -- but is capped
     by the same ceiling.
+
+    A half-random jitter (``±50%``) is folded into the exponential delay so
+    that concurrent workers (e.g. the 3-worker benchmark) do not all retry on
+    the same tick and re-trigger a fresh 429. The jitter never pushes the
+    delay to zero or beyond the cap; Retry-After overrides it when present.
     """
     delay = min(base * (2 ** (attempt - 1)), _RETRY_BACKOFF_CAP_SEC)
-    if retry_after is not None and retry_after > delay:
-        delay = min(retry_after, _RETRY_BACKOFF_CAP_SEC)
-    return delay
+    if retry_after is not None:
+        # Honor the server's own hint when it asks for more than our curve.
+        if retry_after > delay:
+            return min(retry_after, _RETRY_BACKOFF_CAP_SEC)
+        # Server's hint was shorter than our curve; use our curve (with
+        # jitter) since the server is OK with us waiting that long.
+    # ±50% jitter prevents synchronized retries across concurrent workers
+    # without ever zeroing the backoff or exceeding the cap. When the
+    # exponential curve is already pinned at the ceiling, jitter is skipped:
+    # there is nothing to spread and reducing a capped delay below the cap
+    # would only invite fresh retries at exactly the wrong moment.
+    if delay >= _RETRY_BACKOFF_CAP_SEC:
+        return _RETRY_BACKOFF_CAP_SEC
+    jitter = random.uniform(-0.5, 0.5) * delay
+    return min(max(delay + jitter, 0.001), _RETRY_BACKOFF_CAP_SEC)
 
 
 def account_prefix(cfg: BridgeConfig) -> str:
@@ -598,7 +616,17 @@ def _httpx_client(cfg: BridgeConfig) -> Any:
         client = _HTTPX_CLIENTS.get(key)
         if client is None and HAS_HTTPX:
             transport = httpx.HTTPTransport(proxy=cfg.proxy) if cfg.proxy else None
-            client = httpx.Client(transport=transport, timeout=cfg.request_timeout_sec, verify=True)
+            # Separate connect (fast-fail for unreachable hosts) from read
+            # (longer allowance for slow servers). A single blanket timeout
+            # either fails too fast on slow reads or hangs too long on dead
+            # hosts. Connect gets 10s; read gets the configured timeout.
+            timeout = httpx.Timeout(
+                connect=10.0,
+                read=cfg.request_timeout_sec,
+                write=10.0,
+                pool=cfg.request_timeout_sec,
+            )
+            client = httpx.Client(transport=transport, timeout=timeout, verify=True)
             _HTTPX_CLIENTS[key] = client
         return client
 
