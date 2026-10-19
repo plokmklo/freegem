@@ -12,18 +12,14 @@ Run with:
 
 from __future__ import annotations
 
-import socket
-import statistics
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
 from unittest import mock
 
 from freegem.config import BridgeConfig
 from freegem.tests.test_scraper import (
     _FAKE_HOST,
-    _CHECKED_IP,
     _fake_create_connection,
     _fake_resolver,
 )
@@ -78,8 +74,10 @@ def run_bench() -> None:
         from freegem_ai import scrape
 
         results = scrape(
-            cfg, urls,
-            ai_clean=True, ai_summarize=True,
+            cfg,
+            urls,
+            ai_clean=True,
+            ai_summarize=True,
             smart=False,
             no_limit=True,
             concurrency=CONCURRENCY,
@@ -95,7 +93,7 @@ def run_bench() -> None:
     failed = NUM_URLS - ok
     rps = NUM_URLS / elapsed if elapsed > 0 else float("inf")
 
-    print(f"\nResults:")
+    print("\nResults:")
     print(f"  Total URLs:      {NUM_URLS}")
     print(f"  Successful:      {ok}")
     print(f"  Failed:          {failed}")
