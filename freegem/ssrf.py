@@ -56,6 +56,7 @@ import http.cookiejar
 import ipaddress
 import socket
 import ssl
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -202,6 +203,50 @@ def _checked_addresses(host: str, infos: list[tuple[Any, ...]]) -> list[str]:
     return checked
 
 
+# DNS resolution timeout (#72): a slow or unresponsive resolver can hold a
+# fetch thread for many seconds (or indefinitely on some platforms where
+# getaddrinfo has no inherent timeout). Rate-limiters abraz slow resolves, so
+# we bound every resolution and fail fast instead of hanging a slot.
+_DNS_TIMEOUT_SEC = 5.0
+
+
+def _resolve_with_timeout(bare: str, timeout: float | None = None) -> list[tuple[Any, ...]]:
+    """Resolve ``bare`` with a bounded DNS wait.
+
+    ``socket.getaddrinfo`` has no timeout parameter on every platform; we run
+    it in a bounded thread and treat a timeout as a resolution failure (the
+    same taxonomy callers already handle via :func:`_is_dns_failure`). This
+    keeps a single slow DNS lookup from stalling the whole ladder / pool.
+    """
+    deadline = timeout if timeout is not None else _DNS_TIMEOUT_SEC
+    if deadline <= 0:
+        deadline = _DNS_TIMEOUT_SEC
+
+    result: dict[str, Any] = {}
+
+    def _work() -> None:
+        try:
+            result["infos"] = socket.getaddrinfo(bare, None)
+            result["err"] = None
+        except BaseException as exc:  # noqa: BLE001 - reported via the dict
+            result["infos"] = None
+            result["err"] = exc
+
+    worker = threading.Thread(target=_work, name="freegem-dns", daemon=True)
+    worker.start()
+    worker.join(timeout=deadline)
+    if worker.is_alive():
+        # The thread is a daemon; it will be abandoned cleanly at interpreter
+        # exit. We just report a failure so the ladder / pool can move on.
+        raise OSError(f"DNS resolution timed out after {deadline:g}s for {bare!r}")
+    if result.get("err") is not None:
+        raise result["err"]
+    infos = result.get("infos")
+    if infos is None:
+        raise OSError(f"DNS resolution returned no results for {bare!r}")
+    return infos
+
+
 def pick_public_ips(host: str) -> list[str]:
     """Resolve ``host`` and return its verified-public IPs to dial, in order.
 
@@ -211,12 +256,15 @@ def pick_public_ips(host: str) -> list[str]:
     entry -- mirrors what stdlib ``create_connection`` does for a hostname,
     without ever letting it re-resolve: dual-stack hosts work on IPv4-only and
     IPv6-only networks alike.
+
+    Resolution is bounded by :data:`_DNS_TIMEOUT_SEC` so a hung resolver
+    cannot stall the fetch ladder or the parallel pool (#72).
     """
     bare = _host_only(host)
     if not bare:
         raise SSRFRefused("refusing empty host")
     try:
-        infos = socket.getaddrinfo(bare, None)
+        infos = _resolve_with_timeout(bare)
     except OSError as exc:
         raise SSRFRefused(f"cannot resolve {bare!r}: {exc}") from exc
     if not infos:
@@ -278,9 +326,9 @@ def host_public_or_unresolvable(host: str) -> str:
     except ValueError:
         pass
     try:
-        infos = socket.getaddrinfo(bare, None)
+        infos = _resolve_with_timeout(bare)
     except OSError:
-        return bare  # local DNS silent -> the proxy resolves; allowed here
+        return bare  # local DNS silent or timed out -> proxy resolves; allowed
     _checked_addresses(bare, infos)  # raises on ANY non-public address
     return bare
 

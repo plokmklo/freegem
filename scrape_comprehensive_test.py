@@ -1251,7 +1251,7 @@ def scrape_batch_urls(cfg: BridgeConfig, urls: list[str],
         }
         for future in as_completed(futures):
             try:
-                result = future.result(timeout=120)
+                result = future.result(timeout=60)
                 results.append(result)
             except Exception as exc:
                 url = futures[future]
@@ -1275,7 +1275,7 @@ def run_phase(cfg: BridgeConfig, phase_name: str, urls: list[str],
     phase = PhaseResult(name=phase_name, total=len(urls))
     start = time.perf_counter()
 
-    batch_size = min(100, len(urls))
+    batch_size = min(200, len(urls))
     for i in range(0, len(urls), batch_size):
         batch = urls[i:i+batch_size]
         print(f"  Batch {i//batch_size + 1}/{(len(urls)-1)//batch_size + 1}: "
@@ -1289,7 +1289,7 @@ def run_phase(cfg: BridgeConfig, phase_name: str, urls: list[str],
                 etype = r.error_type or "other"
                 phase.errors.setdefault(etype, []).append(r)
         # Small delay between batches to avoid rate limiting
-        time.sleep(0.5)
+        time.sleep(0.1)
 
     phase.elapsed_sec = time.perf_counter() - start
     print(f"\n  Results: {phase.success} success, {phase.failed} failed "
@@ -1306,10 +1306,12 @@ def main():
     print("=" * 70)
 
     # Load config — enable 2.12.0 features: tls-browser rung and AI rescue
-    cfg = BridgeConfig()
-    cfg.smart_fetch_tls_browser = True
-    cfg.smart_fetch_ai = True
-    cfg.smart_fetch_ai_clean = True
+    cfg = BridgeConfig(
+        smart_fetch=True,
+        smart_fetch_ai=True,
+        smart_fetch_ai_clean=True,
+        smart_fetch_tls_browser=True,
+    )
 
     results_dir = Path(CWD) / "scrape_test_results"
     results_dir.mkdir(exist_ok=True)
@@ -1334,7 +1336,7 @@ def main():
     for topic in hard_topics:
         hard_urls.add(f"https://en.wikipedia.org/wiki/{topic}")
     hard_url_list = list(hard_urls)[:1000]
-    phase1 = run_phase(cfg, "1000 Hard Sites", hard_url_list, concurrency=20, use_ai=True)
+    phase1 = run_phase(cfg, "1000 Hard Sites", hard_url_list, concurrency=50, use_ai=False)
 
     # ─── Phase 2: 100 botwalled websites ───────────────────────────────────────
     print("\n\n>>> PHASE 2: 100 Botwalled websites <<<")
@@ -1344,12 +1346,12 @@ def main():
             botwalled_urls.add(url)
     botwalled_url_list = list(botwalled_urls)[:100]
     phase2 = run_phase(cfg, "100 Botwalled Sites", botwalled_url_list,
-                       concurrency=10, use_ai=True)
+                       concurrency=30, use_ai=False)
 
     # ─── Phase 3: 10000 diverse websites ───────────────────────────────────────
     print("\n\n>>> PHASE 3: 10000 Diverse websites (languages/backends/frontends) <<<")
     all_10k_urls = generate_10k_urls()
-    phase3 = run_phase(cfg, "10000 Diverse Sites", all_10k_urls, concurrency=30, use_ai=True)
+    phase3 = run_phase(cfg, "10000 Diverse Sites", all_10k_urls, concurrency=50, use_ai=False)
 
     # ─── Save results ──────────────────────────────────────────────────────────
     all_phases = [phase1, phase2, phase3]

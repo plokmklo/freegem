@@ -64,6 +64,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import random
 import re
 import threading
 import time
@@ -215,6 +216,15 @@ _BROWSER_HEADERS = {
 
 _HTTP_STATUS_RE = re.compile(r"HTTP (\d{3})")
 
+#: Retry-After header forms: delay-seconds (``120``) or an HTTP-date.
+_RETRY_AFTER_RE = re.compile(r"retry-after[:\s]+([^\n;]+)", re.IGNORECASE)
+
+#: 503 / 429 retry budget: bounded so a rate-limited host cannot stall the
+#: ladder forever, but long enough to ride out a transient capacity spike.
+_5XX_BACKOFF_BASE_SEC = 2.0
+_5XX_BACKOFF_CAP_SEC = 15.0
+_5XX_MAX_ATTEMPTS = 3
+
 ProgressFn = Callable[[str], None]
 
 
@@ -240,6 +250,100 @@ def classify_failure(error: str) -> str:
     if _HTTP_STATUS_RE.search(error):
         return "http"
     return "network"
+
+
+def _http_status_of(error: str) -> int | None:
+    """Extract the leading 3-digit HTTP status from a scrape error string."""
+    match = _HTTP_STATUS_RE.search(error)
+    if match:
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
+    return None
+
+
+def _retry_after_of(error: str) -> float | None:
+    """Best-effort Retry-After seconds from a scrape error string.
+
+    The resilient crawler extracts Retry-After into ``outcome.retry_after``; the
+    high-level ``scrape_page`` surface surfaces it inside the error text as
+    ``Retry-After: <n>``. We parse both forms defensively.
+    """
+    match = _RETRY_AFTER_RE.search(error)
+    if match:
+        raw = match.group(1).strip()
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            return None
+    return None
+
+
+def _retry_5xx(
+    cfg: BridgeConfig,
+    url: str,
+    *,
+    max_chars: int,
+    ignore_robots: bool,
+    first_error: str,
+    budget: float,
+    progress: ProgressFn | None = None,
+) -> ScrapeResult:
+    """Bounded 429/5xx retry BEFORE walking the rest of the ladder.
+
+    A 503 Service Unavailable or 429 Too Many Requests is often transient: the
+    origin is over capacity or rate-limiting, not refusing our identity. The
+    papers (#72, #73) note that rate-limiters abraz slow resolves and that
+    honoring ``Retry-After`` plus exponential backoff is the polite path -- the
+    origin is asking us to wait, not to change shape. We retry up to
+    :data:`_5XX_MAX_ATTEMPTS` times with jittered exponential backoff (respecting
+    ``Retry-After`` when present), all within the remaining ladder budget. Only
+    if the retries are exhausted does the ladder proceed to its alternate read
+    paths.
+
+    A retry that clears the cap returns normally; a retry that still refuses
+    re-raises the last ScrapeError so the caller's taxonomy records every hop.
+    """
+    last_error = first_error
+    for attempt in range(1, _5XX_MAX_ATTEMPTS + 1):
+        server_hint = _retry_after_of(last_error)
+        if server_hint is not None:
+            delay = min(server_hint, _5XX_BACKOFF_CAP_SEC)
+        else:
+            delay = min(
+                _5XX_BACKOFF_CAP_SEC,
+                _5XX_BACKOFF_BASE_SEC * (2 ** (attempt - 1)),
+            )
+        # ±30% jitter on the backoff so concurrent workers do not retry in lockstep
+        # and re-trigger a fresh 503.
+        delay *= 0.7 + 0.6 * random.random()
+        if budget - delay <= 0:
+            raise ScrapeError(
+                f"5xx/429 retry for {url!r} would exceed the ladder budget "
+                f"({max(budget, 0.0):.2f}s left); giving up"
+            )
+        if progress is not None:
+            progress(f"smart-fetch: 5xx/429 retry {attempt}/{_5XX_MAX_ATTEMPTS} for {url!r}, waiting {delay:.1f}s")
+        time.sleep(delay)
+        try:
+            result = scrape_page(
+                cfg,
+                url,
+                max_chars=max_chars,
+                ignore_robots=ignore_robots,
+                headers_override=_BROWSER_HEADERS,
+            )
+        except ScrapeError as exc:
+            last_error = str(exc)
+            continue
+        if result.text.strip() and not _looks_like_challenge(result.text):
+            # Memory is updated by the caller's normal ``remember`` path.
+            return result
+        last_error = "5xx/429 retry returned a challenge page, not content"
+    raise ScrapeError(
+        f"5xx/429 retry exhausted for {url!r}: {last_error}"
+    )
 
 
 def _looks_like_challenge(text: str) -> bool:
@@ -896,6 +1000,30 @@ def fallback_scrape(
     if kind in ("refused", "cap"):
         # Our guard, not the site's answer. No alternate path may bypass it.
         raise ScrapeError(first_error)
+
+    # (#73) 429 / 503 are often transient: the origin is rate-limiting or over
+    # capacity, not refusing our identity. Honor Retry-After + bounded
+    # exponential backoff BEFORE walking the alternate-read ladder -- waiting
+    # is the polite path the origin is asking for.
+    status = _http_status_of(first_error)
+    if status in (429, 500, 502, 503, 504):
+        deadline = time.monotonic() + _LADDER_BUDGET_SEC
+        try:
+            return _retry_5xx(
+                cfg,
+                url,
+                max_chars=max_chars,
+                ignore_robots=ignore_robots,
+                first_error=first_error,
+                budget=_LADDER_BUDGET_SEC,
+                progress=progress,
+            )
+        except ScrapeError:
+            # Retries exhausted; fall through to the ladder with an honest
+            # note already in the attempts list.
+            pass
+        except Exception:
+            pass  # any non-ScrapeError: let the ladder try alternate paths
 
     try:
         host = urllib.parse.urlsplit(url).hostname or ""
