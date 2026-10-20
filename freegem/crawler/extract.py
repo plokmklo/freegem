@@ -647,10 +647,19 @@ def html_to_markdown(dom_or_html: HtmlDom | str, *, base_url: str = "") -> str:
     if not dom or not dom.root:
         return ""
 
+    from ..tables import table_to_markdown
+
     def _render(node: Node) -> str:
         tag = node.tag.lower()
         if tag in ("script", "style", "noscript", "svg"):
             return ""
+
+        # Tables bypass the generic recursion: the cell grid IS the meaning,
+        # and flattening cells into running text destroys it (price lists,
+        # schedules, spec sheets became word soup before GFM rendering).
+        if tag == "table":
+            rendered = table_to_markdown(node)
+            return f"\n\n{rendered}\n\n" if rendered else ""
 
         children_texts = [_render(c) for c in node.children]
         inner = "".join(children_texts)

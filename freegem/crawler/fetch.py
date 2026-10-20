@@ -43,7 +43,21 @@ import urllib.error
 import urllib.request
 import zlib
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
+
+try:  # optional extras: freegem[brotli] -- brotlicffi is the pure-ish build
+    import brotlicffi as _brotli
+except ImportError:  # pragma: no cover - exercised via the fallback below
+    try:
+        import brotli as _brotli
+    except ImportError:
+        _brotli = None
+try:  # optional extra: freegem[zstd]
+    import zstandard as _zstandard
+except ImportError:  # pragma: no cover
+    _zstandard = None
 
 from ..config import BridgeConfig
 from ..gemini import _ssl_ctx
@@ -67,14 +81,31 @@ _ALLOWED_MIME_PREFIXES = (
     "application/xhtml",
 )
 
-#: Default header set: honest freegem identity, gzip only (the streaming
-#: reader knows gzip/zlib; asking for brotli would get bodies we cannot cut).
+
+def supported_encodings() -> tuple[str, ...]:
+    """Encodings we can HONESTLY advertise: every one is decode-able.
+
+    gzip/deflate are stdlib. ``br``/``zstd`` appear only when the optional
+    extra is importable (``freegem[brotli]`` / ``freegem[zstd]``) -- never
+    advertise an encoding the streaming reader cannot cut: the reader
+    enforces byte caps DURING decompression, so a new codec must arrive
+    with the same guard, not as an afterthought.
+    """
+    encodings = ["gzip", "deflate"]
+    if _brotli is not None:
+        encodings.append("br")
+    if _zstandard is not None:
+        encodings.append("zstd")
+    return tuple(encodings)
+
+
+#: Default header set: honest freegem identity, decodable encodings only.
 _BASE_HEADERS: dict[str, str] = {
     "User-Agent": "freegem-web-scraper/2.6 (+https://github.com/plokmklo/freegem)",
     "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,"
     "application/xml;q=0.8,text/plain;q=0.7,*/*;q=0.5",
     "Accept-Language": "en,*;q=0.5",
-    "Accept-Encoding": "gzip",
+    "Accept-Encoding": ", ".join(supported_encodings()),
 }
 
 _CHUNK = 65536
@@ -310,6 +341,13 @@ def read_body_stream(
     dobj: Any = None
     if encoding in ("gzip", "x-gzip", "deflate"):
         dobj = zlib.decompressobj(wbits=47)
+    elif encoding in ("br", "zstd"):
+        dobj = _optional_decoder(encoding)
+    elif encoding not in ("", "identity"):
+        # A server sent an encoding we never advertised (or a brand new
+        # one): storing raw compressed bytes as "text" would be worse than
+        # an honest failure. Raise; the caller sorts it under ``network``.
+        raise ScrapeError(f"undecodable Content-Encoding: {encoding!r}")
 
     chunks: list[bytes] = []
     spill_fh: Any = None
@@ -322,7 +360,7 @@ def read_body_stream(
                 break
             piece = wire
             if dobj is not None:
-                piece = _inflate(dobj, wire)
+                piece = _inflate(dobj, wire, encoding)
             if not piece:
                 continue
             total += len(piece)
@@ -359,8 +397,28 @@ def read_body_stream(
     return b"".join(chunks), None, total
 
 
-def _inflate(dobj: Any, wire: bytes) -> bytes:
+def _optional_decoder(encoding: str) -> Any:
+    """Decoder object for an optional codec, or an honest ScrapeError."""
+    if encoding == "br":
+        if _brotli is None:
+            raise ScrapeError(
+                "body is brotli-encoded but no decoder is installed (pip install 'freegem[brotli]')"
+            )
+        return _brotli.Decompressor()
+    if _zstandard is None:
+        raise ScrapeError(
+            "body is zstd-encoded but no decoder is installed (pip install 'freegem[zstd]')"
+        )
+    return _zstandard.ZstdDecompressor().decompressobj()
+
+
+def _inflate(dobj: Any, wire: bytes, encoding: str = "gzip") -> bytes:
     """One decompress step; on a bad zlib header retry as raw deflate once."""
+    if encoding in ("br", "zstd"):
+        try:
+            return dobj.decompress(wire)
+        except Exception as exc:  # brotli/zstd error types vary by backend
+            raise ScrapeError(f"corrupt compressed body: {exc}") from exc
     try:
         return dobj.decompress(wire)
     except zlib.error as exc:
@@ -445,14 +503,27 @@ def _is_dns_failure(message: str) -> bool:
     return any(marker in lowered for marker in markers)
 
 
-def _retry_after(headers: Any) -> float | None:
+def _retry_after(headers: Any, now: datetime | None = None) -> float | None:
+    """Retry-After as seconds: the delay-seconds form, or the HTTP-date form
+    (RFC 7231) measured against ``now`` (default: real UTC time). A past
+    date means "retry now" -> 0.0, matching the gemini.py bridge policy."""
     raw = headers.get("Retry-After") if headers else None
     if not raw:
         return None
     try:
         return max(0.0, float(raw))
     except (TypeError, ValueError):
+        pass
+    try:
+        dt = parsedate_to_datetime(raw.strip())
+    except (TypeError, ValueError):
         return None
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    reference = now or datetime.now(timezone.utc)
+    return max(0.0, (dt - reference).total_seconds())
 
 
 def _headers_of(headers: Any) -> dict[str, str]:

@@ -11,11 +11,6 @@ Plus one-shot utilities for checking a setup without starting a server:
     freegem scrape URL1 URL2 URL3 --format jsonl
     freegem research URL1 URL2 -q "question"
     freegem verify "claim one" "claim two" --urls URL1 URL2
-    freegem ai clean URL                 # AI-distill page to main content
-    freegem ai summarize URL             # AI summary with key points
-    freegem ai extract URL --schema {...} # structured field extraction
-    freegem ai research URL1 URL2 -q "..." # multi-page AI research
-    freegem ai crawl SEED -q "topic"     # AI-powered crawl with scoring
     freegem watch https://example.com/status --interval 30m
     freegem models
     freegem doctor
@@ -84,7 +79,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(
         dest="command",
-        metavar="{serve,mcp,ask,models,scrape,ai,research,verify,crawl,watch,doctor}",
+        metavar="{serve,mcp,ask,models,scrape,research,verify,crawl,watch,doctor}",
     )
 
     serve = sub.add_parser("serve", help="run the HTTP API server", parents=[common])
@@ -205,124 +200,41 @@ def _build_parser() -> argparse.ArgumentParser:
         '"price":"number","status":{"enum":["in_stock","sold_out"]}}\' '
         "(implies --ai; fields land in the jsonl record)",
     )
+    scrape.add_argument(
+        "--chunks",
+        type=int,
+        default=None,
+        metavar="N",
+        help="split the extracted text into RAG-ready chunks of N chars, "
+        "boundaries at paragraph/sentence edges, overlap kept (single URL; "
+        "jsonl emits one record per chunk with offsets)",
+    )
+    scrape.add_argument(
+        "--chunk-overlap",
+        type=int,
+        default=150,
+        metavar="N",
+        help="overlap characters between consecutive chunks (default 150)",
+    )
 
-    ai = sub.add_parser(
-        "ai",
-        help="AI-assisted scraper, crawler, and fetcher (clean, summarize, extract, "
-        "research, crawl)",
+    map_p = sub.add_parser(
+        "map",
+        help="discover a page's URLs (links + JS endpoints), scored, no content fetches",
         parents=[common],
     )
-    ai_sub = ai.add_subparsers(dest="ai_cmd", metavar="SUBCMD", required=False)
-
-    ai_common = argparse.ArgumentParser(add_help=False, parents=[common])
-    ai_common.add_argument(
-        "--budget",
+    map_p.add_argument("url", metavar="URL", help="the page to map")
+    map_p.add_argument(
+        "--limit", type=int, default=100, metavar="N", help="max URLs to output (default 100)"
+    )
+    map_p.add_argument("--format", choices=("text", "jsonl"), default="text", help="output format")
+    map_p.add_argument("--timeout", type=float, default=20.0, metavar="SEC", help="(default 20)")
+    map_p.add_argument(
+        "--max-bytes",
         type=int,
-        default=None,
+        default=5 * 1024 * 1024,
         metavar="N",
-        help="per-call character budget for AI passes (default: 100000)",
+        help="page byte cap (default 5 MiB)",
     )
-    ai_common.add_argument(
-        "--max-chars",
-        type=int,
-        default=None,
-        metavar="N",
-        help="truncate fetched text to N characters before AI (default: 50000)",
-    )
-    ai_common.add_argument(
-        "--no-cache", action="store_true", help="skip the fetch cache (nothing is written)"
-    )
-    ai_common.add_argument(
-        "--refresh", action="store_true", help="refetch and refresh cache entries"
-    )
-    ai_common.add_argument(
-        "--no-smart", action="store_true", help="disable smart-fetch fallback ladder"
-    )
-    ai_common.add_argument(
-        "--concurrency",
-        type=int,
-        default=3,
-        metavar="N",
-        help="parallel fetches (default 3)",
-    )
-    ai_common.add_argument(
-        "--no-limit",
-        action="store_true",
-        help="bypass the batch concurrency cap (use with care; 100+ workers can "
-        " overwhelm sites and exhaust file descriptors)",
-    )
-
-    ai_clean = ai_sub.add_parser(
-        "clean",
-        help="fetch a page and distill it to main content (drops nav/cookie boilerplate)",
-        parents=[ai_common],
-    )
-    ai_clean.add_argument("url", metavar="URL", help="the page to clean")
-
-    ai_summarize = ai_sub.add_parser(
-        "summarize",
-        help="fetch a page and produce a summary with key points",
-        parents=[ai_common],
-    )
-    ai_summarize.add_argument("url", metavar="URL", help="the page to summarize")
-
-    ai_extract = ai_sub.add_parser(
-        "extract",
-        help="fetch one or more pages and extract structured fields matching a schema",
-        parents=[ai_common],
-    )
-    ai_extract.add_argument("urls", nargs="+", metavar="URL", help="page(s) to extract from")
-    ai_extract.add_argument(
-        "--schema",
-        metavar="JSON",
-        default=None,
-        required=True,
-        help='JSON field schema, e.g. \'{"title":"string","author":"string"}\'',
-    )
-    ai_extract.add_argument(
-        "--query",
-        "--question",
-        "-q",
-        dest="query",
-        default=None,
-        help="the question to answer from the pages",
-    )
-
-    ai_entities = ai_sub.add_parser(
-        "entities",
-        help="fetch a page and extract named entities, topics, and terms",
-        parents=[ai_common],
-    )
-    ai_entities.add_argument("url", metavar="URL", help="the page to extract entities from")
-
-    ai_questions = ai_sub.add_parser(
-        "questions",
-        help="fetch a page and generate interview-style questions about its content",
-        parents=[ai_common],
-    )
-    ai_questions.add_argument("url", metavar="URL", help="the page to question")
-
-    ai_research = ai_sub.add_parser(
-        "research",
-        help="fetch several pages, answer one question, and cite sources",
-        parents=[ai_common],
-    )
-    ai_research.add_argument("urls", nargs="+", metavar="URL", help="pages to research")
-    ai_research.add_argument(
-        "--query", "--question", "-q", dest="query", required=True, help="the question to answer"
-    )
-
-    ai_crawl = ai_sub.add_parser(
-        "crawl",
-        help="AI-powered crawl: score pages against a query and summarize findings",
-        parents=[ai_common],
-    )
-    ai_crawl.add_argument("seeds", nargs="+", metavar="URL", help="seed URL(s) to crawl from")
-    ai_crawl.add_argument(
-        "--query", metavar="TEXT", required=True, help="what to score pages against"
-    )
-    ai_crawl.add_argument("--max-pages", type=int, default=50, metavar="N", help="(default 50)")
-    ai_crawl.add_argument("--max-depth", type=int, default=2, metavar="N", help="(default 2)")
 
     research = sub.add_parser(
         "research",
@@ -631,9 +543,33 @@ def _build_parser() -> argparse.ArgumentParser:
             "resilient fetcher's business -- no model calls on dead URLs"
         ),
     )
+    run_p.add_argument(
+        "--warc",
+        metavar="PATH",
+        default="",
+        help="write WARC 1.1 evidence to this file: every fetch becomes "
+        "request/response records with sha-256 digests; walls and dead ends "
+        "carry their classification as metadata records",
+    )
 
     status_p = crawl_sub.add_parser("status", help="show frontier stats for a state file")
     status_p.add_argument("--state", metavar="PATH", required=True, help="frontier SQLite file")
+
+    report_p = crawl_sub.add_parser(
+        "report",
+        help="politeness receipts: per-host evidence of how the crawl behaved",
+    )
+    report_p.add_argument("--state", metavar="PATH", required=True, help="frontier SQLite file")
+    report_p.add_argument(
+        "--format", choices=("markdown", "json"), default="markdown", help="output format"
+    )
+    report_p.add_argument(
+        "--delay-ms",
+        type=int,
+        default=None,
+        metavar="MS",
+        help="the crawl's per-host delay, to check observed gaps against (optional)",
+    )
 
     watch = sub.add_parser(
         "watch",
@@ -701,32 +637,6 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser(
         "doctor", help="check session, build tag, and network reachability", parents=[common]
-    )
-
-    bench = sub.add_parser(
-        "bench",
-        help="hermetic release benchmark suite (issue #68)",
-        parents=[common],
-    )
-    bench.add_argument(
-        "--output",
-        "-o",
-        metavar="PATH",
-        default=None,
-        help="write full JSON/text report to PATH",
-    )
-    bench.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="report format (default: text)",
-    )
-    bench.add_argument(
-        "--runs",
-        type=int,
-        default=5,
-        metavar="N",
-        help="runs per benchmark category (default 5)",
     )
 
     return parser
@@ -888,9 +798,8 @@ def _stream_answer(cfg: BridgeConfig, question: str) -> None:
     """Print a plain answer as it is produced, token-by-token when possible.
 
     Falls back to one non-streaming request when httpx is missing -- same
-    answer, just printed whole. If the stream is interrupted AFTER partial
-    output reached the terminal, a non-streaming replay fills in the rest
-    rather than leaving the user with a half-answer.
+    answer, just printed whole. Any stream failure AFTER bytes were printed
+    cannot be undone, so it surfaces as an error note instead of a rewrite.
     """
     from .gemini import HAS_HTTPX, BridgeError, generate, generate_stream
     from .models import resolve_model
@@ -911,17 +820,9 @@ def _stream_answer(cfg: BridgeConfig, question: str) -> None:
             sys.stdout.flush()
             printed = True
     except BridgeError as exc:
-        if not printed:
+        if printed:
+            print(f"\n[stream interrupted: {exc}]", file=sys.stderr)
             raise
-        # Partial output reached the terminal. The non-streaming path gives
-        # the user a complete answer instead of a half-streamed failure.
-        # The already-printed text is a best-effort prefix; the full reply
-        # follows after a separator line so nothing is silently lost.
-        print(f"\n[stream interrupted: {exc}]", file=sys.stderr)
-        answer = generate(cfg, question, int(mode_id), int(think_mode), None, extra)
-        if answer:
-            print(f"\n[complete reply follows]\n{answer}")
-            return
         raise
     if not printed:
         raise BridgeError(
@@ -1037,6 +938,17 @@ def cmd_scrape(cfg: BridgeConfig, args: argparse.Namespace) -> int:
         if args.ask:
             kwargs["query"] = args.ask
         result = ai_scrape(cfg, args.url[0], **kwargs)
+        if args.chunks is not None:
+            if not result.ok:
+                print(f"error: {result.error}", file=sys.stderr)
+                return 1
+            return _emit_chunks_output(
+                result.url,
+                result.text,
+                max_chars=args.chunks,
+                overlap=args.chunk_overlap,
+                fmt=args.format,
+            )
         if args.format == "jsonl":
             print(json.dumps(result.as_dict(), ensure_ascii=False))
             return 0 if result.ok else 1
@@ -1131,6 +1043,41 @@ def _cmd_scrape_classic(cfg: BridgeConfig, args: argparse.Namespace) -> int:
         max_chars = 200_000 if args.ask else 50_000
     smart = not args.no_smart and getattr(cfg, "smart_fetch", True)
     cache = None if args.no_cache else ResearchCache(ResearchCache.default_path(), args.cache_ttl)
+
+    if args.chunks is not None:
+        if len(args.url) != 1:
+            print("error: --chunks works with a single URL", file=sys.stderr)
+            return 2
+        if args.ask or want_ai_clean:
+            print(
+                "error: --chunks is a deterministic text transform; "
+                "it conflicts with --ask/--ai-clean",
+                file=sys.stderr,
+            )
+            return 2
+        from .web_scraper import ScrapeError, scrape_page
+
+        try:
+            page = scrape_page(
+                cfg,
+                args.url[0],
+                max_chars=max_chars,
+                ignore_robots=not args.respect_robots,
+                smart=smart,
+                cache=cache,
+                refresh=args.refresh,
+                allow_local=True,
+            )
+        except ScrapeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        return _emit_chunks_output(
+            page.url,
+            page.text,
+            max_chars=args.chunks,
+            overlap=args.chunk_overlap,
+            fmt=args.format,
+        )
 
     try:
         if len(args.url) == 1 and args.format == "text" and not want_ai_clean:
@@ -1260,201 +1207,131 @@ def _cmd_scrape_classic(cfg: BridgeConfig, args: argparse.Namespace) -> int:
     return 0
 
 
-def _ai_common_kwargs(args: argparse.Namespace) -> dict[str, Any]:
-    """Build the kwargs dict shared by all freegem ai subcommands."""
-    kwargs: dict[str, Any] = {}
-    if args.max_chars is not None:
-        kwargs["max_chars"] = args.max_chars
-    kwargs["smart"] = not getattr(args, "no_smart", False)
-    kwargs["refresh"] = getattr(args, "refresh", False)
-    kwargs["cache"] = None if getattr(args, "no_cache", False) else _research_cache()
-    if getattr(args, "budget", None) is not None:
-        kwargs["budget_chars"] = args.budget
-    if getattr(args, "no_limit", False):
-        kwargs["no_limit"] = True
-        kwargs["concurrency"] = getattr(args, "concurrency", 3)
-    elif getattr(args, "concurrency", None) is not None:
-        kwargs["concurrency"] = args.concurrency
-    return kwargs
+def _emit_chunks_output(
+    url: str,
+    text: str,
+    *,
+    max_chars: int,
+    overlap: int,
+    fmt: str,
+) -> int:
+    """--chunks output: RAG-ready chunk records with citation offsets.
+
+    jsonl gives one record per chunk (``type/url/index/start_char/end_char/
+    text/total``) so a vector store can cite ``url#chunk-3`` and verify the
+    quote against ``start_char:end_char`` of the cached page. text/markdown
+    render human-readable sections. Chunking is a pure transform of the
+    already-extracted text -- no AI, no re-fetch, no cache writes.
+    """
+    from .text_pipeline import chunk_text
+
+    chunks = chunk_text(text, max_chars=max_chars, overlap=overlap)
+    if not chunks:
+        print(f"error: {url} yielded no text to chunk", file=sys.stderr)
+        return 1
+    if fmt == "jsonl":
+        for chunk in chunks:
+            print(
+                json.dumps(
+                    {
+                        "type": "chunk",
+                        "url": url,
+                        "index": chunk.index,
+                        "start_char": chunk.start_char,
+                        "end_char": chunk.end_char,
+                        "text": chunk.text,
+                        "total": len(chunks),
+                    },
+                    ensure_ascii=False,
+                )
+            )
+    else:
+        for chunk in chunks:
+            print(
+                f"--- chunk {chunk.index + 1}/{len(chunks)} (chars {chunk.start_char}-{chunk.end_char}) ---"
+            )
+            print(chunk.text)
+            print()
+    return 0
 
 
-def _research_cache() -> Any:
-    from .web_research import ResearchCache
+def cmd_map(cfg: BridgeConfig, args: argparse.Namespace) -> int:
+    """Map one page: URLs it links to (or fetches from JS), scored, no fetches.
 
-    return ResearchCache(ResearchCache.default_path(), 1800)
+    Firecrawl's ``map`` proved agents want URL discovery without content;
+    freegem's version is one guarded fetch of the page, then pure parsing:
+    ``<a href>`` links and the fetch/XHR endpoints the page's own scripts
+    volunteer (discovery.py), ranked by the best-first scorer. Nothing else
+    is fetched -- the output is a plan, not a crawl.
+    """
+    # A map's output feeds future fetches; discovered URLs demand strictness.
+    cfg = _strict_guard(cfg)
+    from .crawler.discovery import BestFirstPrioritizer, discover_js_endpoints
+    from .crawler.fetch import crawl_fetch
+    from .crawler.hardening import HtmlDom, ResourceLimits
+    from .crawler.urls import normalize_url, url_origin
 
-
-def cmd_ai(cfg: BridgeConfig, args: argparse.Namespace) -> int:
-    """Dispatch AI-assisted scraping/crawling subcommands to freegem_ai."""
-    from freegem.web_scraper import scrape_page
-    from freegem_ai import (
-        ai_clean_page,
-        ai_extract,
-        ai_extract_entities,
-        ai_questionnaire,
-        ai_research,
-        ai_summarize,
-        scrape,
+    try:
+        url = normalize_url(args.url)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    outcome = crawl_fetch(
+        cfg,
+        url,
+        limits=ResourceLimits(timeout_sec=args.timeout, max_bytes=args.max_bytes),
     )
-    from freegem_ai.crawler import ai_crawl
-
-    mode = args.ai_cmd
-    common = _ai_common_kwargs(args)
-    model = getattr(args, "model", None)
-    if model == argparse.SUPPRESS:
-        model = None
-
-    max_chars = common.get("max_chars", 50_000)
-    smart = common.get("smart", True)
-    cache = common.get("cache")
-    refresh = common.get("refresh", False)
-    budget_chars = common.get("budget_chars", 100_000)
-    concurrency = common.get("concurrency", 3)
-    no_limit = common.get("no_limit", False)
-
-    if mode == "clean":
-        url = args.url
-        clean_result = ai_clean_page(
-            cfg,
-            url,
-            model=model,
-            max_chars=max_chars,
-            smart=smart,
-            cache=cache,
-            refresh=refresh,
+    if not outcome.ok or outcome.not_modified:
+        print(
+            f"error: map failed on {url}: {outcome.error or outcome.kind}",
+            file=sys.stderr,
         )
-        if not clean_result.scrape.text:
-            print(f"error: could not fetch {url}", file=sys.stderr)
-            return 1
-        print(clean_result.ai_clean.text if clean_result.ai_clean else clean_result.scrape.text)
-        return 0
+        return 1
+    text = outcome.text()
+    dom = HtmlDom(max_nodes=100_000, max_depth=200)
+    dom.feed(text)
 
-    if mode == "summarize":
-        url = args.url
-        page = scrape_page(cfg, url, max_chars=max_chars, smart=smart, cache=cache, refresh=refresh)
-        if not page.text:
-            print(f"error: could not fetch {url}", file=sys.stderr)
-            return 1
-        summary = ai_summarize(cfg, page.text, model=model, budget_chars=budget_chars)
-        print(summary.text)
-        return 0
+    candidates: dict[str, set[str]] = {}
 
-    if mode == "extract":
-        urls = args.urls
-        schema: dict[str, str] | None = None
-        if args.schema is not None:
-            try:
-                parsed = json.loads(args.schema)
-                if not isinstance(parsed, dict):
-                    raise ValueError("schema must be a JSON object")
-                schema = {
-                    str(k): str(v) if isinstance(v, str) else "string" for k, v in parsed.items()
-                }
-            except (ValueError, TypeError) as exc:
-                print(f"error: --schema is not valid JSON: {exc}", file=sys.stderr)
-                return 2
-        query = getattr(args, "query", None)
-        if query:
-            ext_result = ai_extract(
-                cfg,
-                query,
-                urls,
-                schema=schema or {},
-                model=model,
-                max_chars_per_page=max_chars,
-                smart=smart,
-                cache=cache,
-                refresh=refresh,
-                budget_chars=budget_chars,
+    def add_target(raw: str, source: str) -> None:
+        if not raw or raw.startswith(("mailto:", "javascript:", "tel:", "#")):
+            return
+        try:
+            target = normalize_url(raw, base=url)
+        except ValueError:
+            return
+        if target == url:
+            return
+        candidates.setdefault(target, set()).add(source)
+
+    for node in dom.root.iter():
+        if node.tag == "a":
+            href = node.attrs.get("href")
+            if href:
+                add_target(href, "link")
+    for endpoint in discover_js_endpoints(text, base_url=url):
+        add_target(endpoint, "js_endpoint")
+
+    prioritizer = BestFirstPrioritizer(origin=url_origin(url), top_k=max(1, args.limit))
+    plan = prioritizer.enqueue_plan(list(candidates))
+    if args.format == "jsonl":
+        for entry in plan:
+            print(
+                json.dumps(
+                    {
+                        "url": entry["url"],
+                        "score": entry["score"],
+                        "priority": entry["priority"],
+                        "sources": sorted(candidates.get(entry["url"], set())),
+                    },
+                    ensure_ascii=False,
+                )
             )
-            print(ext_result.text)
-            for src in ext_result.sources:
-                print(f"  source: {src}", file=sys.stderr)
-        else:
-            results = scrape(
-                cfg,
-                urls,
-                schema=schema,
-                model=model,
-                max_chars=max_chars,
-                smart=smart,
-                cache=cache,
-                refresh=refresh,
-                budget_chars=budget_chars,
-                concurrency=concurrency,
-                no_limit=no_limit,
-            )
-            for r in results:
-                if r.ai_extract:
-                    print(r.ai_extract.text)
-                else:
-                    print(json.dumps({"url": r.page.scrape.url, "text": r.page.scrape.text[:200]}))
-        return 0
-
-    if mode == "entities":
-        url = args.url
-        page = scrape_page(cfg, url, max_chars=max_chars, smart=smart, cache=cache, refresh=refresh)
-        if not page.text:
-            print(f"error: could not fetch {url}", file=sys.stderr)
-            return 1
-        ents = ai_extract_entities(cfg, page.text, model=model, budget_chars=budget_chars)
-        print(ents.text)
-        return 0
-
-    if mode == "questions":
-        url = args.url
-        page = scrape_page(cfg, url, max_chars=max_chars, smart=smart, cache=cache, refresh=refresh)
-        if not page.text:
-            print(f"error: could not fetch {url}", file=sys.stderr)
-            return 1
-        q_result = ai_questionnaire(cfg, page.text, model=model, budget_chars=budget_chars)
-        print(q_result.text)
-        return 0
-
-    if mode == "research":
-        urls = args.urls
-        query = args.query
-        research_result = ai_research(
-            cfg,
-            query,
-            urls,
-            schema=None,
-            model=model,
-            max_chars_per_page=max_chars,
-            smart=smart,
-            cache=cache,
-            refresh=refresh,
-            budget_chars=budget_chars,
-        )
-        print(research_result.text)
-        for src in research_result.sources:
-            print(f"  source: {src}", file=sys.stderr)
-        return 0
-
-    if mode == "crawl":
-        seeds = args.seeds
-        query = args.query
-        crawl_result = ai_crawl(
-            cfg,
-            seeds,
-            query,
-            max_pages=getattr(args, "max_pages", 50),
-            max_depth=getattr(args, "max_depth", 2),
-            model=model,
-            budget_chars=budget_chars,
-            smart=smart,
-            concurrency=concurrency,
-        )
-        for rec in crawl_result.records:
-            score = rec.ai_score.text if rec.ai_score else "no score"
-            print(f"url: {rec.url} score: {score}")
-            if rec.ai_distill:
-                print(rec.ai_distill.text)
-            print("---")
-        return 0
-
-    print(f"error: unknown ai subcommand: {mode}", file=sys.stderr)
-    return 2
+    else:
+        for entry in plan:
+            sources = ", ".join(sorted(candidates.get(entry["url"], set())))
+            print(f"{entry['score']:5.2f}  {entry['url']}  [{sources}]")
+    return 0
 
 
 def cmd_research(cfg: BridgeConfig, args: argparse.Namespace) -> int:
@@ -1517,16 +1394,6 @@ def cmd_verify(cfg: BridgeConfig, args: argparse.Namespace) -> int:
         return 1
     print(output)
     return 0
-
-
-def cmd_bench(cfg: BridgeConfig, args: argparse.Namespace) -> int:
-    """Run the hermetic release benchmark suite (issue #68)."""
-    from freegem.bench_release import main as bench_main
-
-    argv = ["--format", args.format, "--runs", str(args.runs)]
-    if args.output:
-        argv += ["--output", args.output]
-    return bench_main(argv)
 
 
 def cmd_doctor(cfg: BridgeConfig, args: argparse.Namespace) -> int:
@@ -1660,6 +1527,7 @@ def _crawl_spec(args: argparse.Namespace) -> Any:
         artifacts_dir=getattr(args, "artifacts", "") or "",
         state_path=args.state or "",
         ai_rescue=bool(getattr(args, "ai_rescue", False)),
+        warc_path=getattr(args, "warc", "") or "",
     )
 
 
@@ -1674,6 +1542,23 @@ def cmd_crawl(cfg: BridgeConfig, args: argparse.Namespace) -> int:
     from .crawler import run as run_crawl
 
     mode = args.crawl_cmd
+    if mode == "report":
+        if not args.state or not os.path.exists(args.state):
+            print("crawl report needs --state pointing at an existing state file", file=sys.stderr)
+            return 2
+        from .crawler.fetch import _BASE_HEADERS
+        from .crawler.receipts import build_receipts, render_markdown
+
+        receipt = build_receipts(
+            args.state,
+            delay_ms=args.delay_ms,
+            user_agent=_BASE_HEADERS["User-Agent"],
+        )
+        if args.format == "json":
+            print(json.dumps(receipt, indent=2, ensure_ascii=False))
+        else:
+            print(render_markdown(receipt))
+        return 0
     if mode == "status":
         if not args.state or not os.path.exists(args.state):
             print("crawl status needs --state pointing at an existing state file", file=sys.stderr)
@@ -1918,13 +1803,12 @@ def main(argv: list[str] | None = None) -> int:
         "ask",
         "models",
         "scrape",
+        "map",
         "research",
         "verify",
         "crawl",
-        "ai",
         "watch",
         "doctor",
-        "bench",
     }
     if not any(a in _commands for a in raw) and not any(
         a in ("-h", "--help", "--version") for a in raw
@@ -1965,13 +1849,12 @@ def main(argv: list[str] | None = None) -> int:
         "ask": cmd_ask,
         "models": cmd_models,
         "scrape": cmd_scrape,
+        "map": cmd_map,
         "research": cmd_research,
         "verify": cmd_verify,
         "crawl": cmd_crawl,
-        "ai": cmd_ai,
         "watch": cmd_watch,
         "doctor": cmd_doctor,
-        "bench": cmd_bench,
     }
     return handlers[command](cfg, args)
 
