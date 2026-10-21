@@ -9,6 +9,7 @@ here, because the thing being protected is your Google session, not this code.
 from __future__ import annotations
 
 import contextlib
+import hmac
 import json
 import os
 import socket
@@ -134,15 +135,22 @@ class GeminiHandler(BaseHTTPRequestHandler):
         key_header = self.headers.get("X-API-Key", "")
 
         token = ""
-        if auth_header.startswith("Bearer "):
-            token = auth_header[7:].strip()
+        scheme, _, rest = auth_header.partition(" ")
+        # RFC 6750: the auth scheme is case-insensitive; clients and proxies
+        # do send "bearer"/"BEARER".
+        if scheme.lower() == "bearer":
+            token = rest.strip()
         elif key_header:
             token = key_header.strip()
 
         client_ip = self.client_address[0] if self.client_address else "127.0.0.1"
         req_id = getattr(self, "_request_id", "")
 
-        if token == api_key:
+        # Constant-time comparison: a plain == on the shared secret leaks key
+        # bytes through response timing to anything that can loop back.
+        if token and hmac.compare_digest(
+            token.encode("utf-8"), str(api_key).encode("utf-8")
+        ):
             return True
 
         record_audit_event("auth_failure", client_ip, req_id, {"path": self.path})
@@ -167,7 +175,12 @@ class GeminiHandler(BaseHTTPRequestHandler):
             return
 
         # GET /v1/jobs/{id}/results
-        if len(parts) >= 4 and parts[3] == "results":
+        if len(parts) >= 4:
+            if parts[3] != "results":
+                # An unknown suffix used to fall through and return the job
+                # itself with a 200 -- a silent route regression.
+                self.send_error_json("not found", 404)
+                return
             self.send_json(
                 {"id": job.id, "status": job.status, "result": job.result, "error": job.error}
             )
@@ -196,25 +209,33 @@ class GeminiHandler(BaseHTTPRequestHandler):
                 content = f.read()
             self._send(content, 200, art.content_type)
         except Exception as exc:
-            self.send_error_json(f"failed to read artifact: {exc}", 500)
+            # The OS error carries the on-disk path; log it server-side, do
+            # not echo filesystem internals back to the client.
+            log(self.cfg, f"artifact read failed ({art_id}): {exc}")
+            self.send_error_json("failed to read artifact", 500)
 
     def _handle_jobs_post(self) -> None:
         if not self._authenticate_request():
             return
 
-        raw = self._read_body()
-        if raw is None:
-            return
-        try:
-            data = json.loads(raw.decode("utf-8"))
-        except Exception:
-            self.send_error_json("invalid JSON payload", 400)
+        # _json_body, not a hand-rolled read: it maps an oversized or
+        # malformed body to 413/400 AND closes the connection, so the unread
+        # bytes cannot desync the keep-alive stream (the #27 hazard). Reading
+        # directly here used to surface both framing errors as a bare 500
+        # with the body still queued on the socket.
+        data = self._json_body()
+        if data is None:
             return
 
         job_type = data.get("type", "")
         params = data.get("params", {})
-        if not job_type:
+        if not job_type or not isinstance(job_type, str):
             self.send_error_json("job type is required", 400)
+            return
+        if not isinstance(params, dict):
+            # The worker reads params with .get(); a list/array passed the old
+            # checks, returned 202, then crashed a pool thread downstream.
+            self.send_error_json("params must be a JSON object", 400)
             return
 
         runner = job_runner() or configure_job_runner(self.cfg)
@@ -511,6 +532,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
         return True
 
     def do_OPTIONS(self) -> None:
+        self._request_id = new_request_id()
         if not self._client_may_speak():
             return
         self.send_response(204)
@@ -527,6 +549,9 @@ class GeminiHandler(BaseHTTPRequestHandler):
         self.do_GET()
 
     def do_GET(self) -> None:
+        # GET/HEAD/OPTIONS previously never set an id: their 401/403 audit
+        # events carried an empty req_id and their responses no X-Request-Id.
+        self._request_id = new_request_id()
         if not self._client_may_speak():
             return
         try:
@@ -614,10 +639,20 @@ class GeminiHandler(BaseHTTPRequestHandler):
                 self.send_error_json("not found", 404)
         except (BrokenPipeError, ConnectionResetError):
             pass
+        except TimeoutError:
+            # Same client-fault mapping as _do_post: a stalled socket while
+            # writing the response is a 408, not a server fault (the generic
+            # branch below used to answer 500 "timed out").
+            log(self.cfg, "client stopped reading the GET response")
+            with contextlib.suppress(Exception):
+                self.send_error_json("request timed out", 408)
         except Exception as exc:
+            # Generic message: str(exc) can carry file paths and internal
+            # structure to any local caller (the chat face has no auth).
+            # The full detail goes to the server log, keyed by request id.
             log(self.cfg, f"GET error: {exc}")
             with contextlib.suppress(Exception):
-                self.send_error_json(str(exc), 500)
+                self.send_error_json("internal server error", 500)
 
     def do_POST(self) -> None:
         started = time.monotonic()
@@ -640,27 +675,45 @@ class GeminiHandler(BaseHTTPRequestHandler):
             return
         if not self._authenticate_request():
             return
-        parts = [p for p in self.path.split("?", 1)[0].split("/") if p]
-        if len(parts) < 3 or parts[1] != "jobs":
-            self.send_error_json("expected DELETE /v1/jobs/{id}", 400)
-            return
-        runner = job_runner()
-        if runner is None:
-            self.send_error_json("job runner not configured", 503)
-            return
-        job_id = parts[2]
-        if not runner.cancel(job_id):
-            self.send_error_json("job not found or already terminal", 404)
-            return
-        job = GLOBAL_JOB_MANAGER.get_job(job_id)
-        self.send_json(
-            {
-                "id": job_id,
-                "status": job.status if job else "cancelled",
-                "cancelled": True,
-                "cooperative": job is not None and job.status == "processing",
-            }
-        )
+        try:
+            parts = [p for p in self.path.split("?", 1)[0].split("/") if p]
+            # parts[0] must be "v1": without it DELETE /anything/jobs/{id}
+            # cancelled a real job through a path the API never documented.
+            if len(parts) < 3 or parts[0] != "v1" or parts[1] != "jobs":
+                self.send_error_json("expected DELETE /v1/jobs/{id}", 400)
+                return
+            runner = job_runner()
+            if runner is None:
+                self.send_error_json("job runner not configured", 503)
+                return
+            job_id = parts[2]
+            if not runner.cancel(job_id):
+                self.send_error_json("job not found or already terminal", 404)
+                return
+            job = GLOBAL_JOB_MANAGER.get_job(job_id)
+            self.send_json(
+                {
+                    "id": job_id,
+                    "status": job.status if job else "cancelled",
+                    "cancelled": True,
+                    "cooperative": job is not None and job.status == "processing",
+                }
+            )
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as exc:
+            # This method previously had no guard at all: a disconnect
+            # mid-response killed the worker thread with a traceback and the
+            # client got no answer; a socket timeout was silently swallowed
+            # by handle_one_request. Map them like the other methods do.
+            if isinstance(exc, TimeoutError):
+                log(self.cfg, "client stopped reading the DELETE response")
+                with contextlib.suppress(Exception):
+                    self.send_error_json("request timed out", 408)
+                return
+            log(self.cfg, f"DELETE error: {exc}")
+            with contextlib.suppress(Exception):
+                self.send_error_json("internal server error", 500)
 
     def _do_post(self) -> None:
         if not self._client_may_speak():
@@ -698,18 +751,21 @@ class GeminiHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception as exc:
-            # BaseHTTPRequestHandler.handle_one_request already converts a
-            # socket TimeoutError into a 500 with the bare message "timed out"
-            # before this frame runs, so a client that promises a body and goes
-            # quiet surfaces as a server fault. Re-report it as 408.
+            # A socket timeout raised while reading the body lands HERE first
+            # (handle_one_request's own TimeoutError catch only sees what
+            # escapes method()); without this mapping the client would get a
+            # dropped connection with no response at all. Client fault: 408,
+            # not a server error.
             if isinstance(exc, TimeoutError):
                 log(self.cfg, "client stopped sending mid-request")
                 with contextlib.suppress(Exception):
                     self.send_error_json("client stopped sending the request", 408)
                 return
+            # Generic message: str(exc) can leak paths/internal structure to
+            # any local caller (the chat face has no auth). Detail in the log.
             log(self.cfg, f"POST error: {exc}")
             with contextlib.suppress(Exception):
-                self.send_error_json(str(exc), 500)
+                self.send_error_json("internal server error", 500)
 
     # ── shared core ──────────────────────────────────────────────────────────
 

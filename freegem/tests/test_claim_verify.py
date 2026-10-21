@@ -706,6 +706,126 @@ class SectionAndLocationTests(_TmpDirTestCase):
         self.assertIsNone(_locate_quote("tiny", source, ALEXANDER_TEXT))  # too short
 
 
+class CoercionAndNormalizationTests(_TmpDirTestCase):
+    """Stringified numbers and status casing are repaired, not dropped."""
+
+    _QUOTE = "He succeeded his father, Philip II, to the throne in 336 BC, at the age of 20"
+
+    def test_string_claim_number_and_source_are_coerced(self) -> None:
+        answer = (
+            '```claims\n[{"claim_number": "1", "status": "supported", '
+            f'"evidence": [{{"source": "1", "quotes": ["{self._QUOTE}"]}}]}}]'
+            "\n```"
+        )
+        result = _run_verify(claims=CLAIMS[:1], answer=answer)
+        self.assertEqual(result.claims[0].status, STATUS_SUPPORTED)
+        self.assertTrue(result.claims[0].evidence[0].verified)
+        self.assertIn("coerced", result.claims[0].note or "")
+
+    def test_status_capitalization_is_normalized(self) -> None:
+        answer = (
+            '```claims\n[{"claim_number": 1, "status": "Supported", '
+            f'"evidence": [{{"source": 1, "quotes": ["{self._QUOTE}"]}}]}}]'
+            "\n```"
+        )
+        result = _run_verify(claims=CLAIMS[:1], answer=answer)
+        self.assertEqual(result.claims[0].status, STATUS_SUPPORTED)
+        self.assertTrue(result.claims[0].evidence[0].verified)
+        self.assertIn("normalized", result.claims[0].note or "")
+
+    def test_hyphenated_status_is_normalized(self) -> None:
+        answer = (
+            '```claims\n[{"claim_number": 1, "status": "partially-supported", '
+            f'"evidence": [{{"source": 1, "quotes": ["{self._QUOTE}"]}}]}}]'
+            "\n```"
+        )
+        result = _run_verify(claims=CLAIMS[:1], answer=answer)
+        self.assertEqual(result.claims[0].status, STATUS_PARTIAL)
+
+
+class FenceFallbackTests(_TmpDirTestCase):
+    """A missing ```claims label must not collapse every verdict."""
+
+    _QUOTE = "He succeeded his father, Philip II, to the throne in 336 BC, at the age of 20"
+
+    def _list_body(self) -> str:
+        return (
+            '[{"claim_number": 1, "status": "supported", '
+            f'"evidence": [{{"source": 1, "quotes": ["{self._QUOTE}"]}}]}}]'
+        )
+
+    def test_json_fence_is_parsed_with_a_repair_note(self) -> None:
+        answer = f"```json\n{self._list_body()}\n```"
+        result = _run_verify(claims=CLAIMS[:1], answer=answer)
+        self.assertEqual(result.claims[0].status, STATUS_SUPPORTED)
+        self.assertTrue(result.claims[0].evidence[0].verified)
+        self.assertIn("fence not matched", result.claims[0].note or "")
+
+    def test_missing_newline_before_closing_fence_is_parsed(self) -> None:
+        # The strict ```claims regex needs a newline before the closing
+        # fence; models routinely omit it.
+        answer = f"```claims\n{self._list_body()}```"
+        result = _run_verify(claims=CLAIMS[:1], answer=answer)
+        self.assertEqual(result.claims[0].status, STATUS_SUPPORTED)
+
+    def test_bare_array_in_prose_is_parsed(self) -> None:
+        answer = f"Here are the verdicts you asked for: {self._list_body()} — done"
+        result = _run_verify(claims=CLAIMS[:1], answer=answer)
+        self.assertEqual(result.claims[0].status, STATUS_SUPPORTED)
+        self.assertTrue(result.claims[0].evidence[0].verified)
+
+
+class MaterialFitNumberingTests(_TmpDirTestCase):
+    """_fit_material drops pages; [S#] must stay aligned with the model's view.
+
+    Over budget, the prompt numbers only the KEPT pages ([S1]=first kept,
+    [S2]=second kept ...) while the full material list still contains the
+    dropped page. Evidence must be verified against the numbering the model
+    saw -- indexing the full list verified an honest S2 quote against the
+    WRONG page and flagged it UNVERIFIED.
+    """
+
+    QUOTE = "Philip II was assassinated at a wedding banquet in 336 BC."
+
+    def test_dropped_page_does_not_shift_source_numbers(self) -> None:
+        r1 = "Alexander king of Macedon in 336 BC. " * 900  # relevant, ~32k
+        filler = "unrelated filler word " * 1600  # zero claim overlap, ~35k
+        r3 = (
+            self.QUOTE
+            + " Alexander ruled Persia until his death. "
+            + "random prose about the Persian satrapies. " * 750
+        )  # relevant, ~33k
+        u1, u2, u3 = (
+            "https://en.wikipedia.org/wiki/R1",
+            "https://en.wikipedia.org/wiki/Filler",
+            "https://en.wikipedia.org/wiki/R3",
+        )
+        pages = {
+            u1: _page(u1, "R1", r1),
+            u2: _page(u2, "Filler", filler),
+            u3: _page(u3, "R3", r3),
+        }
+        # The model saw [S1]=R1, [S2]=R3 (the filler was dropped from the
+        # prompt) and quotes R3 citing source 2.
+        answer = (
+            '```claims\n[{"claim_number": 1, "status": "supported", '
+            f'"evidence": [{{"source": 2, "quotes": ["{self.QUOTE}"]}}]}}]'
+            "\n```"
+        )
+        result = _run_verify(
+            pages=pages,
+            claims=CLAIMS[:1],
+            urls=[u1, u2, u3],
+            answer=answer,
+            max_chars_per_page=40_000,
+            total_budget=200_000,
+        )
+        evidence = result.claims[0].evidence
+        self.assertTrue(evidence, result.claims[0].note)
+        self.assertTrue(evidence[0].verified, evidence[0].quote)
+        self.assertEqual(evidence[0].source_marker, "S2")
+
+
 class RenderTests(_TmpDirTestCase):
     """The documented output shapes, exactly."""
 

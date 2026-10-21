@@ -6,6 +6,7 @@ import json
 import unittest
 
 from freegem.crawler.extract import (
+    ExtractionStats,
     Field,
     Schema,
     css_select,
@@ -214,6 +215,75 @@ class ExtractItemsTests(unittest.TestCase):
         schema = Schema(item_selector="article", fields=(Field(name="t", selector="h2 a"),))
         records, _ = extract_items(_dom(), None, schema, base_url="https://e.com", max_items=2)
         self.assertEqual(len(records), 2)
+
+    def test_required_type_failure_recorded_once(self) -> None:
+        """A present-but-invalid required value earns ONE error (the
+        validation failure), not a second 'required value missing'."""
+        dom = HtmlDom()
+        dom.feed('<article><span class="s">NaN</span></article>')
+        schema = Schema(
+            item_selector="article",
+            fields=(Field(name="score", selector="span.s", type="int", required=True),),
+        )
+        records, errors = extract_items(dom, None, schema, base_url="https://e.com")
+        self.assertEqual(records, [])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("failed", errors[0].error)
+
+    def test_missing_url_attribute_is_absent_not_phantom(self) -> None:
+        """<a> without href must not resolve type=url to the page URL."""
+        dom = HtmlDom()
+        dom.feed("<article><a>no href</a></article>")
+        schema = Schema(
+            item_selector="article",
+            fields=(Field(name="u", selector="a", attr="href", type="url"),),
+        )
+        records, errors = extract_items(dom, None, schema, base_url="https://page.test/list")
+        self.assertEqual(records, [])  # value absent -> record empty -> dropped
+        self.assertEqual(errors, [])  # absence is not an error
+
+    def test_missing_url_attribute_required_drops_record(self) -> None:
+        dom = HtmlDom()
+        dom.feed("<article><a>no href</a></article>")
+        schema = Schema(
+            item_selector="article",
+            fields=(Field(name="u", selector="a", attr="href", type="url", required=True),),
+        )
+        records, errors = extract_items(dom, None, schema, base_url="https://page.test/list")
+        self.assertEqual(records, [])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("required", errors[0].error)
+
+    def test_multi_missing_attr_yields_empty_list(self) -> None:
+        dom = HtmlDom()
+        dom.feed('<article><a class="dl">no href</a></article>')
+        schema = Schema(
+            item_selector="article",
+            fields=(Field(name="pdf", selector="a.dl", attr="href", type="url", multi=True),),
+        )
+        records, _ = extract_items(dom, None, schema, base_url="https://e.com")
+        self.assertEqual(records[0]["pdf"], [])
+
+    def test_text_field_applies_normalize_and_type(self) -> None:
+        schema = Schema(
+            single=True,
+            fields=(
+                Field(name="v", selector=r"v\d+\.\d+", kind="text", normalize=("upper",)),
+                Field(name="n", selector=r"(?<=build )\d+", kind="text", type="int"),
+            ),
+        )
+        page = HtmlDom()
+        page.feed("<p>version v2.6 build 42</p>")
+        records, _ = extract_items(page, None, schema, base_url="https://e.com")
+        self.assertEqual(records[0]["v"], "V2.6")
+        self.assertEqual(records[0]["n"], 42)
+
+    def test_pages_with_schema_counts_calls(self) -> None:
+        stats = ExtractionStats()
+        schema = Schema(item_selector="article", fields=(Field(name="t", selector="h2 a"),))
+        extract_items(_dom(), None, schema, base_url="https://e.com", stats=stats)
+        self.assertEqual(stats.pages_with_schema, 1)
+        self.assertEqual(stats.as_dict()["pages_with_schema"], 1)
 
 
 class SchemaFileTests(unittest.TestCase):

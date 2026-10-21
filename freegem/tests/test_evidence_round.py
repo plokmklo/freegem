@@ -11,7 +11,9 @@ from __future__ import annotations
 import io
 import json
 import os
+import sqlite3
 import tempfile
+import threading
 import unittest
 import urllib.parse
 from contextlib import redirect_stderr, redirect_stdout
@@ -161,6 +163,112 @@ class WarcWriterTestCase(unittest.TestCase):
             self.writer.metadata("http://site.test/", {"evil": "value\r\nWARC-Type: response"})
         self.writer.close()
 
+    def test_record_writes_take_the_lock(self) -> None:
+        """Contract: every record write is serialized (worker-pool safety)."""
+
+        class _SpyLock:
+            def __init__(self) -> None:
+                self.inner = threading.RLock()
+                self.enters = 0
+
+            def __enter__(self) -> None:
+                self.inner.__enter__()
+                self.enters += 1
+
+            def __exit__(self, *exc: object) -> None:
+                self.inner.__exit__(*exc)
+
+        spy = _SpyLock()
+        self.writer._lock = spy
+        self.writer.response("http://site.test/", status=200, body=b"x")
+        self.assertGreaterEqual(spy.enters, 1)
+        self.writer.close()
+
+    def test_threaded_writes_stay_verifiable(self) -> None:
+        def worker(n: int) -> None:
+            for i in range(50):
+                self.writer.response(f"http://site.test/{n}-{i}", status=200, body=f"b{n}-{i}".encode())
+
+        threads = [threading.Thread(target=worker, args=(n,)) for n in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.writer.close()
+        self.assertEqual(self.writer.records, 200)
+        report = verify(self.path)
+        self.assertTrue(report["ok"], report["problems"])
+        self.assertEqual(report["types"], {"response": 200})
+
+    def test_negative_content_length_is_refused(self) -> None:
+        # fh.read(-1) means "read everything": a negative length must be
+        # refused BEFORE it steers the reader past the block-size cap.
+        self.writer.close()
+        Path(self.path).write_bytes(
+            b"WARC/1.1\r\nWARC-Type: response\r\nContent-Length: -1\r\n\r\n" + b"A" * 64 + b"\r\n\r\n"
+        )
+        with self.assertRaises(WARCError):
+            list(iter_records(self.path))
+
+    def test_streamed_body_is_byte_identical_to_in_memory(self) -> None:
+        payload = b"payload-bytes" * 1000
+        spill = os.path.join(self.tmp.name, "spill.bin")
+        Path(spill).write_bytes(payload)
+        headers = {
+            "Content-Type": "text/plain",
+            "Content-Encoding": "gzip",  # wire header; body arrives decoded
+            "Content-Length": "999",  # wire length; body is what we store
+            "Transfer-Encoding": "chunked",
+            "Server": "s",
+        }
+        self.writer.response("http://site.test/", status=200, headers=headers, body=payload)
+        self.writer.close()
+
+        other_path = os.path.join(self.tmp.name, "streamed.warc")
+        other = WarcWriter(
+            other_path,
+            software="freegem/test",
+            robots_stance="never consulted (test)",
+            uuid_gen=_CounterUuids(),  # fresh counter: same id sequence
+            clock=self.clock,
+        )
+        other.response("http://site.test/", status=200, headers=headers, body_path=spill)
+        other.close()
+        self.assertEqual(Path(self.path).read_bytes(), Path(other_path).read_bytes())
+
+    def test_response_headers_reconciled_to_stored_payload(self) -> None:
+        self.writer.response(
+            "http://site.test/",
+            status=200,
+            headers={
+                "Content-Type": "text/plain",
+                "Content-Encoding": "gzip",
+                "Content-Length": "999",
+                "Transfer-Encoding": "chunked",
+                "Server": "s",
+            },
+            body=b"plain",
+        )
+        self.writer.close()
+        record = next(r for r in iter_records(self.path) if r.type == "response")
+        head = record.payload.split(b"\r\n\r\n")[0].decode("latin-1")
+        self.assertIn("Content-Length: 5", head)
+        self.assertIn("Server: s", head)
+        self.assertIn("Content-Type: text/plain", head)
+        self.assertNotIn("Content-Encoding", head)
+        self.assertNotIn("Transfer-Encoding", head)
+        self.assertTrue(record.payload.endswith(b"\r\n\r\nplain"))
+        self.assertTrue(verify(self.path)["ok"])
+
+    def test_http_header_line_break_is_refused(self) -> None:
+        with self.assertRaises(WARCError):
+            self.writer.response(
+                "http://site.test/", status=200, headers={"X-Evil": "a\r\nInjected: 1"}, body=b""
+            )
+        with self.assertRaises(WARCError):
+            self.writer.request("http://site.test/", headers={"X-Evil": "a\nInjected: 1"})
+        self.writer.close()
+
 
 # ── GFM tables ───────────────────────────────────────────────────────────────
 
@@ -269,6 +377,15 @@ class ReceiptsTests(unittest.TestCase):
         self.assertIn("# Politeness receipt", text)
         self.assertIn("a.test", text)
         self.assertIn(report["receipt_digest"], text)
+
+    def test_plain_connection_without_row_factory_is_accepted(self) -> None:
+        conn = sqlite3.connect(self.state)  # no row_factory set by the caller
+        try:
+            report = build_receipts(conn, user_agent="u", now=1_700_000_000.0)
+        finally:
+            conn.close()
+        self.assertEqual(report["totals"]["done"], 2)
+        self.assertEqual(report["totals"]["walls"], 1)
 
 
 # ── fetch hardening ──────────────────────────────────────────────────────────

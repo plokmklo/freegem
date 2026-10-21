@@ -425,6 +425,7 @@ def extract_items(
     ``required`` field is dropped, anything else keeps its extracted values.
     """
     st = stats if stats is not None else ExtractionStats()
+    st.pages_with_schema += 1
     errors: list[FieldError] = []
     records: list[dict[str, Any]] = []
     unit_list: list[Any]
@@ -454,17 +455,21 @@ def extract_items(
         record: dict[str, Any] = {}
         drop = False
         for f in schema.fields:
+            recorded = False
             try:
                 ok, value = _extract_one(unit, payload, f, dom, base_url)
             except ValueError as exc:
-                ok, value, _ = False, None, str(exc)
+                ok, value, recorded = False, None, True
                 errors.append(FieldError(index, f.name, str(exc)))
                 st.field_errors += 1
             if not ok:
                 if f.required:
                     drop = True
-                    errors.append(FieldError(index, f.name, "required value missing"))
-                    st.field_errors += 1
+                    # Present-but-invalid already produced its own error above;
+                    # only a genuinely ABSENT value earns the second label.
+                    if not recorded:
+                        errors.append(FieldError(index, f.name, "required value missing"))
+                        st.field_errors += 1
                 elif f.default is not None:
                     record[f.name] = f.default
                 continue
@@ -508,12 +513,19 @@ def _extract_one(
         else:
             text = str(unit)
         regex = f.pattern or f.selector  # for text fields the selector IS the regex
-        if not regex:
-            return True, text
-        match = re.search(regex, text)
-        if not match:
-            raise ValueError(f"{f.name}: pattern {regex!r} not found")
-        return True, match.group(0)
+        value = text
+        if regex:
+            match = re.search(regex, text)
+            if not match:
+                raise ValueError(f"{f.name}: pattern {regex!r} not found")
+            value = match.group(0)
+        # The pattern (when any) already matched the page text; normalize and
+        # type still apply so a typed text field behaves like every other kind.
+        value = _normalize(value, f.normalize, base_url)
+        ok, typed = _cast(value, f.type, base_url)
+        if not ok:
+            raise ValueError(f"{f.name}: value {value[:60]!r} failed type/pattern")
+        return True, typed
     if unit is None:
         return False, None
     nodes: list[Node]
@@ -528,11 +540,21 @@ def _extract_one(
     chosen = nodes if f.multi else nodes[:1]
     values: list[Any] = []
     for node in chosen:
-        raw = node.attrs.get(f.attr, "") if f.attr is not None else _text_of(node)
+        if f.attr is not None:
+            if f.attr not in node.attrs:
+                continue  # attribute absent: the value is absent, not invalid
+            raw = node.attrs[f.attr]
+        else:
+            raw = _text_of(node)
         ok, typed = _finish_raw(raw, f, base_url)
         if not ok:
             raise ValueError(f"{f.name}: value {raw[:60]!r} failed type/pattern")
         values.append(typed)
+    if not values:
+        # every candidate lacked the requested attribute
+        if f.multi:
+            return True, []
+        return False, None
     return True, (values if f.multi else values[0])
 
 

@@ -118,9 +118,15 @@ class SchedulerLoop:
 
     def stop(self, join_timeout: float = 10.0) -> None:
         self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=join_timeout)
-            self._thread = None
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=join_timeout)
+            if not thread.is_alive():
+                self._thread = None
+            # else: the tick is wedged past join_timeout. Keep the reference --
+            # clearing it here would let a later start() reset _stop and spawn
+            # a SECOND tick loop alongside the zombie, unstoppable forever.
+            # start() keeps refusing while the zombie is alive.
 
     def _run(self) -> None:
         while not self._stop.is_set():

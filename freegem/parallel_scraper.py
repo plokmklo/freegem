@@ -35,6 +35,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -63,6 +64,12 @@ _WIDEN_FACTOR = 1.2
 #: Hard floor and ceiling for the adaptive pool.
 _MIN_WORKERS = 2
 _MAX_WORKERS_DEFAULT = 50
+
+#: Hard bound for one wave: a single wedged URL must not stretch the batch
+#: past this many seconds (mirrors web_scraper._BATCH_RESULT_TIMEOUT_SEC's
+#: per-batch contract, #25). Exceeding it records an honest failure for the
+#: wedged URL and abandons still-running siblings instead of waiting on them.
+_WAVE_TIMEOUT_SEC = 300.0
 
 #: Per-page text cap for the AI digest (not for scrape_page, which has its own).
 _DIGEST_PAGE_CAP = 4_000
@@ -167,7 +174,9 @@ def summarize_results(
     per-page ``summary`` fields are left empty -- the raw text is still there.
     """
     _summarize_batch(cfg, results, model=model, budget_chars=budget_chars, question=question)
-    if digest and sum(1 for r in results if r.ok) > 3 or (question is not None and results):
+    # `digest` gates the top-level digest even when a question is set: the old
+    # precedence (`digest and ok > 3 or (question ...)` built one anyway).
+    if digest and (digest_ok(results) > 3 or (question is not None and results)):
         return _batch_digest(cfg, results, model=model, budget_chars=budget_chars, question=question)
     return ""
 
@@ -303,6 +312,19 @@ def scrape_parallel(
     wave_size = min(len(urls), max_workers)
     overall_start = time.monotonic()
 
+    def _record(pos: int, item: ParallelResult) -> None:
+        """One outcome in: slot fill + digest counters (called from the wave loop)."""
+        nonlocal elapsed_sum_ms
+        results[pos] = item
+        elapsed_sum_ms += item.elapsed_ms
+        if item.ok:
+            digest.ok += 1
+        else:
+            digest.failed += 1
+            if _is_botwall(item):
+                digest.botwall += 1
+        digest.via_counts[item.via or "none"] = digest.via_counts.get(item.via or "none", 0) + 1
+
     for chunk in _chunked(urls, wave_size):
         if progress is not None:
             progress(
@@ -311,52 +333,84 @@ def scrape_parallel(
                 f"botwall ratio so far: {botwall_ratio([r for r in results if r]):.0%})"
             )
         pool = ThreadPoolExecutor(max_workers=wave_size, thread_name_prefix="parascrape")
+        futures: dict[Future, int] = {}
         try:
-            futures: dict[Future, int] = {
-                pool.submit(_work, urls[index + i]): index + i
-                for i in range(len(chunk))
-                if (index + i) < len(urls)
-            }
-            for future in as_completed(futures):
-                pos = futures[future]
-                try:
-                    item = future.result(timeout=300)
-                except Exception as exc:
-                    item = ParallelResult(
-                        url=urls[pos],
-                        ok=False,
-                        error=f"{type(exc).__name__}: {exc}",
-                        elapsed_ms=0,
-                    )
-                results[pos] = item
-                elapsed_sum_ms += item.elapsed_ms
-                if item.ok:
-                    digest.ok += 1
-                else:
-                    digest.failed += 1
-                    if _is_botwall(item):
-                        digest.botwall += 1
-                digest.via_counts[item.via or "none"] = (
-                    digest.via_counts.get(item.via or "none", 0) + 1
-                )
+            for i in range(len(chunk)):
+                pos = index + i
+                if pos < len(urls):
+                    futures[pool.submit(_work, urls[pos])] = pos
+            peak_concurrency = max(peak_concurrency, len(futures))
+            # The wave is BOUNDED: as_completed without a timeout would wait
+            # forever on one wedged URL, and future.result(timeout=...) never
+            # fired here because as_completed only yields finished futures.
+            try:
+                for future in as_completed(futures, timeout=_WAVE_TIMEOUT_SEC):
+                    pos = futures[future]
+                    if results[pos] is not None:
+                        continue
+                    try:
+                        _record(pos, future.result())
+                    except Exception as exc:
+                        _record(
+                            pos,
+                            ParallelResult(
+                                url=urls[pos],
+                                ok=False,
+                                error=f"{type(exc).__name__}: {exc}",
+                                elapsed_ms=0,
+                            ),
+                        )
+            except FuturesTimeout:
+                # (#25 shape) Harvest what finished this instant; abandon the
+                # rest with an honest note instead of waiting on wedged work.
+                for future, pos in futures.items():
+                    if results[pos] is not None:
+                        continue
+                    try:
+                        _record(pos, future.result(timeout=0))
+                    except FuturesTimeout:
+                        future.cancel()
+                        _record(
+                            pos,
+                            ParallelResult(
+                                url=urls[pos],
+                                ok=False,
+                                error=(
+                                    f"wave abandoned after {_WAVE_TIMEOUT_SEC:g}s "
+                                    "pool bound without finishing"
+                                ),
+                                elapsed_ms=0,
+                            ),
+                        )
+                    except Exception as exc:
+                        _record(
+                            pos,
+                            ParallelResult(
+                                url=urls[pos],
+                                ok=False,
+                                error=f"{type(exc).__name__}: {exc}",
+                                elapsed_ms=0,
+                            ),
+                        )
         finally:
+            # Never wait on abandoned workers: their own socket bounds end
+            # them; the batch result must not.
             pool.shutdown(wait=False, cancel_futures=True)
 
         # Adapt concurrency for the next wave based on what this wave saw.
         ratio = botwall_ratio([r for r in results if r is not None])
-        peak_concurrency = max(peak_concurrency, len(futures))
         wave_size = max(_MIN_WORKERS, int(wave_size * (_THROTTLE_FACTOR if ratio > _BOTWALL_THROTTLE_RATIO else _WIDEN_FACTOR)))
         wave_size = min(wave_size, max_workers)
         index += len(chunk)
 
-    # Fill in any stragglers (defensive: should not happen, but as_completed
-    # does not guarantee all futures complete before pool.shutdown).
+    # Fill in any stragglers (defensive: an exception path above could have
+    # left a slot unset; keep the caller's URL so the row stays attributable).
     final: list[ParallelResult] = []
-    for r in results:
+    for pos, r in enumerate(results):
         if r is not None:
             final.append(r)
         else:
-            final.append(ParallelResult(url="", ok=False, error="not processed"))
+            final.append(ParallelResult(url=urls[pos], ok=False, error="not processed"))
 
     digest.peak_concurrency = peak_concurrency
     digest.avg_elapsed_ms = elapsed_sum_ms / max(1, digest.total)
@@ -386,16 +440,20 @@ def _summarize_batch(
     (no session, rate-limited), the summary field is left empty -- the raw
     text is still available. This is AI-assisted, labeled, and never cached
     as a verbatim extraction (per NON_GOALS).
-    """
-    from concurrent.futures import ThreadPoolExecutor
-    from concurrent.futures import TimeoutError as FuturesTimeout
 
+    This function WAITS for every summary: the digest built right after it
+    reads ``r.summary``, and the old fire-and-forget shutdown
+    (``wait=False, cancel_futures=True``) silently cancelled every queued
+    summary -- at most ``max_workers`` of them ever ran, racing the digest.
+    A wedged model call is abandoned at the per-call timeout; its thread
+    stays bounded by the shared AI pool width (never one thread per page).
+    """
     try:
         from .mcp_tools import run_tool
     except Exception:
         return  # no Gemini bridge available; skip summaries silently
 
-    def summarize_one(r: ParallelResult) -> None:
+    def summarize_one(ai_pool: ThreadPoolExecutor, r: ParallelResult) -> None:
         if not r.ok or not r.text.strip():
             return
         snippet = r.text[:_DIGEST_PAGE_CAP]
@@ -412,26 +470,31 @@ def _summarize_batch(
                 f"[PAGE TEXT]\n{snippet}\n[/PAGE TEXT]"
             )
         try:
-            pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="para-ai")
-            future = pool.submit(run_tool, cfg, "gemini_ask", {"question": prompt, "model": model})
+            future = ai_pool.submit(run_tool, cfg, "gemini_ask", {"question": prompt, "model": model})
             try:
                 r.summary = future.result(timeout=20).strip()
             except FuturesTimeout:
                 r.summary = "[timeout: AI summary unavailable]"
-            finally:
-                pool.shutdown(wait=False, cancel_futures=True)
         except Exception:
             r.summary = ""  # leave empty: raw text is still available
 
-    # Bound concurrency for the AI calls: one model call per page, capped at
-    # the number of successful results.
-    batch_pool = ThreadPoolExecutor(max_workers=min(4, digest_ok(results)), thread_name_prefix="para-batch")
+    targets = [r for r in results if r.ok and r.text.strip()]
+    if not targets:
+        # min(4, 0) would be max_workers=0 -- ThreadPoolExecutor rejects that.
+        return
+    width = min(4, len(targets))
+    ai_pool = ThreadPoolExecutor(max_workers=width, thread_name_prefix="para-ai")
+    batch_pool = ThreadPoolExecutor(max_workers=width, thread_name_prefix="para-batch")
     try:
-        for r in results:
-            if r.ok and r.text.strip():
-                batch_pool.submit(summarize_one, r)
+        pending = [batch_pool.submit(summarize_one, ai_pool, r) for r in targets]
+        for future in pending:
+            future.result()  # summarize_one never raises
     finally:
-        batch_pool.shutdown(wait=False, cancel_futures=True)
+        batch_pool.shutdown(wait=True)
+        # The AI pool is abandoned, not joined: a hung model call must not
+        # pin the batch. The client's own connect/read timeouts reap the
+        # straggler threads; queued work is cancelled so nothing dangles.
+        ai_pool.shutdown(wait=False, cancel_futures=True)
 
 
 def digest_ok(results: list[ParallelResult]) -> int:

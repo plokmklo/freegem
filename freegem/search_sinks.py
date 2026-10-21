@@ -116,25 +116,32 @@ class SqliteFtsSink:
         now = time.time()
         meta_json = json.dumps(metadata or {}, ensure_ascii=False)
         with self._lock:
-            # replace, never duplicate: a recrawl updates the entry
-            if self._use_fts5:
-                self._conn.execute("DELETE FROM docs_fts WHERE doc_id = ?", (doc_id,))
-                self._conn.execute("DELETE FROM docs WHERE doc_id = ?", (doc_id,))
-                self._conn.execute(
-                    "INSERT INTO docs(doc_id, url, title, metadata, indexed_at) VALUES(?,?,?,?,?)",
-                    (doc_id, url, title, meta_json, now),
-                )
-                self._conn.execute(
-                    "INSERT INTO docs_fts(doc_id, title, text) VALUES(?,?,?)",
-                    (doc_id, title, text),
-                )
-            else:
-                self._conn.execute(
-                    "INSERT OR REPLACE INTO docs(doc_id, url, title, text, metadata, indexed_at)"
-                    " VALUES(?,?,?,?,?,?)",
-                    (doc_id, url, title, text, meta_json, now),
-                )
-            self._conn.commit()
+            try:
+                # replace, never duplicate: a recrawl updates the entry
+                if self._use_fts5:
+                    self._conn.execute("DELETE FROM docs_fts WHERE doc_id = ?", (doc_id,))
+                    self._conn.execute("DELETE FROM docs WHERE doc_id = ?", (doc_id,))
+                    self._conn.execute(
+                        "INSERT INTO docs(doc_id, url, title, metadata, indexed_at)"
+                        " VALUES(?,?,?,?,?)",
+                        (doc_id, url, title, meta_json, now),
+                    )
+                    self._conn.execute(
+                        "INSERT INTO docs_fts(doc_id, title, text) VALUES(?,?,?)",
+                        (doc_id, title, text),
+                    )
+                else:
+                    self._conn.execute(
+                        "INSERT OR REPLACE INTO docs(doc_id, url, title, text, metadata, indexed_at)"
+                        " VALUES(?,?,?,?,?,?)",
+                        (doc_id, url, title, text, meta_json, now),
+                    )
+                self._conn.commit()
+            except Exception:
+                # a failed upsert must not commit its deletes without the
+                # matching inserts -- roll back and let the error surface
+                self._conn.rollback()
+                raise
 
     def search(self, query: str, *, limit: int = 10) -> list[dict[str, Any]]:
         terms = _tokens(query)
@@ -161,12 +168,18 @@ class SqliteFtsSink:
                     for r in rows
                 ]
             # FTS5-less build: substring scan. Degraded ranking (recency
-            # order, no bm25) but the same API and the same call sites.
-            pattern = "%" + "%".join(terms) + "%"
+            # order, no bm25) but the same membership as the FTS5 path --
+            # a doc matches when ANY term occurs in its text or title.
+            clauses: list[str] = []
+            params: list[str] = []
+            for t in terms:
+                pattern = f"%{t}%"
+                clauses.append("(text LIKE ? OR title LIKE ?)")
+                params.extend((pattern, pattern))
             rows = self._conn.execute(
                 "SELECT doc_id, url, title, metadata FROM docs"
-                " WHERE text LIKE ? OR title LIKE ? ORDER BY indexed_at DESC LIMIT ?",
-                (pattern, pattern, limit),
+                " WHERE " + " OR ".join(clauses) + " ORDER BY indexed_at DESC LIMIT ?",
+                (*params, limit),
             ).fetchall()
             return [
                 {
@@ -203,8 +216,11 @@ class JsonlSink:
                     if not line:
                         continue
                     rec = json.loads(line)
+                    # append-only log: a re-upserted id appears once in the
+                    # order list, with the newest record winning
+                    if rec["doc_id"] not in self._docs:
+                        self._order.append(rec["doc_id"])
                     self._docs[rec["doc_id"]] = rec
-                    self._order.append(rec["doc_id"])
 
     def upsert(
         self,

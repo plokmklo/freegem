@@ -549,8 +549,10 @@ def clean_text(text: str, strip: bool = True) -> str:
 def _extract_texts_from_line(line: str) -> list[str]:
     """Yield candidate answer strings from one ``wrb.fr`` response line.
 
-    Gemini streams progressively longer snapshots of the same answer, so the
-    longest string in a line is the current best version.
+    Slot 0 of the line is the primary answer snapshot; the remaining strings
+    are siblings (cards, related-question chips) that callers must not treat
+    as answer text -- see ``extract_response_text`` and the streaming loop,
+    both of which read slot 0 only.
     """
     if '"wrb.fr"' not in line or len(line) < 200:
         return []
@@ -766,7 +768,11 @@ def generate(
                 note_gemini_retry()
                 log(
                     cfg,
-                    f"attempt {attempt}/{cfg.retry_attempts} failed: {exc}; "
+                    # Redact like the streaming branch: transport errors embed
+                    # the proxy URL (with credentials) verbatim, and a
+                    # retry-loop log line must not be the leak.
+                    f"attempt {attempt}/{cfg.retry_attempts} failed: "
+                    f"{_safe_error_text(cfg, exc)}; "
                     f"retrying in {delay:.1f}s",
                 )
                 time.sleep(delay)
@@ -846,23 +852,14 @@ def generate_stream(
                             )
                     while "\n" in buffer:
                         line, buffer = buffer.split("\n", 1)
-                        for text in _extract_texts_from_line(line):
-                            if text == emitted or emitted.startswith(text):
-                                continue
-                            if not text.startswith(emitted):
-                                raise _StreamRewriteError(
-                                    "Gemini rewrote an already-streamed block; "
-                                    "aborting to avoid corrupting the answer."
-                                )
-                            delta = clean_text(text[len(emitted) :], strip=False)
-                            emitted = text
-                            if delta:
-                                yield delta
-                # Flush the remainder: a final frame without a trailing newline
-                # would otherwise be dropped (the non-streaming path does not
-                # have this asymmetry).
-                if buffer:
-                    for text in _extract_texts_from_line(buffer):
+                        texts = _extract_texts_from_line(line)
+                        if not texts:
+                            continue
+                        # Slot 0 is the answer snapshot (the same choice
+                        # extract_response_text makes); siblings -- cards,
+                        # related-question chips -- are not deltas of the
+                        # answer and must never trip the rewrite guard.
+                        text = texts[0]
                         if text == emitted or emitted.startswith(text):
                             continue
                         if not text.startswith(emitted):
@@ -874,6 +871,23 @@ def generate_stream(
                         emitted = text
                         if delta:
                             yield delta
+                # Flush the remainder: a final frame without a trailing newline
+                # would otherwise be dropped (the non-streaming path does not
+                # have this asymmetry).
+                if buffer:
+                    texts = _extract_texts_from_line(buffer)
+                    if texts:
+                        text = texts[0]
+                        if not (text == emitted or emitted.startswith(text)):
+                            if not text.startswith(emitted):
+                                raise _StreamRewriteError(
+                                    "Gemini rewrote an already-streamed block; "
+                                    "aborting to avoid corrupting the answer."
+                                )
+                            delta = clean_text(text[len(emitted) :], strip=False)
+                            emitted = text
+                            if delta:
+                                yield delta
             if not emitted:
                 # Same failure shape as the non-streaming path: a 200 whose
                 # body never yields an answer is the rate limit or a login
@@ -1037,7 +1051,7 @@ def fetch_build_tag(cfg: BridgeConfig, session: bool = False) -> str | None:
             response = urllib.request.urlopen(request, context=_ssl_ctx(), timeout=15)
         html = response.read().decode("utf-8", errors="replace")
     except Exception as exc:
-        log(cfg, f"build-tag fetch failed: {exc}")
+        log(cfg, f"build-tag fetch failed: {_safe_error_text(cfg, exc)}")
         return None
 
     for pattern in (

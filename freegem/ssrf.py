@@ -35,7 +35,11 @@ to a non-public address -- :class:`PreflightedProxyHandler` runs that check
 before every proxied request (initial URL included). A name that does not
 resolve locally is allowed through, because in a proxy-only deployment the
 proxy is the only resolver; refusing unresolvable names would break split-
-horizon setups. That residual -- the proxy resolving to an address we could
+horizon setups. The one exception: non-canonical IPv4 spellings the
+inet_aton grammar accepts (decimal ``2130706433``, octal ``0177.0.0.1``,
+hex ``0x7f000001``, shorthand ``127.1``) are refused outright, because a
+proxy parses them as loopback/metadata while local DNS cannot vouch for
+them. That residual -- the proxy resolving to an address we could
 not pre-check -- is documented in the README security section. Redirect
 hops stay strict: :class:`SafeRedirect` refuses unresolvable names outright,
 because a redirect is attacker-influenced, not user intent.
@@ -89,11 +93,18 @@ class SSRFRefused(Exception):
 # stdlib ``is_private`` misses two legacy ranges that are not routable on the
 # public internet and must never be dialable: CGNAT (RFC 6598, the address
 # space every carrier-grade NAT hands out) and IPv6 site-local (RFC 3879,
-# deprecated but still configured on old gear). Verified on CPython 3.12:
-# ipaddress classes neither as private nor reserved, so they are explicit.
+# deprecated but still configured on old gear). The IPv6 spaces below EMBED
+# an arbitrary IPv4 address (so an embedded 169.254.169.254 must die too);
+# newer CPython ``ipaddress`` (3.13+) classifies them via is_private or
+# is_reserved, but older supported Pythons do not, so they are explicit here
+# to keep the policy version-independent.
 _EXTRA_NONPUBLIC_NETS = (
     ipaddress.ip_network("100.64.0.0/10"),  # CGNAT / RFC 6598
     ipaddress.ip_network("fec0::/10"),  # deprecated IPv6 site-local
+    ipaddress.ip_network("::/96"),  # deprecated IPv4-compatible (::a.b.c.d)
+    ipaddress.ip_network("64:ff9b::/96"),  # NAT64 well-known prefix
+    ipaddress.ip_network("64:ff9b:1::/48"),  # NAT64 local-use prefix
+    ipaddress.ip_network("2002::/16"),  # 6to4 (embeds v4 in bytes 2-5)
 )
 
 #: Hostnames that must never be contacted even when DNS calls them public:
@@ -133,6 +144,41 @@ def _ip_literal_nonpublic(bare: str) -> bool:
     if ip.version == 6 and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
     return ip_is_nonpublic(ip)
+
+
+def _integer_like_label(label: str) -> bool:
+    """True for a decimal, octal, or hex integer label (inet_aton grammar)."""
+
+    if not label.isascii():
+        return False
+    if label[:2].lower() == "0x":
+        digits = label[2:]
+        return bool(digits) and all(c in "0123456789abcdefABCDEF" for c in digits)
+    return label.isdigit()
+
+
+def _alternate_v4_form(bare: str) -> bool:
+    """True for non-canonical IPv4 spellings that C's ``inet_aton`` accepts.
+
+    Decimal-integer (``2130706433``), two-octet shorthand (``127.1``),
+    octal (``0177.0.0.1``), leading-zero (``127.0.0.01``), and hex
+    (``0x7f000001``) all denote real IPv4 addresses to any parser speaking
+    the inet_aton grammar -- proxies, browsers, many resolvers -- while
+    ``ipaddress`` refuses them and (on Windows) ``getaddrinfo`` fails on
+    them. In proxy mode that gap was exploitable: a host like
+    ``2852039166`` (decimal for 169.254.169.254) fell into the
+    "locally unresolvable -> the proxy resolves it" allowance and could
+    reach the cloud metadata service. A hostname made ONLY of integer
+    labels cannot be a real public-web name (ICANN bans all-numeric
+    TLDs), so the whole class is refused outright. Canonical dotted
+    quads never reach this check: they parse as literals and take the
+    early public/non-public literal path instead.
+    """
+
+    labels = bare.lower().rstrip(".").split(".")
+    if not labels or any(not label for label in labels):
+        return False
+    return all(_integer_like_label(label) for label in labels)
 
 
 def ip_is_nonpublic(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -265,7 +311,11 @@ def pick_public_ips(host: str) -> list[str]:
         raise SSRFRefused("refusing empty host")
     try:
         infos = _resolve_with_timeout(bare)
-    except OSError as exc:
+    except (OSError, UnicodeError, ValueError) as exc:
+        # UnicodeError/ValueError: some resolvers reject embedded NULs and
+        # undecodable labels with those instead of OSError; all of them mean
+        # "could not vouch for this host" and must keep the SSRFRefused
+        # taxonomy that callers (SafeRedirect, the fetchers) rely on.
         raise SSRFRefused(f"cannot resolve {bare!r}: {exc}") from exc
     if not infos:
         raise SSRFRefused(f"no addresses resolved for {bare!r}")
@@ -325,9 +375,14 @@ def host_public_or_unresolvable(host: str) -> str:
         return bare  # a public IP literal: nothing to resolve
     except ValueError:
         pass
+    if _alternate_v4_form(bare):
+        # inet_aton-style spellings the proxy WOULD parse (decimal, octal,
+        # hex, shorthand) but local DNS cannot vouch for -- refuse instead
+        # of sliding them into the unresolvable-allowed leniency below.
+        raise SSRFRefused(f"{bare!r} is a non-canonical IPv4 address form")
     try:
         infos = _resolve_with_timeout(bare)
-    except OSError:
+    except (OSError, UnicodeError, ValueError):
         return bare  # local DNS silent or timed out -> proxy resolves; allowed
     _checked_addresses(bare, infos)  # raises on ANY non-public address
     return bare
@@ -355,6 +410,12 @@ def host_public_strict(host: str) -> str:
         return bare  # a public IP literal: nothing to resolve
     except ValueError:
         pass
+    if _alternate_v4_form(bare):
+        # Deterministic refusal on every platform: even where the local
+        # resolver would decode the inet_aton form (and then refuse the
+        # non-public answer), failing closed before DNS keeps the taxonomy
+        # stable and gives attackers no free oracle.
+        raise SSRFRefused(f"{bare!r} is a non-canonical IPv4 address form")
     pick_public_ips(bare)  # raises on unresolvable OR any non-public address
     return bare
 

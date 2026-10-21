@@ -4,6 +4,7 @@ Every Google call is mocked. No test in this file touches the network, so the
 suite runs in CI on a public fork with no credentials.
 """
 
+import contextlib
 import io
 import json
 import unittest
@@ -720,6 +721,41 @@ class StreamTests(unittest.TestCase):
             chunks = list(gem.generate_stream(cfg, "hi", 1, 4))
         self.assertEqual(chunks, ["recovered"])
 
+    def test_sibling_cards_do_not_trip_the_rewrite_guard(self) -> None:
+        """Lines carry cards/chips next to the answer snapshot; only slot 0
+        is answer text (the same choice extract_response_text makes).
+        Processing siblings raised a spurious 'Gemini rewrote an
+        already-streamed block' abort on any card-bearing line."""
+        import freegem.gemini as gem
+
+        def snapshot(answer: str) -> str:
+            payload: list[Any] = [
+                None,
+                None,
+                None,
+                None,
+                [[None, [answer, "Related question chip?"]]],
+            ]
+            while len(json.dumps(payload)) < 80:
+                payload.append("z" * 60)
+            outer: list[Any] = [["wrb.fr", None, json.dumps(payload)]]
+            line = json.dumps(outer)
+            while len(line) < 260:
+                outer[0].append("z" * 40)
+                line = json.dumps(outer)
+            return line + "\n"
+
+        with (
+            mock.patch.object(gem, "HAS_HTTPX", True),
+            mock.patch.object(
+                gem,
+                "_httpx_client",
+                return_value=self._fake_client([snapshot("par"), snapshot("partial ")]),
+            ),
+        ):
+            chunks = list(gem.generate_stream(self.cfg, "hi", 1, 4))
+        self.assertEqual(chunks, ["par", "tial "])
+
 
 class BuildTagTests(unittest.TestCase):
     """The auto-refresh silently did nothing in the original; prove it works."""
@@ -1122,6 +1158,25 @@ class ProxyRedactionTests(unittest.TestCase):
         self.assertNotIn("user:", message)
         self.assertIn("proxy.example:8080", message)
 
+    def test_retry_log_redacts_proxy_credentials(self) -> None:
+        """The per-attempt retry log must redact like the final message:
+        transport errors embed the proxy URL (with credentials) verbatim."""
+        import urllib.error
+
+        cfg = self.cfg.replace(log_requests=True)
+        leak = f"Cannot connect to proxy {self.PROXY}: connection refused"
+        err = io.StringIO()
+        with (
+            mock.patch("freegem.gemini._post", side_effect=urllib.error.URLError(leak)),
+            contextlib.redirect_stderr(err),
+        ):
+            with self.assertRaises(BridgeError):
+                generate(cfg, "hi", 1, 0)
+        log_line = err.getvalue()
+        self.assertIn("retrying in", log_line)  # the retry log actually fired
+        self.assertNotIn("secret", log_line)
+        self.assertNotIn("user:", log_line)
+
 
 class BuildTagRecoveryTests(unittest.TestCase):
     """One session-authenticated build-tag re-fetch on BardErrorInfo (#38)."""
@@ -1232,6 +1287,27 @@ class BuildTagRecoveryTests(unittest.TestCase):
             with self.assertRaises(BridgeError):
                 list(generate_stream(cfg, "hi", 1, 0))
         fetch.assert_called_once()
+
+    def test_build_tag_fetch_failure_log_redacts_proxy(self) -> None:
+        """A proxied page fetch whose error embeds the proxy URL must not
+        leak the credentials into the (stderr) log line."""
+        cfg = BridgeConfig(
+            guard=True,
+            log_requests=True,
+            proxy="http://user:secret@proxy.example:8080",
+        )
+        leak = "Cannot connect to proxy http://user:secret@proxy.example:8080: refused"
+        opener = mock.MagicMock()
+        opener.open.side_effect = OSError(leak)
+        err = io.StringIO()
+        with (
+            mock.patch.object(self.gem.urllib.request, "build_opener", return_value=opener),
+            contextlib.redirect_stderr(err),
+        ):
+            self.assertIsNone(fetch_build_tag(cfg))
+        self.assertIn("build-tag fetch failed", err.getvalue())
+        self.assertNotIn("secret", err.getvalue())
+        self.assertNotIn("user:", err.getvalue())
 
 
 class RateLimitKindTests(unittest.TestCase):

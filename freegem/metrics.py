@@ -250,5 +250,8 @@ def record_audit_event(
 
 
 def get_audit_logs(limit: int = 100) -> list[dict[str, Any]]:
-    """Retrieve recent audit logs."""
+    """Retrieve recent audit logs. ``limit <= 0`` returns none (a ``-0``
+    slice would otherwise mean the whole list)."""
+    if limit <= 0:
+        return []
     return list(_AUDIT_LOGS[-limit:])

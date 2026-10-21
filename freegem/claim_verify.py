@@ -662,6 +662,36 @@ def _fit_material(
 _CLAIMS_FENCE_RE = re.compile(r"```claims\s*\n(.*?)\n```", re.DOTALL)
 
 
+def _fallback_json_list(answer: str) -> tuple[list[Any], str] | None:
+    """The first JSON list hiding outside a ```claims fence, if any.
+
+    Models relabel the fence (```json, bare ```), drop the newline before
+    the closing fence, or hand back a bare array wrapped in prose. Each of
+    those used to collapse the entire verdict into "no ```claims block" and
+    every claim into not_found. Parsing is now tolerant of those shapes --
+    the deviation is still REPAIRED (recorded), never hidden.
+    """
+    for fence in re.finditer(r"```[a-zA-Z0-9]*\s*\n?(.*?)```", answer, re.DOTALL):
+        try:
+            data = json.loads(fence.group(1).strip())
+        except ValueError:
+            continue
+        if isinstance(data, list):
+            return data, "a fenced code block"
+    decoder = json.JSONDecoder()
+    index = answer.find("[")
+    while index != -1:
+        try:
+            data, _consumed = decoder.raw_decode(answer, index)
+        except ValueError:
+            index = answer.find("[", index + 1)
+            continue
+        if isinstance(data, list):
+            return data, "a bare JSON array"
+        index = answer.find("[", index + 1)
+    return None
+
+
 def _source_block(index: int, source: ResearchSource, text: str) -> str:
     from .web_research import _source_header, _wrap_untrusted
 
@@ -721,23 +751,40 @@ def _parse_claims_block(answer: str, claims: list[str]) -> tuple[list[dict[str, 
     per input claim (missing claims are NOT added here -- the caller turns
     absences into not_found). Repairs record every schema violation found,
     so the output can show what the model got wrong instead of hiding it.
+
+    Malformed model output is repaired before it is rejected: stringified
+    claim numbers and source indices are coerced, status casing/punctuation
+    is normalized against the closed vocabulary, and a missing ```claims
+    fence falls back to the first parseable JSON list in the answer (with a
+    repair noting the deviation).
     """
     match = _CLAIMS_FENCE_RE.search(answer)
     repairs: list[str] = []
-    if match is None:
-        return [], ["model returned no ```claims block"]
-    try:
-        data = json.loads(match.group(1).strip())
-    except ValueError:
-        return [], ["```claims block was not valid JSON"]
-    if not isinstance(data, list):
-        return [], ["```claims block was not a JSON list"]
+    if match is not None:
+        try:
+            data = json.loads(match.group(1).strip())
+        except ValueError:
+            return [], ["```claims block was not valid JSON"]
+        if not isinstance(data, list):
+            return [], ["```claims block was not a JSON list"]
+    else:
+        fallback = _fallback_json_list(answer)
+        if fallback is None:
+            return [], ["model returned no ```claims block"]
+        data, shape = fallback
+        repairs.append(f"```claims fence not matched; parsed a JSON list from {shape} instead")
     entries: dict[int, dict[str, Any]] = {}
     for item in data:
         if not isinstance(item, dict):
             repairs.append("ignored a non-object entry")
             continue
         number = item.get("claim_number")
+        if isinstance(number, str) and number.strip().isdigit():
+            # Models stringify numbers constantly (llm_extract repairs the
+            # same shape); dropping the entry here turned an honest verdict
+            # into "no verdict was returned".
+            number = int(number.strip())
+            repairs.append(f"claim {number}: claim_number coerced from a string")
         if not isinstance(number, int) or isinstance(number, bool):
             repairs.append("ignored an entry without a numeric claim_number")
             continue
@@ -748,8 +795,17 @@ def _parse_claims_block(answer: str, claims: list[str]) -> tuple[list[dict[str, 
             repairs.append(f"ignored a duplicate entry for claim {number}")
             continue
         status = item.get("status")
+        raw_status = status
+        if isinstance(status, str):
+            normalized = re.sub(r"[\s-]+", "_", status.strip().lower())
+            if normalized in STATUSES:
+                if normalized != status:
+                    repairs.append(
+                        f"claim {number}: status {raw_status!r} normalized to {normalized!r}"
+                    )
+                status = normalized
         if status not in STATUSES:
-            repairs.append(f"claim {number}: unknown status {status!r} -> not_found")
+            repairs.append(f"claim {number}: unknown status {raw_status!r} -> not_found")
             status = STATUS_NOT_FOUND
         evidence = item.get("evidence")
         evidence = evidence if isinstance(evidence, list) else []
@@ -758,6 +814,9 @@ def _parse_claims_block(answer: str, claims: list[str]) -> tuple[list[dict[str, 
             if not isinstance(entry, dict):
                 continue
             source = entry.get("source")
+            if isinstance(source, str) and source.strip().isdigit():
+                source = int(source.strip())
+                repairs.append(f"claim {number}: evidence source coerced from a string")
             quotes = entry.get("quotes")
             if not isinstance(source, int) or isinstance(source, bool) or source < 1:
                 continue
@@ -1011,7 +1070,18 @@ def verify(
         if gemini_used:
             with started_metrics.stage("parse"):
                 entries, repairs = _parse_claims_block(answer, claims)
-                claim_results = _build_claim_results(entries, repairs, claims, material)
+                # Evidence must be checked against the pages -- and the [S#]
+                # numbering -- the model actually saw: _fit_material may drop
+                # pages, which shifts every later number relative to the full
+                # list (an honest quote citing S2 was verified against the
+                # WRONG page). Full per-page text is restored by source
+                # identity so a prompt slice still cannot hide a verifiable
+                # quote.
+                full_text = {id(source): text for source, text in material}
+                verify_material = [
+                    (source, full_text.get(id(source), text)) for source, text in prompt_material
+                ]
+                claim_results = _build_claim_results(entries, repairs, claims, verify_material)
             started_metrics.bump("schema_repairs", len(repairs))
         elif not claim_results:
             # defensive: the generate stage always fills claim_results

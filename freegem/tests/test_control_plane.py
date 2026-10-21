@@ -120,6 +120,16 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual({w.kind for w in workers}, {"crawler", "supervisor"})
         self.assertEqual(workers[0].metadata, {"host": "a"})
 
+    def test_store_parent_directory_created(self) -> None:
+        """A store path whose directory does not exist yet is a fresh
+        deployment, not a crash (same convention as SqliteJobStore)."""
+        nested = f"{self.tmp.name}/fresh/deploy/cp.sqlite"
+        cp = ControlPlane(MemoryQueue(), nested)
+        self.addCleanup(cp.close)  # Windows: release the sqlite handle
+        worker = cp.join("crawler")
+        self.assertEqual([w.worker_id for w in cp.list_workers()], [worker])
+        del worker
+
 
 if __name__ == "__main__":
     unittest.main()

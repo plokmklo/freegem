@@ -142,9 +142,8 @@ class GridPool:
 
     def checkout(self, timeout_sec: float | None = None) -> GridLease:
         """Claim a session on the least-loaded active node."""
-        deadline = time.monotonic() + (
-            self._checkout_timeout_sec if timeout_sec is None else timeout_sec
-        )
+        window = self._checkout_timeout_sec if timeout_sec is None else timeout_sec
+        deadline = time.monotonic() + window
         with self._cond:
             while True:
                 node = self._pick_node()
@@ -157,14 +156,18 @@ class GridPool:
                     self.timeouts_total += 1
                     raise GridPoolTimeout(
                         f"all {len(self._nodes)} grid node(s) saturated for the checkout window "
-                        f"({self._checkout_timeout_sec:.1f}s); raise capacity or the timeout"
+                        f"({window:.1f}s); raise capacity or the timeout"
                     )
                 self._cond.wait(timeout=remaining)
 
     def release(self, lease: GridLease) -> None:
-        if lease.released:
-            return
         with self._cond:
+            # Test the flag INSIDE the lock: an unlocked check lets two threads
+            # racing to release the SAME lease both pass it and decrement
+            # twice, silently overbooking the node past max_sessions (the
+            # max(0, ...) clamp hides the underflow but steals real capacity).
+            if lease.released:
+                return
             lease.released = True
             if lease.node_name in self._in_flight:
                 self._in_flight[lease.node_name] = max(0, self._in_flight[lease.node_name] - 1)

@@ -10,10 +10,14 @@ Normalization is deliberately conservative:
   positions);
 * scheme and host are lowercased; an IDN host is stored as punycode so
   ``ñandu.example`` and ``xn--andu-hra.example`` dedupe to one entry;
-* an explicit default port (``:80`` on http, ``:443`` on https) is dropped;
+* an explicit default port (``:80`` on http, ``:443`` on https) is dropped,
+  and a trailing FQDN dot on the host (``example.com.``) is dropped so both
+  spellings dedupe to one entry;
 * percent-encoding is normalized: unreserved characters are decoded and the
   hex of everything else is uppercased, so ``%2f`` and ``%2F`` compare equal
-  while a genuinely encoded ``/`` stays encoded;
+  while a genuinely encoded ``/`` stays encoded; characters that are not
+  legal path/query octets (spaces, non-ASCII, ...) are percent-encoded so
+  ``/café`` and ``/caf%C3%A9`` are one entry;
 * a small, fixed list of tracking parameters (``utm_*``, ``fbclid``,
   ``gclid``, ...) is removed. Query ORDER is preserved and no other
   parameter is touched: some URLs are signed and reordering or dropping a
@@ -88,19 +92,43 @@ def _pct_normalize(text: str) -> str:
     return _PCT.sub(sub, text)
 
 
+#: Characters RFC 3986 leaves alone inside a path/query. ``quote`` with
+#: this safe-set only encodes what RFC 3986 forbids there (spaces,
+#: non-ASCII, controls, ``"<>``{}\|^``), so already-valid spellings --
+#: percent triplets (``%`` is safe) and sub-delims kept for signed URLs --
+#: stay byte-identical.
+_RFC_SAFE = "%/?:@!$&'()*+,;="
+
+
+def _quote_unsafe(text: str) -> str:
+    """Percent-encode characters that are not legal path/query octets."""
+    return urllib.parse.quote(text, safe=_RFC_SAFE)
+
+
 def strip_tracking_params(query: str) -> str:
-    """Drop tracking parameters from a raw query string, preserving order."""
+    """Drop tracking parameters from a raw query string, preserving order
+    and the exact spelling of every parameter that is kept.
+
+    Kept pairs are returned verbatim (not parse/re-encoded): a re-encode
+    only when something is stripped would make ``?a=b%20c&utm_source=x``
+    normalize differently from ``?a=b%20c`` (``+`` vs ``%20``, ``flag`` vs
+    ``flag=``), splitting one resource into two dedup keys. The NAME used
+    for the tracking decision IS percent-decoded, so ``utm%5Fsource`` is
+    recognized as ``utm_source`` and dropped like its plain spelling.
+    """
     if not query:
         return query
-    pairs = urllib.parse.parse_qsl(query, keep_blank_values=True)
-    kept = [
-        (name, value)
-        for name, value in pairs
-        if name.lower() not in _TRACKING_PARAMS and not name.lower().startswith(_TRACKING_PREFIXES)
-    ]
-    if len(kept) == len(pairs):
+    kept: list[str] = []
+    changed = False
+    for part in query.split("&"):
+        name = urllib.parse.unquote_plus(part.split("=", 1)[0]).lower()
+        if name in _TRACKING_PARAMS or name.startswith(_TRACKING_PREFIXES):
+            changed = True
+            continue
+        kept.append(part)
+    if not changed:
         return query
-    return urllib.parse.urlencode(kept)
+    return "&".join(kept)
 
 
 def normalize_url(url: str, *, base: str | None = None) -> str:
@@ -123,6 +151,10 @@ def normalize_url(url: str, *, base: str | None = None) -> str:
     if scheme not in ("http", "https"):
         raise ValueError(URL_NORMALIZING_ERROR)
     host = (parts.hostname or "").lower()
+    if host.endswith("."):
+        # FQDN root label: example.com. is the same host as example.com --
+        # without this the two spellings never dedupe.
+        host = host.rstrip(".")
     if not host:
         raise ValueError(URL_NORMALIZING_ERROR)
     if host.startswith("[") and host.endswith("]"):
@@ -134,7 +166,10 @@ def normalize_url(url: str, *, base: str | None = None) -> str:
             host = host.encode("idna").decode("ascii").lower()
         except UnicodeError as exc:
             raise ValueError(URL_NORMALIZING_ERROR) from exc
-    port = parts.port
+    try:
+        port = parts.port
+    except ValueError as exc:  # "Port out of range", "could not be cast"...
+        raise ValueError(URL_NORMALIZING_ERROR) from exc
     if port is not None and not (0 < port < 65536):
         raise ValueError(URL_NORMALIZING_ERROR)
     default_port = port is not None and (
@@ -146,8 +181,8 @@ def normalize_url(url: str, *, base: str | None = None) -> str:
     # normalization must not SILENTLY carry them either.
     if parts.username or parts.password:
         raise ValueError(URL_NORMALIZING_ERROR)
-    path = _pct_normalize(parts.path or "/")
-    query = _pct_normalize(strip_tracking_params(parts.query))
+    path = _quote_unsafe(_pct_normalize(parts.path or "/"))
+    query = _quote_unsafe(_pct_normalize(strip_tracking_params(parts.query)))
     return urllib.parse.urlunsplit((scheme, netloc, path, query, ""))
 
 

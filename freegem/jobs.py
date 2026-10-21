@@ -35,7 +35,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -932,7 +932,12 @@ def execute_job(job: Job, cfg: Any) -> None:
     elif job.type == "playwright":
         from .playwright_fetcher import PlaywrightOptions, fetch_with_playwright
 
-        opts = PlaywrightOptions(**job.params)
+        # Filter like the selenium branch below: params also carry the
+        # runner-managed keys (timeout_sec, max_retries -- documented per-job
+        # overrides), and PlaywrightOptions(**job.params) used to TypeError
+        # on them, failing the job after pointless retries.
+        allowed = {f.name for f in fields(PlaywrightOptions)}
+        opts = PlaywrightOptions(**{k: v for k, v in job.params.items() if k in allowed})
         pw_res = fetch_with_playwright(opts)
         if pw_res.screenshot_path and os.path.exists(pw_res.screenshot_path):
             GLOBAL_JOB_MANAGER.save_artifact(

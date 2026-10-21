@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import queue
 import sqlite3
 import threading
@@ -96,7 +97,12 @@ class MemoryQueue:
             self._q.put((handle, payload))
 
     def depth(self) -> int:
-        return self._q.qsize() + len(self._unacked)
+        with self._lock:
+            unacked = len(self._unacked)
+        # qsize() is read outside the lock (queue.Queue is internally safe);
+        # only the unacked snapshot needs ours, so the sum stays consistent
+        # with a concurrent reserve/ack instead of a torn read.
+        return self._q.qsize() + unacked
 
     def close(self) -> None:
         return None
@@ -141,18 +147,30 @@ class SqliteQueue:
     def reserve(self, timeout_sec: float = 5.0) -> tuple[str | None, dict[str, Any] | None]:
         deadline = time.monotonic() + max(0.0, timeout_sec)
         while True:
+            handle: str | None = None
+            payload: dict[str, Any] | None = None
             with self._lock:
                 row = self._conn.execute(
                     "SELECT task_id, payload FROM tasks WHERE state = 'ready'"
                     " ORDER BY enqueued_at ASC LIMIT 1"
                 ).fetchone()
                 if row:
-                    self._conn.execute(
-                        "UPDATE tasks SET state = 'unacked', reserved_at = ? WHERE task_id = ?",
+                    # Claim atomically: a plain SELECT-then-UPDATE lets two
+                    # workers (each with their own connection -- the broker is
+                    # shared) read the same ready row and BOTH hand it out.
+                    # Only the UPDATE that actually flips state may deliver.
+                    cur = self._conn.execute(
+                        "UPDATE tasks SET state = 'unacked', reserved_at = ?"
+                        " WHERE task_id = ? AND state = 'ready'",
                         (time.time(), row[0]),
                     )
-            if row:
-                return row[0], json.loads(row[1])
+                    if cur.rowcount == 1:
+                        handle, payload = row[0], json.loads(row[1])
+                    else:
+                        # Lost the race: retry the selection immediately.
+                        continue
+            if handle is not None:
+                return handle, payload
             if time.monotonic() >= deadline:
                 return None, None
             time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
@@ -163,9 +181,13 @@ class SqliteQueue:
 
     def nack(self, handle: str) -> None:
         with self._lock:
+            # Requeue at the TAIL (fresh enqueued_at): a poison task that is
+            # nacked instantly must not sit at the head and monopolize every
+            # worker's next reserve -- that is a retry storm with no backoff.
             self._conn.execute(
-                "UPDATE tasks SET state = 'ready', reserved_at = NULL WHERE task_id = ? AND state = 'unacked'",
-                (handle,),
+                "UPDATE tasks SET state = 'ready', reserved_at = NULL, enqueued_at = ?"
+                " WHERE task_id = ? AND state = 'unacked'",
+                (time.time(), handle),
             )
 
     def recover(self) -> int:
@@ -214,9 +236,17 @@ class RedisQueue:
         return task_id
 
     def reserve(self, timeout_sec: float = 5.0) -> tuple[str | None, dict[str, Any] | None]:
-        item = self._r.brpoplpush(
-            f"{self._key}:ready", f"{self._key}:unacked", timeout=int(max(0, timeout_sec))
-        )
+        budget = max(0.0, timeout_sec)
+        if budget <= 0:
+            # Redis reads brpoplpush timeout=0 as "block FOREVER": a caller
+            # asking for a non-blocking try must not get an infinite block.
+            item = self._r.rpoplpush(f"{self._key}:ready", f"{self._key}:unacked")
+        else:
+            # brpoplpush takes whole seconds only; a 0.5s ask truncated to 0
+            # would degenerate into the same infinite block, so ceil to 1s.
+            item = self._r.brpoplpush(
+                f"{self._key}:ready", f"{self._key}:unacked", timeout=math.ceil(budget)
+            )
         if item is None:
             return None, None
         rec = json.loads(item)
@@ -276,12 +306,19 @@ class RabbitMQQueue:
         return task_id
 
     def reserve(self, timeout_sec: float = 5.0) -> tuple[str | None, dict[str, Any] | None]:
-        method, _props, body = self._ch.basic_get(self._queue, auto_ack=False)
-        if method is None or body is None:
-            return None, None
-        rec = json.loads(body.decode("utf-8"))
-        self._pending[rec["id"]] = (method.delivery_tag, rec)
-        return rec["id"], rec["payload"]
+        # basic_get is non-blocking; the WorkQueue contract says reserve BLOCKS
+        # up to timeout_sec, so poll like SqliteQueue does -- the old single
+        # get returned (None, None) instantly even with a 5s ask.
+        deadline = time.monotonic() + max(0.0, timeout_sec)
+        while True:
+            method, _props, body = self._ch.basic_get(self._queue, auto_ack=False)
+            if method is not None and body is not None:
+                rec = json.loads(body.decode("utf-8"))
+                self._pending[rec["id"]] = (method.delivery_tag, rec)
+                return rec["id"], rec["payload"]
+            if time.monotonic() >= deadline:
+                return None, None
+            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
 
     def ack(self, handle: str) -> None:
         entry = self._pending.pop(handle, None)

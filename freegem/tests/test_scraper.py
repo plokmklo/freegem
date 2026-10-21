@@ -1712,3 +1712,131 @@ class LocalFileScrapeTests(unittest.TestCase):
             code = cmd_scrape(self.cfg, args)
         self.assertEqual(code, 0)
         self.assertIn("FREEGEM PROBE MARKER-7f3a", buf.getvalue())
+
+
+# ─── parallel scraper: ordering, wave bound, AI summaries ────────────────────
+
+
+class ParallelScraperTests(unittest.TestCase):
+    """Concurrency subsystem: scrape_parallel + summarize_results.
+
+    The batch mechanics are exercised with a mocked ``scrape_page`` (staggered
+    delays prove caller order is kept regardless of completion order), and the
+    AI pass with a mocked ``run_tool`` -- the point is the POOL discipline:
+    every summary must be present before the digest reads it, and a wedged URL
+    must not stretch the batch.
+    """
+
+    def setUp(self) -> None:
+        self.cfg = BridgeConfig(guard=True, log_requests=False)
+
+    @staticmethod
+    def _fake_scrape(
+        delays: dict[str, float] | None = None, fail: set[str] | None = None
+    ) -> Any:
+        def fake(cfg: Any, url: str, **_kwargs: Any) -> ScrapeResult:
+            delay = (delays or {}).get(url, 0.0)
+            if delay:
+                time.sleep(delay)
+            if url in (fail or set()):
+                raise ScrapeError("HTTP 403 fetching page")
+            return ScrapeResult(url=url, title="T", text=f"text for {url}")
+
+        return fake
+
+    def test_empty_input_is_empty_output(self) -> None:
+        from freegem.parallel_scraper import scrape_parallel
+
+        results, digest = scrape_parallel(self.cfg, [])
+        self.assertEqual(results, [])
+        self.assertEqual(digest.total, 0)
+
+    def test_results_keep_caller_order_and_failures_are_isolated(self) -> None:
+        from freegem.parallel_scraper import scrape_parallel
+
+        urls = [f"https://x.test/{i}" for i in range(6)]
+        # First and last finish LAST: completion order != caller order.
+        delays = {urls[0]: 0.3, urls[5]: 0.15}
+        with mock.patch(
+            "freegem.parallel_scraper.scrape_page",
+            side_effect=self._fake_scrape(delays, {urls[2]}),
+        ):
+            results, digest = scrape_parallel(self.cfg, urls, concurrency=4, smart=False)
+        self.assertEqual([r.url for r in results], urls)
+        self.assertTrue(all(r.ok for r in results if r.url != urls[2]))
+        self.assertFalse(results[2].ok)
+        self.assertIn("HTTP 403", results[2].error)
+        self.assertEqual(digest.total, 6)
+        self.assertEqual(digest.ok, 5)
+        self.assertEqual(digest.failed, 1)
+
+    def test_wedged_url_is_bounded_and_sibling_is_harvested(self) -> None:
+        """(#25 shape) One stuck URL must not hang the batch forever: the wave
+        bound records an honest failure and still returns finished work."""
+        from freegem import parallel_scraper
+        from freegem.parallel_scraper import scrape_parallel
+
+        urls = ["https://slow.test/a", "https://fast.test/b"]
+        with (
+            mock.patch.object(parallel_scraper, "_WAVE_TIMEOUT_SEC", 0.2),
+            mock.patch(
+                "freegem.parallel_scraper.scrape_page",
+                side_effect=self._fake_scrape({urls[0]: 1.0}),
+            ),
+        ):
+            started = time.monotonic()
+            results, digest = scrape_parallel(self.cfg, urls, concurrency=2, smart=False)
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 0.9, "the wave bound held")
+        self.assertEqual([r.url for r in results], urls)
+        self.assertFalse(results[0].ok)
+        self.assertIn("abandoned", results[0].error)
+        self.assertTrue(results[1].ok, "finished work is still harvested")
+        self.assertEqual(digest.ok, 1)
+        self.assertEqual(digest.failed, 1)
+
+    def test_summarize_waits_for_every_summary(self) -> None:
+        """Regression: the old fire-and-forget pool with cancel_futures
+        silently dropped most per-page summaries (only max_workers of them
+        ran, racing the digest)."""
+        from freegem.parallel_scraper import ParallelResult, summarize_results
+
+        results = [
+            ParallelResult(url=f"https://x.test/{i}", ok=True, text="body " * 50)
+            for i in range(8)
+        ]
+        with mock.patch("freegem.mcp_tools.run_tool", return_value="A summary.") as run:
+            digest_text = summarize_results(self.cfg, results, digest=True)
+        self.assertEqual(run.call_count, 9)  # 8 summaries + 1 batch digest
+        self.assertTrue(all(r.summary == "A summary." for r in results))
+        self.assertIn("A summary.", digest_text)
+
+    def test_summarize_all_failed_batch_does_not_crash(self) -> None:
+        """Regression: max_workers=min(4, 0) == 0 raised ValueError in
+        ThreadPoolExecutor when every result had failed."""
+        from freegem.parallel_scraper import ParallelResult, summarize_results
+
+        results = [
+            ParallelResult(url="https://x.test/a", ok=False, error="boom"),
+            ParallelResult(url="https://x.test/b", ok=False, error="boom"),
+        ]
+        with mock.patch("freegem.mcp_tools.run_tool", return_value="s") as run:
+            out = summarize_results(self.cfg, results)
+        self.assertEqual(out, "")
+        run.assert_not_called()
+        self.assertEqual(results[0].summary, "")
+
+    def test_digest_flag_gates_the_top_level_digest(self) -> None:
+        """Regression: `digest and ok>3 or (question ...)` precedence built a
+        digest even with digest=False whenever a question was set."""
+        from freegem.parallel_scraper import ParallelResult, summarize_results
+
+        results = [
+            ParallelResult(url=f"https://x.test/{i}", ok=True, text="body " * 20)
+            for i in range(5)
+        ]
+        with mock.patch("freegem.mcp_tools.run_tool", return_value="s") as run:
+            out = summarize_results(self.cfg, results, question="what?", digest=False)
+        self.assertEqual(out, "")
+        self.assertEqual(run.call_count, 5)  # per-page summaries still ran
+        self.assertTrue(all(r.summary == "s" for r in results))
