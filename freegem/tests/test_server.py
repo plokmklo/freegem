@@ -725,10 +725,10 @@ class MalformedRequestTests(EndpointTestCase):
     def test_timeout_is_reported_as_408_not_500(self) -> None:
         """A client that promises a body then stops sends gets a 408.
 
-        BaseHTTPRequestHandler converts a socket TimeoutError into a bare 500
-        before do_POST runs, which misattributes a client fault to the server.
-        The 408 mapping lives in _do_post (do_POST only wraps it with the
-        latency metric).
+        A socket TimeoutError raised mid-body-read is caught inside _do_post
+        (handle_one_request's own TimeoutError catch would otherwise swallow
+        it into a log line with no response). The mapping lives in _do_post:
+        do_POST only wraps it with the latency metric.
         """
         handler_source = inspect.getsource(GeminiHandler._do_post)
         self.assertIn("408", handler_source)
@@ -1145,3 +1145,96 @@ class PreBodyRejectionKeepAliveTests(HermeticServerTestCase):
         self._assert_closed_after_rejection(
             [("Content-Type", "application/json")], b"404", path="/nope"
         )
+
+
+class HandlerFaultMappingTests(unittest.TestCase):
+    """do_GET / do_DELETE error mapping: 408 for stalled clients, honest 500s.
+
+    Unit-stubbed rather than socket-level: a stalled GET write would need a
+    full socket buffer to trigger naturally, and these branches are about the
+    status mapping, not framing (framing is covered by the socket tests).
+
+    Regression targets: GET used to map TimeoutError to a 500 via its generic
+    except; DELETE had no guard at all (a disconnect mid-response killed the
+    worker thread and answered nothing); both echoed str(exc), which can carry
+    file paths and internal structure into responses on the auth-free face.
+    """
+
+    def _stub_handler(self, path: str = "/health", command: str = "GET") -> GeminiHandler:
+        handler = GeminiHandler.__new__(GeminiHandler)
+        server = mock.MagicMock()
+        server.config = BridgeConfig(guard=True, log_requests=False)
+        server.server_metrics = mock.MagicMock()
+        handler.server = server  # type: ignore[assignment]
+        handler.path = path
+        handler.command = command
+        handler.headers = {"Host": "localhost"}
+        handler.client_address = ("127.0.0.1", 0)
+        return handler
+
+    def test_get_timeout_is_408_not_500(self) -> None:
+        handler = self._stub_handler()
+        handler.send_json = mock.Mock(side_effect=TimeoutError("timed out"))
+        handler.send_error_json = mock.Mock()
+        handler.do_GET()
+        handler.send_error_json.assert_called_once()
+        self.assertEqual(handler.send_error_json.call_args[0][1], 408)
+
+    def test_get_unexpected_error_is_generic_500(self) -> None:
+        handler = self._stub_handler()
+        handler.send_json = mock.Mock(side_effect=RuntimeError("C:\\secret\\db.sqlite open"))
+        handler.send_error_json = mock.Mock()
+        handler.do_GET()
+        message, status = handler.send_error_json.call_args[0]
+        self.assertEqual(status, 500)
+        self.assertNotIn("secret", message)
+
+    def test_get_sets_request_id(self) -> None:
+        handler = self._stub_handler()
+        handler.send_json = mock.Mock()
+        handler.do_GET()
+        self.assertTrue(handler._request_id)
+
+    def test_delete_foreign_prefix_is_400_before_the_runner(self) -> None:
+        handler = self._stub_handler(path="/anything/jobs/job-1", command="DELETE")
+        handler.send_json = mock.Mock()
+        handler.send_error_json = mock.Mock()
+        with mock.patch("freegem.server.job_runner") as runner:
+            handler.do_DELETE()
+        handler.send_error_json.assert_called_once_with("expected DELETE /v1/jobs/{id}", 400)
+        runner.return_value.cancel.assert_not_called()
+
+    def test_delete_unexpected_error_is_generic_500(self) -> None:
+        handler = self._stub_handler(path="/v1/jobs/job-1", command="DELETE")
+        handler.send_json = mock.Mock()
+        handler.send_error_json = mock.Mock()
+        with (
+            mock.patch("freegem.server.job_runner") as runner,
+            mock.patch("freegem.server.GLOBAL_JOB_MANAGER") as manager,
+        ):
+            runner.return_value.cancel.return_value = True
+            manager.get_job.side_effect = RuntimeError("boom at C:\\secret")
+            handler.do_DELETE()
+        message, status = handler.send_error_json.call_args[0]
+        self.assertEqual(status, 500)
+        self.assertNotIn("boom", message)
+        self.assertNotIn("secret", message)
+
+    def test_delete_broken_pipe_is_swallowed(self) -> None:
+        handler = self._stub_handler(path="/v1/jobs/job-1", command="DELETE")
+        handler.send_json = mock.Mock(side_effect=BrokenPipeError("gone"))
+        handler.send_error_json = mock.Mock()
+        with mock.patch("freegem.server.job_runner") as runner:
+            runner.return_value.cancel.return_value = True
+            handler.do_DELETE()  # must not raise
+        handler.send_error_json.assert_not_called()
+
+    def test_delete_timeout_is_408(self) -> None:
+        handler = self._stub_handler(path="/v1/jobs/job-1", command="DELETE")
+        handler.send_json = mock.Mock(side_effect=TimeoutError("timed out"))
+        handler.send_error_json = mock.Mock()
+        with mock.patch("freegem.server.job_runner") as runner:
+            runner.return_value.cancel.return_value = True
+            handler.do_DELETE()
+        handler.send_error_json.assert_called_once()
+        self.assertEqual(handler.send_error_json.call_args[0][1], 408)

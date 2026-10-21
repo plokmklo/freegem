@@ -35,7 +35,11 @@ to a non-public address -- :class:`PreflightedProxyHandler` runs that check
 before every proxied request (initial URL included). A name that does not
 resolve locally is allowed through, because in a proxy-only deployment the
 proxy is the only resolver; refusing unresolvable names would break split-
-horizon setups. That residual -- the proxy resolving to an address we could
+horizon setups. The one exception: non-canonical IPv4 spellings the
+inet_aton grammar accepts (decimal ``2130706433``, octal ``0177.0.0.1``,
+hex ``0x7f000001``, shorthand ``127.1``) are refused outright, because a
+proxy parses them as loopback/metadata while local DNS cannot vouch for
+them. That residual -- the proxy resolving to an address we could
 not pre-check -- is documented in the README security section. Redirect
 hops stay strict: :class:`SafeRedirect` refuses unresolvable names outright,
 because a redirect is attacker-influenced, not user intent.
@@ -56,6 +60,7 @@ import http.cookiejar
 import ipaddress
 import socket
 import ssl
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -88,11 +93,18 @@ class SSRFRefused(Exception):
 # stdlib ``is_private`` misses two legacy ranges that are not routable on the
 # public internet and must never be dialable: CGNAT (RFC 6598, the address
 # space every carrier-grade NAT hands out) and IPv6 site-local (RFC 3879,
-# deprecated but still configured on old gear). Verified on CPython 3.12:
-# ipaddress classes neither as private nor reserved, so they are explicit.
+# deprecated but still configured on old gear). The IPv6 spaces below EMBED
+# an arbitrary IPv4 address (so an embedded 169.254.169.254 must die too);
+# newer CPython ``ipaddress`` (3.13+) classifies them via is_private or
+# is_reserved, but older supported Pythons do not, so they are explicit here
+# to keep the policy version-independent.
 _EXTRA_NONPUBLIC_NETS = (
     ipaddress.ip_network("100.64.0.0/10"),  # CGNAT / RFC 6598
     ipaddress.ip_network("fec0::/10"),  # deprecated IPv6 site-local
+    ipaddress.ip_network("::/96"),  # deprecated IPv4-compatible (::a.b.c.d)
+    ipaddress.ip_network("64:ff9b::/96"),  # NAT64 well-known prefix
+    ipaddress.ip_network("64:ff9b:1::/48"),  # NAT64 local-use prefix
+    ipaddress.ip_network("2002::/16"),  # 6to4 (embeds v4 in bytes 2-5)
 )
 
 #: Hostnames that must never be contacted even when DNS calls them public:
@@ -132,6 +144,41 @@ def _ip_literal_nonpublic(bare: str) -> bool:
     if ip.version == 6 and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
     return ip_is_nonpublic(ip)
+
+
+def _integer_like_label(label: str) -> bool:
+    """True for a decimal, octal, or hex integer label (inet_aton grammar)."""
+
+    if not label.isascii():
+        return False
+    if label[:2].lower() == "0x":
+        digits = label[2:]
+        return bool(digits) and all(c in "0123456789abcdefABCDEF" for c in digits)
+    return label.isdigit()
+
+
+def _alternate_v4_form(bare: str) -> bool:
+    """True for non-canonical IPv4 spellings that C's ``inet_aton`` accepts.
+
+    Decimal-integer (``2130706433``), two-octet shorthand (``127.1``),
+    octal (``0177.0.0.1``), leading-zero (``127.0.0.01``), and hex
+    (``0x7f000001``) all denote real IPv4 addresses to any parser speaking
+    the inet_aton grammar -- proxies, browsers, many resolvers -- while
+    ``ipaddress`` refuses them and (on Windows) ``getaddrinfo`` fails on
+    them. In proxy mode that gap was exploitable: a host like
+    ``2852039166`` (decimal for 169.254.169.254) fell into the
+    "locally unresolvable -> the proxy resolves it" allowance and could
+    reach the cloud metadata service. A hostname made ONLY of integer
+    labels cannot be a real public-web name (ICANN bans all-numeric
+    TLDs), so the whole class is refused outright. Canonical dotted
+    quads never reach this check: they parse as literals and take the
+    early public/non-public literal path instead.
+    """
+
+    labels = bare.lower().rstrip(".").split(".")
+    if not labels or any(not label for label in labels):
+        return False
+    return all(_integer_like_label(label) for label in labels)
 
 
 def ip_is_nonpublic(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -202,6 +249,50 @@ def _checked_addresses(host: str, infos: list[tuple[Any, ...]]) -> list[str]:
     return checked
 
 
+# DNS resolution timeout (#72): a slow or unresponsive resolver can hold a
+# fetch thread for many seconds (or indefinitely on some platforms where
+# getaddrinfo has no inherent timeout). Rate-limiters abraz slow resolves, so
+# we bound every resolution and fail fast instead of hanging a slot.
+_DNS_TIMEOUT_SEC = 5.0
+
+
+def _resolve_with_timeout(bare: str, timeout: float | None = None) -> list[tuple[Any, ...]]:
+    """Resolve ``bare`` with a bounded DNS wait.
+
+    ``socket.getaddrinfo`` has no timeout parameter on every platform; we run
+    it in a bounded thread and treat a timeout as a resolution failure (the
+    same taxonomy callers already handle via :func:`_is_dns_failure`). This
+    keeps a single slow DNS lookup from stalling the whole ladder / pool.
+    """
+    deadline = timeout if timeout is not None else _DNS_TIMEOUT_SEC
+    if deadline <= 0:
+        deadline = _DNS_TIMEOUT_SEC
+
+    result: dict[str, Any] = {}
+
+    def _work() -> None:
+        try:
+            result["infos"] = socket.getaddrinfo(bare, None)
+            result["err"] = None
+        except BaseException as exc:  # noqa: BLE001 - reported via the dict
+            result["infos"] = None
+            result["err"] = exc
+
+    worker = threading.Thread(target=_work, name="freegem-dns", daemon=True)
+    worker.start()
+    worker.join(timeout=deadline)
+    if worker.is_alive():
+        # The thread is a daemon; it will be abandoned cleanly at interpreter
+        # exit. We just report a failure so the ladder / pool can move on.
+        raise OSError(f"DNS resolution timed out after {deadline:g}s for {bare!r}")
+    if result.get("err") is not None:
+        raise result["err"]
+    infos = result.get("infos")
+    if infos is None:
+        raise OSError(f"DNS resolution returned no results for {bare!r}")
+    return infos
+
+
 def pick_public_ips(host: str) -> list[str]:
     """Resolve ``host`` and return its verified-public IPs to dial, in order.
 
@@ -211,13 +302,20 @@ def pick_public_ips(host: str) -> list[str]:
     entry -- mirrors what stdlib ``create_connection`` does for a hostname,
     without ever letting it re-resolve: dual-stack hosts work on IPv4-only and
     IPv6-only networks alike.
+
+    Resolution is bounded by :data:`_DNS_TIMEOUT_SEC` so a hung resolver
+    cannot stall the fetch ladder or the parallel pool (#72).
     """
     bare = _host_only(host)
     if not bare:
         raise SSRFRefused("refusing empty host")
     try:
-        infos = socket.getaddrinfo(bare, None)
-    except OSError as exc:
+        infos = _resolve_with_timeout(bare)
+    except (OSError, UnicodeError, ValueError) as exc:
+        # UnicodeError/ValueError: some resolvers reject embedded NULs and
+        # undecodable labels with those instead of OSError; all of them mean
+        # "could not vouch for this host" and must keep the SSRFRefused
+        # taxonomy that callers (SafeRedirect, the fetchers) rely on.
         raise SSRFRefused(f"cannot resolve {bare!r}: {exc}") from exc
     if not infos:
         raise SSRFRefused(f"no addresses resolved for {bare!r}")
@@ -277,10 +375,15 @@ def host_public_or_unresolvable(host: str) -> str:
         return bare  # a public IP literal: nothing to resolve
     except ValueError:
         pass
+    if _alternate_v4_form(bare):
+        # inet_aton-style spellings the proxy WOULD parse (decimal, octal,
+        # hex, shorthand) but local DNS cannot vouch for -- refuse instead
+        # of sliding them into the unresolvable-allowed leniency below.
+        raise SSRFRefused(f"{bare!r} is a non-canonical IPv4 address form")
     try:
-        infos = socket.getaddrinfo(bare, None)
-    except OSError:
-        return bare  # local DNS silent -> the proxy resolves; allowed here
+        infos = _resolve_with_timeout(bare)
+    except (OSError, UnicodeError, ValueError):
+        return bare  # local DNS silent or timed out -> proxy resolves; allowed
     _checked_addresses(bare, infos)  # raises on ANY non-public address
     return bare
 
@@ -307,6 +410,12 @@ def host_public_strict(host: str) -> str:
         return bare  # a public IP literal: nothing to resolve
     except ValueError:
         pass
+    if _alternate_v4_form(bare):
+        # Deterministic refusal on every platform: even where the local
+        # resolver would decode the inet_aton form (and then refuse the
+        # non-public answer), failing closed before DNS keeps the taxonomy
+        # stable and gives attackers no free oracle.
+        raise SSRFRefused(f"{bare!r} is a non-canonical IPv4 address form")
     pick_public_ips(bare)  # raises on unresolvable OR any non-public address
     return bare
 

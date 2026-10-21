@@ -1,8 +1,11 @@
 """Tests for PDF/DOCX adapters, rich metadata extraction, and Markdown conversion."""
 
+import sys
+import types
 import unittest
+from unittest import mock
 
-from freegem.adapters import parse_docx, parse_pdf
+from freegem.adapters import parse_docx, parse_document, parse_pdf
 from freegem.crawler.extract import extract_metadata, html_to_markdown
 from freegem.crawler.hardening import HtmlDom
 
@@ -18,6 +21,58 @@ class TestAdaptersAndExtractors(unittest.TestCase):
         res = parse_docx(b"not a real zip")
         self.assertEqual(res.doc_type, "docx")
         self.assertIn("Failed", res.text)
+
+    def test_parse_document_routes_docx_mime_type(self) -> None:
+        # The standard DOCX MIME type contains no "docx" substring -- it used
+        # to fall through to the PDF parser and return PDF garbage instead of
+        # a DOCX parse attempt.
+        res = parse_document(
+            b"not a real zip",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+        self.assertEqual(res.doc_type, "docx")
+        self.assertIn("Failed", res.text)
+
+    def test_parse_document_pdf_extension_wins_over_docx_substring(self) -> None:
+        # A PDF filename that merely contains "docx" must stay on the PDF
+        # path (extension decides first).
+        res = parse_document(b"%PDF-1.4 ... (Hello World) Tj ...", "quarterly-docx-report.pdf")
+        self.assertEqual(res.doc_type, "pdf")
+        self.assertIn("Hello World", res.text)
+
+    def test_parse_document_none_hint_defaults_to_pdf(self) -> None:
+        # Job params pass .get("filename", "") which is None when the key is
+        # present-but-null; the hint must not crash on .lower().
+        res = parse_document(b"%PDF-1.4 ... (Hello World) Tj ...", None)  # type: ignore[arg-type]
+        self.assertEqual(res.doc_type, "pdf")
+        self.assertIn("Hello World", res.text)
+
+    def test_pdf_markdown_page_labels_keep_original_page_numbers(self) -> None:
+        # A blank (or unextractable) page must not shift the "## Page N"
+        # labels of the following pages; hermetic fake pypdf reader.
+        fake_pypdf = types.ModuleType("pypdf")
+
+        class _Page:
+            def __init__(self, text: str) -> None:
+                self._text = text
+
+            def extract_text(self) -> str:
+                return self._text
+
+        class _Reader:
+            def __init__(self, stream: object) -> None:
+                _ = stream
+                self.pages = [_Page(""), _Page("Second page body")]
+                self.metadata = None
+
+        fake_pypdf.PdfReader = _Reader  # type: ignore[attr-defined]
+        with mock.patch.dict(sys.modules, {"pypdf": fake_pypdf}):
+            res = parse_pdf(b"%PDF-fake")
+        self.assertEqual(res.doc_type, "pdf")
+        self.assertEqual(res.page_count, 2)
+        self.assertEqual(res.text, "Second page body")
+        self.assertIn("## Page 2", res.markdown)
+        self.assertNotIn("## Page 1", res.markdown)
 
     def test_extract_metadata(self) -> None:
         html_doc = """

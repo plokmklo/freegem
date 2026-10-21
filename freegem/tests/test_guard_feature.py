@@ -80,6 +80,15 @@ class GuardedScrapeTests(unittest.TestCase):
             scrape_page(cfg, "ftp://host.example/x")
         self.assertIn("SSRF guard", str(ctx.exception))
 
+    def test_alternate_ip_form_refused_when_guard_on(self) -> None:
+        # Decimal-integer IPv4 spelling (inet_aton grammar): a proxy reads
+        # 2130706433 as 127.0.0.1; direct mode fails closed on every
+        # platform. Either way it must classify as a guard refusal.
+        cfg = BridgeConfig(log_requests=False).replace(guard=True)
+        with self.assertRaises(ScrapeError) as ctx:
+            scrape_page(cfg, "http://2130706433/")
+        self.assertIn("SSRF guard", str(ctx.exception))
+
 
 class LocalFileIndependentOfGuardTests(unittest.TestCase):
     """Local files are not a network fetch: they work in BOTH modes (#50)."""

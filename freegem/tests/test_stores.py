@@ -9,6 +9,7 @@ error paths.
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from freegem.stores import (
     FileBlobStore,
     PostgresDocumentStore,
     PostgresUnavailable,
+    S3BlobStore,
     S3Unavailable,
     SqliteDocumentStore,
     open_blob_store,
@@ -170,6 +172,9 @@ class FakeConn:
     def commit(self) -> None:
         self.committed += 1
 
+    def rollback(self) -> None:
+        return None
+
     def close(self) -> None:
         return None
 
@@ -284,3 +289,97 @@ def test_s3_unavailable_without_boto3(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "boto3", None)
     with pytest.raises(S3Unavailable, match="pip install boto3"):
         open_blob_store("s3://mybucket/crawl")
+
+
+# ─── regression: upsert-by-url, atomicity, query window, suffix keys ─────────
+
+
+def test_sqlite_store_upsert_same_url_other_doc_id_replaces(tmp_path: Path) -> None:
+    s = SqliteDocumentStore(str(tmp_path / "docs.db"))
+    s.upsert({"doc_id": "custom-id", "url": "https://x/a", "title": "v1", "text": "old"})
+    new_id = s.upsert({"url": "https://x/a", "title": "v2", "text": "new"})
+    assert new_id != "custom-id"  # content-derived id for the second write
+    assert s.count() == 1
+    got = s.get_by_url("https://x/a")
+    assert got is not None
+    assert got["doc_id"] == new_id and got["title"] == "v2"
+    assert s.get("custom-id") is None
+    s.close()
+
+
+def test_sqlite_store_upsert_failure_rolls_back(tmp_path: Path) -> None:
+    s = SqliteDocumentStore(str(tmp_path / "docs.db"))
+    s.upsert({"doc_id": "keep", "url": "https://x/a", "title": "v1", "text": "old"})
+    with pytest.raises(sqlite3.Error):
+        # unbindable text fails inside the statement block, AFTER the
+        # same-url guard DELETE has executed
+        s.upsert({"doc_id": "other", "url": "https://x/a", "title": "v2", "text": object()})
+    assert s.count() == 1  # the guard DELETE must not survive the failure
+    assert s.get("keep") is not None
+    s.close()
+
+
+def test_sqlite_store_metadata_query_scans_past_limit_window(tmp_path: Path) -> None:
+    s = SqliteDocumentStore(str(tmp_path / "docs.db"))
+    # the only match is the OLDEST row -- outside any newest-row scan window
+    for i in range(6):
+        s.upsert(
+            {
+                "url": f"u{i}",
+                "title": "",
+                "text": "",
+                "metadata": {"tag": "hit" if i == 0 else "miss"},
+            }
+        )
+        s._conn.execute("UPDATE documents SET updated_at = ? WHERE url = ?", (float(i), f"u{i}"))
+    s._conn.commit()
+    hits = s.query(metadata={"tag": "hit"}, limit=1)
+    assert [h["url"] for h in hits] == ["u0"]
+    assert len(s.query(limit=1)) == 1  # unfiltered form still honors limit
+    s.close()
+
+
+def test_postgres_upsert_guards_url_conflict_and_casts_jsonb(pg: PostgresDocumentStore) -> None:
+    pg.upsert(
+        {"doc_id": "custom", "url": "https://x/u", "title": "v1", "text": "", "metadata": {"a": 1}}
+    )
+    pg.upsert({"url": "https://x/u", "title": "v2", "text": "", "metadata": {"a": 2}})
+    deletes = [sql for sql, _ in pg._conn.executed if sql.startswith("DELETE")]
+    assert deletes and all("url =" in d and "doc_id <>" in d for d in deletes)
+    inserts = [sql for sql, _ in pg._conn.executed if "INSERT" in sql]
+    assert inserts and "%s::jsonb" in inserts[-1]  # metadata arrives as jsonb, not text
+
+
+def test_s3_blob_store_suffix_returns_retrievable_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    objects: dict[tuple[str, str], bytes] = {}
+
+    class FakeS3:
+        def put_object(self, *, Bucket: str, Key: str, Body: bytes) -> None:
+            objects[(Bucket, Key)] = Body
+
+        def get_object(self, *, Bucket: str, Key: str) -> Any:
+            if (Bucket, Key) not in objects:
+                raise KeyError(Key)
+            body = objects[(Bucket, Key)]
+            return {"Body": type("B", (), {"read": lambda self, b=body: b})()}
+
+        def head_object(self, *, Bucket: str, Key: str) -> None:
+            if (Bucket, Key) not in objects:
+                raise KeyError(Key)
+
+        def delete_object(self, *, Bucket: str, Key: str) -> None:
+            objects.pop((Bucket, Key), None)
+
+    fake_boto3 = type(
+        "boto3", (), {"client": staticmethod(lambda *a, **k: FakeS3())}
+    )
+    monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
+    store = S3BlobStore("mybucket", prefix="crawl")
+    key = store.put(b"pdf bytes", suffix=".pdf")
+    assert key.endswith(".pdf")
+    # the returned key resolves to the object put() actually stored
+    assert ("mybucket", f"crawl/ab/{key[:2]}/{key}") in objects
+    assert store.exists(key) is True
+    assert store.get(key) == b"pdf bytes"
+    assert store.delete(key) is True
+    assert store.exists(key) is False

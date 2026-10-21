@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import unittest
 
+from freegem import metrics as metrics_mod
 from freegem.metrics import (
     DEFAULT_LATENCY_WINDOW,
     LatencyWindow,
     RunMetrics,
     ServerMetrics,
     gemini_retries_total,
+    get_audit_logs,
     memory_rss_kb,
     new_request_id,
     note_gemini_retry,
     percentile,
+    record_audit_event,
 )
 
 
@@ -139,6 +142,36 @@ class MemoryTests(unittest.TestCase):
             # is not going to report petabytes.
             self.assertGreater(rss, 1_000)
             self.assertLess(rss, 100_000_000)
+
+
+class AuditLogTests(unittest.TestCase):
+    """record_audit_event / get_audit_logs: bounded global log."""
+
+    def setUp(self) -> None:
+        self._saved = list(metrics_mod._AUDIT_LOGS)
+        metrics_mod._AUDIT_LOGS.clear()
+
+    def tearDown(self) -> None:
+        metrics_mod._AUDIT_LOGS[:] = self._saved
+
+    def test_limit_zero_returns_no_logs(self) -> None:
+        record_audit_event("action", "127.0.0.1", "req-1")
+        self.assertEqual(get_audit_logs(0), [])
+        self.assertEqual(get_audit_logs(-5), [])
+        self.assertEqual(len(get_audit_logs(10)), 1)
+
+    def test_recent_logs_keep_insertion_order(self) -> None:
+        record_audit_event("a", "127.0.0.1", "r1")
+        record_audit_event("b", "127.0.0.1", "r2")
+        logs = get_audit_logs(10)
+        self.assertEqual([e["request_id"] for e in logs], ["r1", "r2"])
+
+    def test_log_is_capped_at_a_thousand_events(self) -> None:
+        for i in range(1005):
+            record_audit_event("action", "127.0.0.1", f"r{i}")
+        self.assertEqual(len(metrics_mod._AUDIT_LOGS), 1000)
+        # oldest trimmed first, newest survives
+        self.assertEqual(get_audit_logs(1)[0]["request_id"], "r1004")
 
 
 if __name__ == "__main__":  # pragma: no cover

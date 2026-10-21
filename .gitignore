@@ -51,3 +51,29 @@ logs/
 
 # Local test/run config (may point at a session file)
 cfg.json
+
+# Local test/benchmark/automation files (uncommitted work artifacts)
+test_capabilities.py
+bench1000_freegem.py
+bench1000_chunk.py
+bench1000_resume.py
+bench1000_firecrawl.py
+benchmark_freegem.py
+benchmark_test.py
+benchmark_questions.json
+benchmark_1000.json
+chunk_loop.py
+urls_test_100.txt
+urls_test_1000.txt
+freegem_1000_results.jsonl
+freegem_1000_results.json
+chunk_log.txt
+chunk_loop_log.txt
+firecrawl_1000_results.jsonl
+firecrawl_1000_summary.json
+firecrawl_results.json
+AUTOPILOT_CRON.md
+AUTOPILOT_LOG.md
+*.patch
+auto_update_freegem.py
+.freegem_upstream_sha

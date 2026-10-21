@@ -35,7 +35,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -52,7 +52,7 @@ class Job:
     """A background job record."""
 
     id: str
-    type: str  # "scrape", "research", "playwright", "document", "extract", "selenium"
+    type: str  # "scrape", "research", "playwright", "document", "extract", "selenium", "agent"
     status: str  # queued | processing | completed | failed | cancelled | timed_out | interrupted
     params: dict[str, Any] = field(default_factory=dict)
     result: dict[str, Any] | None = None
@@ -932,7 +932,12 @@ def execute_job(job: Job, cfg: Any) -> None:
     elif job.type == "playwright":
         from .playwright_fetcher import PlaywrightOptions, fetch_with_playwright
 
-        opts = PlaywrightOptions(**job.params)
+        # Filter like the selenium branch below: params also carry the
+        # runner-managed keys (timeout_sec, max_retries -- documented per-job
+        # overrides), and PlaywrightOptions(**job.params) used to TypeError
+        # on them, failing the job after pointless retries.
+        allowed = {f.name for f in fields(PlaywrightOptions)}
+        opts = PlaywrightOptions(**{k: v for k, v in job.params.items() if k in allowed})
         pw_res = fetch_with_playwright(opts)
         if pw_res.screenshot_path and os.path.exists(pw_res.screenshot_path):
             GLOBAL_JOB_MANAGER.save_artifact(
@@ -1059,6 +1064,22 @@ def execute_job(job: Job, cfg: Any) -> None:
                 "artifact_ids": art_ids,
             },
             error=sel_res.error,
+        )
+    elif job.type == "agent":
+        from .agent import run_agent, validate_agent_params
+
+        try:
+            task, limits = validate_agent_params(job.params)
+        except ValueError as exc:
+            GLOBAL_JOB_MANAGER.update_job_status(job.id, "failed", error=str(exc))
+            return
+
+        result = run_agent(cfg, task, limits)
+        GLOBAL_JOB_MANAGER.update_job_status(
+            job.id,
+            result.status,
+            result=result.to_dict() if result.status == "completed" else None,
+            error=None if result.status == "completed" else "; ".join(result.limitations),
         )
     else:
         GLOBAL_JOB_MANAGER.update_job_status(

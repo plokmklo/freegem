@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 
 from freegem.crawler.urls import (
+    URL_NORMALIZING_ERROR,
     Budget,
     Scope,
     normalize_url,
@@ -66,6 +67,55 @@ class NormalizeTests(unittest.TestCase):
 
     def test_whitespace_stripped(self) -> None:
         self.assertEqual(normalize_url("  https://example.com/x \n"), "https://example.com/x")
+
+    def test_trailing_dot_host_canonicalized(self) -> None:
+        """FQDN root label: example.com. must dedupe with example.com."""
+        self.assertEqual(normalize_url("https://example.com./x"), "https://example.com/x")
+        self.assertEqual(
+            normalize_url("https://example.com./x"), normalize_url("https://example.com/x")
+        )
+        self.assertEqual(normalize_url("https://example.com.:443/"), "https://example.com/")
+        with self.assertRaises(ValueError):
+            normalize_url("https://./x")
+
+    def test_unicode_path_percent_encoded_to_one_key(self) -> None:
+        raw = normalize_url("https://example.com/café")
+        encoded = normalize_url("https://example.com/caf%C3%A9")
+        self.assertEqual(raw, "https://example.com/caf%C3%A9")
+        self.assertEqual(raw, encoded)
+        # spaces and other illegal path octets likewise unify
+        self.assertEqual(
+            normalize_url("https://example.com/a b"), normalize_url("https://example.com/a%20b")
+        )
+
+    def test_tracking_strip_preserves_kept_param_spelling(self) -> None:
+        """Dropping a tracking param must not re-encode the kept ones.
+
+        The old parse_qsl/urlencode path turned ``b%20c`` into ``b+c`` and
+        ``flag`` into ``flag=`` -- only when something was stripped -- so
+        the same resource produced two different dedup keys.
+        """
+        self.assertEqual(
+            normalize_url("https://e.com/x?a=b%20c&utm_source=t"),
+            normalize_url("https://e.com/x?a=b%20c"),
+        )
+        self.assertEqual(
+            normalize_url("https://e.com/x?flag&utm_source=t"),
+            normalize_url("https://e.com/x?flag"),
+        )
+        # percent-encoded tracking name is recognized and dropped
+        self.assertEqual(strip_tracking_params("a=1&utm%5Fcampaign=x"), "a=1")
+        # signed/percent-triplet spellings survive untouched
+        self.assertEqual(
+            normalize_url("https://e.com/p?sig=ab%2Bcd&x=1&fbclid=z"),
+            "https://e.com/p?sig=ab%2Bcd&x=1",
+        )
+
+    def test_bad_port_refused_with_canonical_error(self) -> None:
+        for url in ("http://example.com:99999/", "http://example.com:abc/"):
+            with self.subTest(url=url), self.assertRaises(ValueError) as ctx:
+                normalize_url(url)
+            self.assertEqual(str(ctx.exception), URL_NORMALIZING_ERROR)
 
 
 class ScopeTests(unittest.TestCase):

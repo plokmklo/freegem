@@ -7,6 +7,7 @@ resource cleanup.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import tempfile
 import time
@@ -194,20 +195,40 @@ def fetch_with_playwright(opts: PlaywrightOptions) -> PlaywrightResult:
                 title = page.title()
                 html_content = page.content()
 
+                # Captures are BEST-EFFORT: the page is already rendered, so a
+                # screenshot/pdf/trace failure must not discard the content
+                # (nor leak the placeholder temp file just created).
                 if opts.capture_screenshot:
                     if not screenshot_file:
                         fd, screenshot_file = tempfile.mkstemp(prefix="freegem-ss-", suffix=".png")
                         os.close(fd)
-                    page.screenshot(path=screenshot_file, full_page=opts.screenshot_full_page)
+                    try:
+                        page.screenshot(
+                            path=screenshot_file, full_page=opts.screenshot_full_page
+                        )
+                    except Exception:
+                        if screenshot_file != opts.screenshot_path:
+                            with contextlib.suppress(OSError):
+                                os.unlink(screenshot_file)
+                        screenshot_file = None
 
                 if opts.capture_pdf:
                     if not pdf_file:
                         fd, pdf_file = tempfile.mkstemp(prefix="freegem-pdf-", suffix=".pdf")
                         os.close(fd)
-                    page.pdf(path=pdf_file)
+                    try:
+                        page.pdf(path=pdf_file)
+                    except Exception:
+                        if pdf_file != opts.pdf_path:
+                            with contextlib.suppress(OSError):
+                                os.unlink(pdf_file)
+                        pdf_file = None
 
                 if opts.capture_trace and trace_file:
-                    context.tracing.stop(path=trace_file)
+                    try:
+                        context.tracing.stop(path=trace_file)
+                    except Exception:
+                        trace_file = None
 
                 elapsed = int((time.monotonic() - started) * 1000)
                 return PlaywrightResult(

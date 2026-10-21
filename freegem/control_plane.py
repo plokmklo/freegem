@@ -33,6 +33,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .queues import WorkQueue
@@ -84,6 +85,10 @@ class ControlPlane:
         self.queue = queue
         self.lease_ttl_sec = lease_ttl_sec
         self.worker_ttl_sec = worker_ttl_sec
+        # Same convention as SqliteJobStore: a store path in a directory that
+        # does not exist yet is a fresh deployment, not a crash
+        # (sqlite3.connect alone raises "unable to open database file").
+        Path(store_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(store_path, check_same_thread=False, isolation_level=None)
         self._conn.executescript(_SCHEMA)
         self._lock = threading.Lock()

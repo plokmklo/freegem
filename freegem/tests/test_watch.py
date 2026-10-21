@@ -311,7 +311,11 @@ class CliWatchTests(unittest.TestCase):
 
     def run_cli(self, argv: list[str]) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
-        with redirect_stdout(out), redirect_stderr(err):
+        with (
+            redirect_stdout(out),
+            redirect_stderr(err),
+            mock.patch("freegem.cli.find_config", return_value=None),
+        ):
             code = main(argv)
         return code, out.getvalue(), err.getvalue()
 

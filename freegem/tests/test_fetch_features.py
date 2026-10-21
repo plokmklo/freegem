@@ -745,5 +745,81 @@ class ResearchCacheFullTextTests(unittest.TestCase):
             )
 
 
+class FlareSolverrResponseShapeTests(unittest.TestCase):
+    """The v1 client refuses every malformed success shape BY NAME
+    (FlareSolverrError). A non-dict ``solution`` used to raise AttributeError
+    and a non-numeric ``solution.status`` used to raise ValueError -- both
+    escaped the ladder's FlareSolverrError taxonomy and killed the rung."""
+
+    ENDPOINT = "http://flare.test:8191"
+
+    class _FakeFlareResponse:
+        def __init__(self, payload: bytes) -> None:
+            self._payload = payload
+
+        def read(self, size: int = -1) -> bytes:
+            if size is None or size < 0:
+                return self._payload
+            return self._payload[:size]
+
+        def __enter__(self) -> "FlareSolverrResponseShapeTests._FakeFlareResponse":
+            return self
+
+        def __exit__(self, *exc: Any) -> bool:
+            return False
+
+    def _cfg(self) -> BridgeConfig:
+        return BridgeConfig(guard=True, log_requests=False).replace(
+            smart_fetch_flaresolverr=self.ENDPOINT
+        )
+
+    def _call(self, body: Any) -> str:
+        import json as _json
+
+        from freegem.flaresolverr_fetcher import flaresolverr_html
+
+        with mock.patch(
+            "urllib.request.urlopen",
+            return_value=self._FakeFlareResponse(_json.dumps(body).encode("utf-8")),
+        ):
+            return flaresolverr_html(self._cfg(), "https://example.com/a", timeout=10)
+
+    def test_happy_path_returns_the_solved_html(self) -> None:
+        html = self._call(
+            {"status": "ok", "solution": {"status": 200, "response": "<p>solved</p>"}}
+        )
+        self.assertEqual(html, "<p>solved</p>")
+
+    def test_non_dict_solution_is_a_flaresolverr_error(self) -> None:
+        from freegem.flaresolverr_fetcher import FlareSolverrError
+
+        with self.assertRaises(FlareSolverrError) as caught:
+            self._call({"status": "ok", "solution": ["not", "a", "dict"]})
+        self.assertIn("malformed solution", str(caught.exception))
+
+    def test_missing_solution_is_a_flaresolverr_error(self) -> None:
+        from freegem.flaresolverr_fetcher import FlareSolverrError
+
+        with self.assertRaises(FlareSolverrError) as caught:
+            self._call({"status": "ok"})
+        self.assertIn("no content", str(caught.exception))
+
+    def test_non_numeric_solution_status_is_a_flaresolverr_error(self) -> None:
+        from freegem.flaresolverr_fetcher import FlareSolverrError
+
+        with self.assertRaises(FlareSolverrError) as caught:
+            self._call(
+                {"status": "ok", "solution": {"status": "NaN", "response": "<p>x</p>"}}
+            )
+        self.assertIn("malformed status", str(caught.exception))
+
+    def test_service_error_message_still_carries_through(self) -> None:
+        from freegem.flaresolverr_fetcher import FlareSolverrError
+
+        with self.assertRaises(FlareSolverrError) as caught:
+            self._call({"status": "error", "message": "no dice"})
+        self.assertIn("no dice", str(caught.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -40,19 +40,22 @@ def parse_pdf(data_or_path: bytes | str) -> DocumentResult:
         import pypdf
 
         reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
-        pages_text: list[str] = []
-        for p in reader.pages:
+        # (page_no, text): keep the ORIGINAL page number so the markdown
+        # labels stay right when a page has no extractable text (blank or
+        # scanned-only pages used to shift every following "## Page N").
+        pages_text: list[tuple[int, str]] = []
+        for page_no, p in enumerate(reader.pages, 1):
             t = p.extract_text() or ""
             if t.strip():
-                pages_text.append(t.strip())
-        full_text = "\n\n".join(pages_text)
+                pages_text.append((page_no, t.strip()))
+        full_text = "\n\n".join(t for _, t in pages_text)
         meta = {}
         if reader.metadata:
             meta = {k.lstrip("/"): str(v) for k, v in reader.metadata.items() if v}
 
         md_lines = [f"# Document ({len(reader.pages)} pages)", ""]
-        for idx, page_t in enumerate(pages_text, 1):
-            md_lines.append(f"## Page {idx}")
+        for page_no, page_t in pages_text:
+            md_lines.append(f"## Page {page_no}")
             md_lines.append(page_t)
             md_lines.append("")
 
@@ -188,7 +191,18 @@ def parse_docx(data_or_path: bytes | str) -> DocumentResult:
 
 def parse_document(data_or_path: bytes | str, filename_or_mime: str = "") -> DocumentResult:
     """Parse document (PDF or DOCX) based on filename/mime type."""
-    lower_hint = filename_or_mime.lower()
-    if "docx" in lower_hint or lower_hint.endswith(".docx"):
+    # None-tolerant: job params pass ``.get("filename", "")`` which is None
+    # when the key is present-but-null.
+    hint = str(filename_or_mime or "").lower()
+    # Routing order: a real extension or the DOCX MIME token decides; the
+    # historical bare-"docx" substring only routes when the hint is not
+    # clearly a PDF. (The DOCX MIME type --
+    # application/vnd.openxmlformats-officedocument.wordprocessingml.document --
+    # contains no "docx" substring, so it used to fall into the PDF parser.)
+    if (
+        hint.endswith(".docx")
+        or "wordprocessingml" in hint
+        or ("docx" in hint and not hint.endswith(".pdf"))
+    ):
         return parse_docx(data_or_path)
     return parse_pdf(data_or_path)

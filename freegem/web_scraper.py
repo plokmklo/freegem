@@ -1235,6 +1235,10 @@ def _mediawiki_extract(cfg: BridgeConfig, url: str) -> ScrapeResult | None:
             "explaintext": "1",
             "exlimit": "1",
             "exsectionformat": "plain",
+            # Explicit bounded exchars so the fallback does not inherit the
+            # upstream API default (issue #67). We request the full hard
+            # limit; _caller_view trims per-caller afterwards (#21).
+            "exchars": str(_MAX_CHARS_HARD_LIMIT),
             "redirects": "1",
             "titles": title,
         }
