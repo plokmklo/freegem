@@ -288,9 +288,7 @@ class JobToolTests(unittest.TestCase):
         self.assertEqual(out, {"error": "Job not found"})
 
     def test_get_artifact_not_found_is_json_not_a_crash(self) -> None:
-        out = json.loads(
-            run_tool(self.cfg, "freegem_get_artifact", {"artifact_id": "art-nope"})
-        )
+        out = json.loads(run_tool(self.cfg, "freegem_get_artifact", {"artifact_id": "art-nope"}))
         self.assertEqual(out, {"error": "Artifact not found"})
 
     def test_get_artifact_returns_the_artifact_metadata(self) -> None:
