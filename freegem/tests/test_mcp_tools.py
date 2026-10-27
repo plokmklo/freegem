@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 import unittest
 from pathlib import Path
 from typing import Any
@@ -365,9 +364,10 @@ class ServerBuildTests(unittest.TestCase):
     """build_server's optional-dependency contract, without the mcp package."""
 
     def test_missing_mcp_package_raises_an_actionable_import_error(self) -> None:
-        # A None entry halts the import machinery for that name, which is the
-        # same failure shape "mcp not installed" produces.
-        with mock.patch.dict(sys.modules, {"mcp": None}):
+        # Blocking the import machinery reproduces the "mcp not installed"
+        # failure shape: build_server's only import inside the try is the mcp
+        # one, so it raises and names the actionable extra.
+        with mock.patch("builtins.__import__", side_effect=ImportError("blocked for test")):
             with self.assertRaises(ImportError) as ctx:
                 build_server(BridgeConfig())
         self.assertIn("freegem[mcp]", str(ctx.exception))
