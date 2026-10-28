@@ -221,7 +221,10 @@ class DispatchTests(unittest.TestCase):
         self.assertIn("unknown tool: gemini_nope", str(ctx.exception))
 
     def test_none_arguments_are_tolerated(self) -> None:
-        out = run_tool(self.cfg, "gemini_list_models", None)
+        # run_tool normalises None arguments at runtime (arguments or {});
+        # the Any-typed local keeps that contract visible to mypy.
+        arguments: Any = None
+        out = run_tool(self.cfg, "gemini_list_models", arguments)
         self.assertIn("Available models:", out)
 
     def test_web_tools_delegate_to_their_entry_points(self) -> None:
