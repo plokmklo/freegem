@@ -248,7 +248,9 @@ _BOILERPLATE = (
     "may like. Nav item. Nav item. Footer link. "
 ) * 10
 _ARTICLE = "The actual article body, one readable paragraph after another. " * 30
-_CLEANED_BODY = "The cleaned article body, free of chrome. " * 40
+#: ai_clean strips the model's answer before returning it, so the expected
+#: body is that trimmed shape.
+_CLEANED_BODY = ("The cleaned article body, free of chrome. " * 40).strip()
 
 
 class _FakeCleanProvider:
