@@ -3,8 +3,7 @@ All checks passed!
 ===== ruff format --check =====
 134 files already formatted
 ===== mypy =====
-freegem/tests/test_mcp_tools.py:224: error: Argument 3 to "run_tool" has incompatible type "None"; expected "dict[str, Any]"  [arg-type]
-Found 1 error in 1 file (checked 114 source files)
+Success: no issues found in 114 source files
 ===== pytest =====
 ........................................................................ [  4%]
 ........................................................................ [  9%]
@@ -53,7 +52,7 @@ freegem/crawler/hardening.py                      175     13    93%   118, 199-2
 freegem/crawler/output.py                          96      1    99%   51
 freegem/crawler/receipts.py                       105     21    80%   49, 56, 111, 124-133, 142-147, 231, 240
 freegem/crawler/resilient.py                      287     54    81%   340-342, 357, 447-449, 455-457, 468-470, 486, 517-549, 560, 582, 591, 596-597, 606-607
-freegem/crawler/runner.py                         479     80    83%   104-105, 139-141, 196, 265-266, 317, 328-330, 411, 422, 510, 515-517, 531, 533, 583-585, 587-591, 627, 642-644, 646, 674-675, 714-724, 737, 739, 746, 754-756, 770, 782-783, 785, 795, 808, 815-816, 819-821, 825-836, 855-856, 859, 864, 875-881, 925, 941, 990, 996-997
+freegem/crawler/runner.py                         479     76    84%   104-105, 139-141, 196, 265-266, 317, 328-330, 411, 422, 515-517, 531, 533, 583-585, 587-591, 627, 642-644, 646, 674-675, 714-724, 737, 739, 746, 770, 782-783, 785, 795, 808, 815-816, 819-821, 825-836, 855-856, 859, 864, 875-881, 925, 941, 990, 996-997
 freegem/crawler/scheduling.py                      75      2    97%   178, 222
 freegem/crawler/sources.py                        189     23    88%   70-74, 99, 114, 170-171, 179-180, 187, 195, 237-238, 241-242, 244, 273, 286, 323, 333, 352-353
 freegem/crawler/urls.py                           148     18    88%   115, 120-121, 127, 129, 135-136, 139, 160, 224-230, 236-237, 289, 298
@@ -117,7 +116,7 @@ freegem/tests/test_jobs.py                        294      7    98%   40-42, 46-
 freegem/tests/test_jobs_pool.py                   305      2    99%   228, 400
 freegem/tests/test_llm_extract.py                 146      0   100%
 freegem/tests/test_mcp_jobs.py                     29      1    97%   62
-freegem/tests/test_mcp_tools.py                   216      0   100%
+freegem/tests/test_mcp_tools.py                   217      0   100%
 freegem/tests/test_metrics.py                     101      0   100%
 freegem/tests/test_multimodal.py                  207      3    99%   276, 301, 393
 freegem/tests/test_non_goals.py                    27      1    96%   47
@@ -147,6 +146,6 @@ freegem/watch.py                                  298     20    93%   178-180, 2
 freegem/web_research.py                           646     38    94%   163, 165, 489, 497-508, 760-761, 763, 781, 827-829, 878, 881, 890, 896, 922, 927, 1026, 1029, 1033, 1035, 1039, 1262, 1264, 1390, 1392, 1409-1410
 freegem/web_scraper.py                            741     65    91%   259-260, 328, 330, 333, 410, 415-416, 425, 428-429, 564, 567, 614, 662, 666, 675, 685-686, 736, 738, 813-815, 822, 824, 836, 840, 879, 882, 888, 899, 908, 971, 996-998, 1002-1005, 1024-1026, 1035, 1138-1139, 1186-1188, 1196, 1252-1253, 1256-1257, 1262, 1283-1284, 1434, 1693-1694, 1782-1783, 1864-1865
 -----------------------------------------------------------------------------
-TOTAL                                           24712   1725    93%
-1445 passed, 1 skipped, 68 subtests passed in 235.45s (0:03:55)
+TOTAL                                           24713   1721    93%
+1445 passed, 1 skipped, 68 subtests passed in 234.98s (0:03:54)
 ===== end =====
