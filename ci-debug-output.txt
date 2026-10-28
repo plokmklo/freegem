@@ -6,7 +6,7 @@ All checks passed!
 Success: no issues found in 114 source files
 ===== pytest =====
 ........................................................................ [  5%]
-........F............................................................... [ 10%]
+........................................................................ [ 10%]
 ........................................................................ [ 15%]
 ........................................................................ [ 20%]
 ..................................................................... [ 25%]
@@ -26,21 +26,6 @@ Success: no issues found in 114 source files
 ........................................................................ [ 93%]
 ........................................................................ [ 98%]
 ...........................                              [100%]
-=================================== FAILURES ===================================
-__ AiCleanCorpusTests.test_two_hundred_boilerplate_pages_clean_to_the_article __
-
-self = <freegem.tests.test_ai_wall_corpus.AiCleanCorpusTests testMethod=test_two_hundred_boilerplate_pages_clean_to_the_article>
-
-    def test_two_hundred_boilerplate_pages_clean_to_the_article(self) -> None:
-        with mock.patch("freegem.llm_extract.BridgeProvider", _FakeCleanProvider):
-            for i in range(200):
-                url = f"https://magazine-{i:03d}.test/post.html"
-                cleaned = ai_clean(self.cfg, url, _BOILERPLATE + _ARTICLE)
->               self.assertEqual(cleaned, _CLEANED_BODY)
-E               AssertionError: 'The [1614 chars]dy, free of chrome. The cleaned article body, free of chrome.' != 'The [1614 chars]dy, free of chrome. The cleaned article body, free of chrome. '
-E               Diff is 5049 characters long. Set self.maxDiff to None to see it.
-
-freegem/tests/test_ai_wall_corpus.py:281: AssertionError
 ================================ tests coverage ================================
 _______________ coverage: platform linux, python 3.12.15-final-0 _______________
 
@@ -99,7 +84,7 @@ freegem/tests/__init__.py                           0      0   100%
 freegem/tests/conftest.py                           6      0   100%
 freegem/tests/test_adapters_and_extractors.py      39      1    97%   79
 freegem/tests/test_ai_scrape.py                   509      0   100%
-freegem/tests/test_ai_wall_corpus.py              162      4    98%   282-285
+freegem/tests/test_ai_wall_corpus.py              162      0   100%
 freegem/tests/test_article.py                      70      1    99%   163
 freegem/tests/test_audit_fixes.py                 344      2    99%   142, 610
 freegem/tests/test_browser_guard.py               208      6    97%   157, 171, 187, 355-356, 366
@@ -161,9 +146,6 @@ freegem/watch.py                                  298     20    93%   178-180, 2
 freegem/web_research.py                           646     38    94%   163, 165, 489, 497-508, 760-761, 763, 781, 827-829, 878, 881, 890, 896, 922, 927, 1026, 1029, 1033, 1035, 1039, 1262, 1264, 1390, 1392, 1409-1410
 freegem/web_scraper.py                            741     65    91%   259-260, 328, 330, 333, 410, 415-416, 425, 428-429, 564, 567, 614, 662, 666, 675, 685-686, 736, 738, 813-815, 822, 824, 836, 840, 879, 882, 888, 899, 908, 971, 996-998, 1002-1005, 1024-1026, 1035, 1138-1139, 1186-1188, 1196, 1252-1253, 1256-1257, 1262, 1283-1284, 1434, 1693-1694, 1782-1783, 1864-1865
 -----------------------------------------------------------------------------
-TOTAL                                           24658   1749    93%
-=========================== short test summary info ============================
-FAILED freegem/tests/test_ai_wall_corpus.py::AiCleanCorpusTests::test_two_hundred_boilerplate_pages_clean_to_the_article - AssertionError: 'The [1614 chars]dy, free of chrome. The cleaned article body, free of chrome.' != 'The [1614 chars]dy, free of chrome. The cleaned article body, free of chrome. '
-Diff is 5049 characters long. Set self.maxDiff to None to see it.
-1 failed, 1420 passed, 1 skipped, 61 subtests passed in 272.36s (0:04:32)
+TOTAL                                           24658   1745    93%
+1421 passed, 1 skipped, 61 subtests passed in 274.36s (0:04:34)
 ===== end =====
