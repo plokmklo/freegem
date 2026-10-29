@@ -56,7 +56,7 @@ def _walk_error(name: str) -> None:
 def _feature_module_names() -> list[str]:
     """Every module of the package, minus the test tree and __main__."""
     names: list[str] = []
-    for name, _ispkg in pkgutil.walk_packages(
+    for _finder, name, _ispkg in pkgutil.walk_packages(
         freegem.__path__, prefix="freegem.", onerror=_walk_error
     ):
         if name == "freegem.__main__" or name.startswith("freegem.tests"):
