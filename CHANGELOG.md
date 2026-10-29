@@ -1,5 +1,16 @@
 ## [Unreleased]
 
+### Added
+
+- **Reproducible URL-corpus benchmark** (`benchmarks/`): a frozen 23-URL
+  corpus across seven categories (reference, docs, news, spa, bot_walled,
+  static, dead) and `run_bench.py`, which measures per-category success
+  rate, extraction quality (chars), latency (p50/p95, baseline-corrected),
+  and the failure taxonomy through the shipped `freegem scrape` surface,
+  writing `report.json` and a markdown summary (#68). Live fetches stay
+  out of hermetic CI; `test_bench_corpus.py` pins the corpus shape and
+  the aggregation helpers instead.
+
 ### Fixed
 
 - **MCP `web_research` accepts `query` as an alias for `question`** (#70,
