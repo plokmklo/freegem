@@ -1,28 +1,6 @@
 # ruff check
-B023 Function definition does not bind loop variable `pool`
-   --> freegem/tests/test_grid_pool.py:118:17
-    |
-116 |             def racer(lease: GridLease = lease_a, barrier: threading.Barrier = barrier) -> None:
-117 |                 barrier.wait()
-118 |                 pool.release(lease)
-    |                 ^^^^
-119 |
-120 |             threads = [threading.Thread(target=racer) for _ in range(2)]
-    |
-
-B007 Loop control variable `name` not used within loop body
-   --> test_mcp_tools_10x.py:127:13
-    |
-126 |     for i in range(10):
-127 |         for name in ALL_TOOLS:
-    |             ^^^^
-128 |             # Shuffle order each round to test resilience
-129 |             pass
-    |
-help: Rename unused `name` to `_name`
-
-Found 2 errors.
-ruff_check_exit=1
+All checks passed!
+ruff_check_exit=0
 
 # ruff format --check
 152 files already formatted
@@ -56,18 +34,5 @@ mypy_exit=0
 .................................................................. [ 86%]
 ........................................................................ [ 90%]
 ........................................................................ [ 95%]
-......................................................F...........................                                               [100%]
-=================================== FAILURES ===================================
-_______________ VersionConsistencyTests.test_all_versions_match ________________
-freegem/tests/test_version_consistency.py:64: in test_all_versions_match
-    self.assertEqual(
-E   AssertionError: '2.12.0' != 'Unreleased'
-E   - 2.12.0
-E   + Unreleased
-E    : __init__.py (2.12.0) != CHANGELOG.md (Unreleased)
-=========================== short test summary info ============================
-FAILED freegem/tests/test_version_consistency.py::VersionConsistencyTests::test_all_versions_match - AssertionError: '2.12.0' != 'Unreleased'
-- 2.12.0
-+ Unreleased
- : __init__.py (2.12.0) != CHANGELOG.md (Unreleased)
-pytest_exit=1
+..................................................................................                                               [100%]
+pytest_exit=0
