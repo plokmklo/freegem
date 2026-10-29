@@ -1,0 +1,41 @@
+name: CI debug capture (py3.13)
+
+on:
+  push:
+    branches: [improvements]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ci-debug313-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+      - name: Capture pytest on 3.13
+        shell: bash
+        run: |
+          set +e
+          pytest --tb=short -q --cov=freegem --cov-report=term-missing > ci_debug_313.txt 2>&1
+          tail -n 60 ci_debug_313.txt
+          exit 0
+      - name: Commit output
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ci_debug_313.txt
+          git commit -m "chore: capture pytest 3.13 output [skip ci]" || echo "no changes"
+          git push
