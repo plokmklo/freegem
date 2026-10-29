@@ -98,7 +98,15 @@ class AdvertisedSurfaceTests(unittest.TestCase):
                 with self.subTest(module=name, member=member):
                     obj = getattr(module, member)  # fails loudly when dangling
                     if callable(obj):
-                        inspect.signature(obj)  # fails loudly when opaque
+                        try:
+                            inspect.signature(obj)  # fails loudly when opaque
+                        except ValueError:
+                            # CPython 3.13 refuses to introspect types that
+                            # only inherit a C-level __init__ (marker
+                            # exceptions like SSRFRefused): that is a CPython
+                            # property, not a broken re-export, so the sweep
+                            # only accepts it for exception types.
+                            self.assertTrue(issubclass(obj, BaseException))
 
 
 class ToolCatalogSweepTests(unittest.TestCase):
