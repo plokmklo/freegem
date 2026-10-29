@@ -1,1 +1,0 @@
-[2026-10-13 01:38:12] config loaded: C:\Users\hp/.config/freegem/config.json
