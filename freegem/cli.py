@@ -103,7 +103,19 @@ def _build_parser() -> argparse.ArgumentParser:
     ask.add_argument("prompt", nargs="+", help="the question")
     ask.add_argument("--search", action="store_true", help="ground in the web and cite sources")
 
-    scrape = sub.add_parser("scrape", help="fetch a web page as readable text", parents=[common])
+    scrape = sub.add_parser(
+        "scrape",
+        help="fetch a web page as readable text",
+        parents=[common],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "examples:\n"
+            "  freegem scrape https://example.com\n"
+            "  freegem scrape URL1 URL2 --format jsonl\n"
+            '  freegem scrape https://example.com --ask "what is this site?"\n'
+            "  freegem scrape ./notes.html --format markdown   (local file)"
+        ),
+    )
     scrape.add_argument(
         "url", nargs="+", help="the page(s) to fetch (http/https); more than one = batch"
     )
@@ -798,8 +810,10 @@ def _stream_answer(cfg: BridgeConfig, question: str) -> None:
     """Print a plain answer as it is produced, token-by-token when possible.
 
     Falls back to one non-streaming request when httpx is missing -- same
-    answer, just printed whole. Any stream failure AFTER bytes were printed
-    cannot be undone, so it surfaces as an error note instead of a rewrite.
+    answer, just printed whole. A stream failure AFTER bytes were printed
+    cannot unprint them, so the partial output stays, the interruption is
+    noted on stderr, and the request is re-issued buffered: the reader still
+    gets a complete reply (marked on stdout where the replay begins).
     """
     from .gemini import HAS_HTTPX, BridgeError, generate, generate_stream
     from .models import resolve_model
@@ -820,10 +834,17 @@ def _stream_answer(cfg: BridgeConfig, question: str) -> None:
             sys.stdout.flush()
             printed = True
     except BridgeError as exc:
-        if printed:
-            print(f"\n[stream interrupted: {exc}]", file=sys.stderr)
+        if not printed:
             raise
-        raise
+        # Partial bytes already reached stdout and cannot be recalled, so
+        # re-issue the request as one buffered reply: the user still gets a
+        # complete answer instead of half a reply. The marker line on stdout
+        # (where the partial output already is) shows where the replay starts;
+        # the interruption note itself goes to stderr.
+        print(f"\n[stream interrupted: {exc}]", file=sys.stderr)
+        print("\n[stream interrupted; complete reply follows]")
+        print(generate(cfg, question, int(mode_id), int(think_mode), None, extra))
+        return
     if not printed:
         raise BridgeError(
             "Gemini returned nothing. Likely a rate limit, a stale build tag, "
@@ -896,6 +917,20 @@ def cmd_scrape(cfg: BridgeConfig, args: argparse.Namespace) -> int:
     """
     from .web_research import ResearchCache
 
+    # Numeric flags are parsed as plain ints, so a bad value used to reach the
+    # pipeline as garbage rather than a usage error: --max-chars 0 printed an
+    # empty page, --max-chars -N silently chopped the TAIL of the text, and
+    # --chunks -5 emitted jsonl records with negative char offsets. argparse
+    # cannot express "positive int"; check it here, before any fetch.
+    if args.max_chars is not None and args.max_chars < 1:
+        print("error: --max-chars must be a positive integer", file=sys.stderr)
+        return 2
+    if args.chunks is not None and args.chunks < 1:
+        print("error: --chunks must be a positive integer", file=sys.stderr)
+        return 2
+    if args.chunk_overlap < 0:
+        print("error: --chunk-overlap must be 0 or greater", file=sys.stderr)
+        return 2
     if getattr(args, "guard", False):
         cfg = cfg.replace(guard=True)
     ai_extract = args.ai_extract
@@ -1476,7 +1511,10 @@ def _crawl_seeds(sources: list[str]) -> list[str]:
         if not os.path.isfile(source):
             print(f"crawl: seed source not found: {source}", file=sys.stderr)
             continue
-        with open(source, encoding="utf-8") as fh:
+        # utf-8-sig: Windows editors (Notepad, Excel exports) write a BOM;
+        # plain utf-8 would leave it glued to the first line, feeding a
+        # BOM-prefixed URL to the normalizer and silently losing that seed.
+        with open(source, encoding="utf-8-sig") as fh:
             for line in fh:
                 line = line.strip()
                 if not line or line.startswith("#"):

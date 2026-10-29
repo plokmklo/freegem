@@ -357,6 +357,20 @@ class FallbackLadderTests(unittest.TestCase):
         self.assertIn("word", result.text)
         self.assertFalse(result.truncated)
 
+    def test_ai_search_raw_exception_is_wrapped_for_the_ladder(self) -> None:
+        """run_tool -> _run raises ValueError/BridgeError/raw generation
+        errors; unwrapped, one would escape fallback_scrape's ScrapeError
+        handler and kill the whole ladder instead of recording the rung."""
+        from freegem.smart_fetch import _ai_read
+
+        with mock.patch("freegem.mcp_tools.run_tool", side_effect=RuntimeError("bridge broke")):
+            with self.assertRaises(ScrapeError) as caught:
+                _ai_read(BridgeConfig(guard=True, log_requests=False), "https://x.example/", 1000)
+        message = str(caught.exception)
+        self.assertIn("ai-search failed", message)
+        self.assertIn("RuntimeError", message)
+        self.assertIn("bridge broke", message)
+
     def test_progress_receives_ladder_steps(self) -> None:
         events: list[str] = []
         ok_page = ScrapeResult(url="u", title="T", text="content")
@@ -548,6 +562,54 @@ class WaybackSnapshotTests(unittest.TestCase):
             self._snapshot("https://elsewhere.example/mirror/news.example/a")
         self.assertIn("different page", str(caught.exception))
 
+    def test_port_is_deliberately_not_compared(self) -> None:
+        """(#23 docstring) The snapshot's netloc may carry ``:port`` while
+        ``urlsplit().hostname`` never does; matching must not reject a valid
+        snapshot over that asymmetry."""
+        from freegem.smart_fetch import _snapshot_matches
+
+        url = "https://news.example:8443/a"
+        self.assertTrue(
+            _snapshot_matches(
+                "https://web.archive.org/web/20240101000000/https://news.example:8443/a", url
+            )
+        )
+        # Wayback may also normalize the port away -- both shapes verify.
+        self.assertTrue(
+            _snapshot_matches(
+                "https://web.archive.org/web/20240101000000/https://news.example/a", url
+            )
+        )
+        # A DIFFERENT host with the same port is still a different page.
+        self.assertFalse(
+            _snapshot_matches(
+                "https://web.archive.org/web/20240101000000/https://OTHER.example:8443/a", url
+            )
+        )
+
+    def test_wayback_rung_result_points_at_the_original_url(self) -> None:
+        """The rung must restore the requested URL: an archived-copy win
+        answering with the web.archive.org snapshot URL would hand callers
+        the wrong ``url`` field (every other rung restores it)."""
+        from freegem.smart_fetch import _try_strategy
+
+        snapshot = "https://web.archive.org/web/20240101000000/https://news.example/a"
+        archived = ScrapeResult(url=snapshot, title="Arch", text="archived body")
+        with (
+            mock.patch("freegem.smart_fetch._wayback_snapshot", return_value=snapshot),
+            mock.patch("freegem.smart_fetch.scrape_page", return_value=archived),
+        ):
+            result = _try_strategy(
+                BridgeConfig(guard=True, log_requests=False),
+                "https://news.example/a",
+                "wayback",
+                1000,
+                True,
+            )
+        self.assertEqual(result.url, "https://news.example/a")
+        self.assertEqual(result.via, "wayback")
+        self.assertEqual(result.text, "archived body")
+
     def test_rejection_engages_the_ladder(self) -> None:
         """(#23) The mismatch refusal classifies as the site's failure, not
         ours, so the ladder records it and moves on to the next rung."""
@@ -708,6 +770,102 @@ class SmartIntegrationTests(unittest.TestCase):
             )
         self.assertIn("Mozilla/5.0", fetch.call_args.kwargs["headers"]["User-Agent"])
         self.assertEqual(result.text, "behind a UA wall")
+
+
+class RetryPhaseBudgetTests(unittest.TestCase):
+    """(#73/#25) The 429/5xx retry phase: a wall-clock budget that actually
+    decrements, ONE deadline shared with the ladder walk, and an honest
+    taxonomy note when the retries are exhausted."""
+
+    def setUp(self) -> None:
+        self.cfg = BridgeConfig(guard=True, log_requests=False)
+        clear_memory()
+
+    def tearDown(self) -> None:
+        clear_memory()
+
+    def test_retry_5xx_rechecks_the_remaining_budget_each_attempt(self) -> None:
+        """The budget is wall-clock: sleep + fetch of attempt 1 must shrink
+        what attempt 2 is allowed, or the "would exceed" guard is dead after
+        the first attempt (it only ever compared the original figure)."""
+        from freegem.smart_fetch import _retry_5xx
+
+        clock = [100.0, 100.0, 104.0]  # started, attempt 1, attempt 2
+
+        def monotonic() -> float:
+            return clock.pop(0) if len(clock) > 1 else clock[0]
+
+        time_stub = mock.MagicMock()
+        time_stub.monotonic.side_effect = monotonic
+        with (
+            mock.patch("freegem.smart_fetch.time", time_stub),
+            mock.patch("freegem.smart_fetch.random.random", return_value=0.5),
+            mock.patch(
+                "freegem.smart_fetch.scrape_page", side_effect=ScrapeError("HTTP 503")
+            ) as scrape,
+        ):
+            with self.assertRaises(ScrapeError) as caught:
+                _retry_5xx(
+                    self.cfg,
+                    "https://busy.example/",
+                    max_chars=100,
+                    ignore_robots=True,
+                    first_error="HTTP 503 fetching 'x'",
+                    budget=5.0,
+                )
+        # Attempt 1 (delay 2.0) fit; attempt 2 sees 5 - 4s elapsed = 1.0s
+        # left against a 4.0s delay and gives up BEFORE another fetch.
+        scrape.assert_called_once()
+        message = str(caught.exception)
+        self.assertIn("would exceed the ladder budget", message)
+        self.assertIn("1.00s left", message)
+
+    def test_retry_phase_shares_one_deadline_with_the_walk(self) -> None:
+        """The retry phase must not burn a full budget and then hand the walk
+        a fresh one: the walk's rungs see the deadline computed at entry, so
+        time spent retrying is subtracted from what they get. Exhausted
+        retries also land in the taxonomy as a ``5xx-retry:`` note."""
+        seen: dict[str, float | None] = {}
+
+        def try_strategy(
+            cfg: Any,
+            url: str,
+            strategy: str,
+            max_chars: int,
+            ignore_robots: bool,
+            budget: float | None = None,
+        ) -> object:
+            seen[strategy] = budget
+            raise ScrapeError("HTTP 403")
+
+        with (
+            # Real sleeps inside _retry_5xx (0.2+0.4+0.8s, jitter pinned to
+            # 1.0x) -- that wall time is exactly what must be subtracted from
+            # the walk's budget. Only the ladder's own pause is zeroed.
+            mock.patch("freegem.smart_fetch._PAUSE_SEC", 0.0),
+            mock.patch("freegem.smart_fetch._5XX_BACKOFF_BASE_SEC", 0.2),
+            mock.patch("freegem.smart_fetch.random.random", return_value=0.5),
+            mock.patch(
+                "freegem.smart_fetch.scrape_page", side_effect=ScrapeError("HTTP 503")
+            ),
+            mock.patch("freegem.smart_fetch._try_strategy", side_effect=try_strategy),
+        ):
+            with self.assertRaises(ScrapeError) as caught:
+                fallback_scrape(
+                    self.cfg,
+                    "https://busy.example/",
+                    max_chars=100,
+                    first_error="HTTP 503 fetching 'x'",
+                )
+        message = str(caught.exception)
+        self.assertIn("5xx-retry:", message, "the exhaustion note must reach the taxonomy")
+        first_budget = seen["browser-headers"]
+        self.assertIsNotNone(first_budget)
+        assert first_budget is not None  # narrow for mypy
+        # ~1.4s of retry sleep is spent before the walk starts; a fresh
+        # deadline would hand back ~60s, the shared one ~58.6s.
+        self.assertLess(first_budget, 59.0, "retry time must be charged to the walk")
+        self.assertGreater(first_budget, 50.0)
 
 
 if __name__ == "__main__":  # pragma: no cover

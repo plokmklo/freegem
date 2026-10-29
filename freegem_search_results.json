@@ -1,0 +1,82 @@
+[
+  {
+    "id": 11,
+    "category": "Recent News",
+    "status": "PASS",
+    "time": 8.84,
+    "chars": 2969,
+    "has_sources": true
+  },
+  {
+    "id": 12,
+    "category": "Recent News",
+    "status": "PASS",
+    "time": 7.38,
+    "chars": 1478,
+    "has_sources": true
+  },
+  {
+    "id": 13,
+    "category": "Recent News",
+    "status": "PASS",
+    "time": 6.79,
+    "chars": 2145,
+    "has_sources": true
+  },
+  {
+    "id": 14,
+    "category": "Recent News",
+    "status": "PASS",
+    "time": 7.35,
+    "chars": 2442,
+    "has_sources": true
+  },
+  {
+    "id": 15,
+    "category": "Recent News",
+    "status": "PASS",
+    "time": 7.56,
+    "chars": 3622,
+    "has_sources": true
+  },
+  {
+    "id": 16,
+    "category": "Finance",
+    "status": "PASS",
+    "time": 4.61,
+    "chars": 569,
+    "has_sources": true
+  },
+  {
+    "id": 17,
+    "category": "Finance",
+    "status": "PASS",
+    "time": 15.42,
+    "chars": 3519,
+    "has_sources": true
+  },
+  {
+    "id": 18,
+    "category": "Finance",
+    "status": "PASS",
+    "time": 8.09,
+    "chars": 380,
+    "has_sources": true
+  },
+  {
+    "id": 19,
+    "category": "Finance",
+    "status": "PASS",
+    "time": 11.65,
+    "chars": 2502,
+    "has_sources": true
+  },
+  {
+    "id": 20,
+    "category": "Finance",
+    "status": "PASS",
+    "time": 7.63,
+    "chars": 3057,
+    "has_sources": true
+  }
+]

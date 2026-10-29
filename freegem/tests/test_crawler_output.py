@@ -114,6 +114,39 @@ class WriterTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             make_writer(self.path, "parquet")
 
+    def test_csv_append_writes_header_for_missing_file(self) -> None:
+        """Resume onto a file that never existed must not produce a
+        headerless CSV."""
+        writer = make_writer(self.path, "csv", ["title"], append=True)
+        writer.write({"title": "t", "url": "https://e.com"})
+        writer.close()
+        with open(self.path, encoding="utf-8", newline="") as fh:
+            rows = list(csv.reader(fh))
+        self.assertEqual(rows[0][0], "title")
+        self.assertEqual(rows[1][0], "t")
+
+    def test_append_repairs_truncated_tail(self) -> None:
+        """A killed run can leave a partial last line; the resumed record
+        must land on its own line, not concatenate onto the fragment."""
+        with open(self.path, "w", encoding="utf-8") as fh:
+            fh.write('{"n": 1')  # no trailing newline: killed mid-write
+        writer = make_writer(self.path, "jsonl", append=True)
+        writer.write({"n": 2})
+        writer.close()
+        lines = self.read().strip().splitlines()
+        self.assertEqual(len(lines), 2)  # the fragment stays isolated
+        self.assertEqual(json.loads(lines[-1])["n"], 2)
+
+    def test_csv_append_repairs_truncated_tail(self) -> None:
+        with open(self.path, "w", encoding="utf-8") as fh:
+            fh.write("partial")  # no trailing newline
+        writer = make_writer(self.path, "csv", ["n"], append=True)
+        writer.write({"n": 2})
+        writer.close()
+        with open(self.path, encoding="utf-8", newline="") as fh:
+            rows = list(csv.reader(fh))
+        self.assertEqual(rows[-1][0], "2")
+
 
 class RedactJsonTests(unittest.TestCase):
     def test_nested_structures(self) -> None:
@@ -128,6 +161,21 @@ class RedactJsonTests(unittest.TestCase):
         self.assertIn("[REDACTED:", out["nested"]["secret"])
         self.assertIn("[REDACTED:", out["list"][1])
         self.assertEqual(out["num"], 5)
+
+    def test_redaction_reaches_nested_lists_and_tuples(self) -> None:
+        """Every record passes through redact_secrets -- at ANY nesting
+        depth, whichever container holds the secret."""
+        secret = "Bearer a1b2c3d4e5f6g7h8i9j0"
+        out = redact_secrets_json(
+            {
+                "deep": [[["x", secret]]],
+                "pair": ("ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4", 7),
+            }
+        )
+        self.assertIn("[REDACTED:", out["deep"][0][0][1])
+        self.assertNotIn("a1b2c3d4e5f6g7h8i9j0", str(out))
+        self.assertIn("[REDACTED:", out["pair"][0])
+        self.assertEqual(out["pair"][1], 7)
 
 
 if __name__ == "__main__":  # pragma: no cover

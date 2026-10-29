@@ -4,6 +4,7 @@ Every Google call is mocked. No test in this file touches the network, so the
 suite runs in CI on a public fork with no credentials.
 """
 
+import contextlib
 import io
 import json
 import unittest
@@ -720,6 +721,41 @@ class StreamTests(unittest.TestCase):
             chunks = list(gem.generate_stream(cfg, "hi", 1, 4))
         self.assertEqual(chunks, ["recovered"])
 
+    def test_sibling_cards_do_not_trip_the_rewrite_guard(self) -> None:
+        """Lines carry cards/chips next to the answer snapshot; only slot 0
+        is answer text (the same choice extract_response_text makes).
+        Processing siblings raised a spurious 'Gemini rewrote an
+        already-streamed block' abort on any card-bearing line."""
+        import freegem.gemini as gem
+
+        def snapshot(answer: str) -> str:
+            payload: list[Any] = [
+                None,
+                None,
+                None,
+                None,
+                [[None, [answer, "Related question chip?"]]],
+            ]
+            while len(json.dumps(payload)) < 80:
+                payload.append("z" * 60)
+            outer: list[Any] = [["wrb.fr", None, json.dumps(payload)]]
+            line = json.dumps(outer)
+            while len(line) < 260:
+                outer[0].append("z" * 40)
+                line = json.dumps(outer)
+            return line + "\n"
+
+        with (
+            mock.patch.object(gem, "HAS_HTTPX", True),
+            mock.patch.object(
+                gem,
+                "_httpx_client",
+                return_value=self._fake_client([snapshot("par"), snapshot("partial ")]),
+            ),
+        ):
+            chunks = list(gem.generate_stream(self.cfg, "hi", 1, 4))
+        self.assertEqual(chunks, ["par", "tial "])
+
 
 class BuildTagTests(unittest.TestCase):
     """The auto-refresh silently did nothing in the original; prove it works."""
@@ -849,34 +885,46 @@ class BackoffTests(unittest.TestCase):
     """Retries wait exponentially and honor the server's Retry-After."""
 
     def test_backoff_is_exponential(self) -> None:
-        self.assertEqual(_backoff_delay(2, 1), 2.0)
-        self.assertEqual(_backoff_delay(2, 2), 4.0)
-        self.assertEqual(_backoff_delay(2, 3), 8.0)
+        # With jitter the value is no longer exact, but it stays within
+        # ±50% of the exponential curve.
+        self.assertAlmostEqual(_backoff_delay(2, 1), 2.0, delta=1.0)
+        self.assertAlmostEqual(_backoff_delay(2, 2), 4.0, delta=2.0)
+        self.assertAlmostEqual(_backoff_delay(2, 3), 8.0, delta=4.0)
 
     def test_backoff_is_capped(self) -> None:
         # 2 * 2^19 is ~1M seconds; the cap must win long before that.
-        self.assertEqual(_backoff_delay(2, 20), _RETRY_BACKOFF_CAP_SEC)
-        self.assertLessEqual(_backoff_delay(2, 20), 120.0)
+        # At the cap, jitter is suppressed so the delay is exactly the cap.
+        self.assertEqual(_backoff_delay(2, 20, retry_after=None), _RETRY_BACKOFF_CAP_SEC)
+        self.assertLessEqual(_backoff_delay(2, 20, retry_after=None), 120.0)
 
     def test_retry_after_ninety_is_honored_not_truncated(self) -> None:
         # Regression: the old 30s cap truncated a server's explicit "come
         # back in 90s" to 30s, which just bought another 429. 90s must now
         # pass through intact -- that is the whole point of Retry-After.
+        # Retry-After overrides jitter.
         self.assertEqual(_backoff_delay(2, 1, retry_after=90.0), 90.0)
 
     def test_cap_sits_above_typical_retry_after_windows(self) -> None:
         self.assertEqual(_RETRY_BACKOFF_CAP_SEC, 120.0)
 
     def test_retry_after_overrides_when_longer(self) -> None:
+        # Retry-After overrides both the exponential curve and the jitter.
         self.assertEqual(_backoff_delay(2, 1, retry_after=7.0), 7.0)
+
+    def test_jitter_prevents_lockstep_retries(self) -> None:
+        """Concurrent workers must not all sleep the exact same duration."""
+        delays = [_backoff_delay(2, 1) for _ in range(100)]
+        self.assertGreater(
+            len({round(d, 3) for d in delays}), 1, "jitter must produce varied delays"
+        )
 
     def test_retry_after_also_capped(self) -> None:
         self.assertEqual(_backoff_delay(2, 1, retry_after=3600.0), _RETRY_BACKOFF_CAP_SEC)
 
     def test_retry_after_ignored_when_shorter(self) -> None:
         # attempt 2 with base 2 waits 4s; a 3s Retry-After asks for less, so
-        # the exponential delay stands.
-        self.assertEqual(_backoff_delay(2, 2, retry_after=3.0), 4.0)
+        # the exponential delay stands (±50% jitter applied to the curve).
+        self.assertAlmostEqual(_backoff_delay(2, 2, retry_after=3.0), 4.0, delta=2.0)
 
     def test_retry_after_delay_seconds_form(self) -> None:
         self.assertEqual(_retry_after_seconds({"Retry-After": "7"}), 7.0)
@@ -942,7 +990,13 @@ class BackoffTests(unittest.TestCase):
         ):
             with self.assertRaises(BridgeError):
                 generate(cfg, "hi", 1, 0)
-        self.assertEqual([c.args[0] for c in sleep.call_args_list], [2.0, 4.0])
+        # With jitter, sleep durations are non-deterministic; verify the
+        # retry loop called sleep twice and the values are in ballpark
+        # (exponential curve 2, 4 with ±50% jitter).
+        sleeps = [c.args[0] for c in sleep.call_args_list]
+        self.assertEqual(len(sleeps), 2, "two retries = two sleep calls")
+        self.assertAlmostEqual(sleeps[0], 2.0, delta=1.0)
+        self.assertAlmostEqual(sleeps[1], 4.0, delta=2.0)
 
     def test_generate_upstream_http_status_is_retried_not_fatal(self) -> None:
         """A transient 429 recovers on the next attempt instead of failing."""
@@ -1104,6 +1158,25 @@ class ProxyRedactionTests(unittest.TestCase):
         self.assertNotIn("user:", message)
         self.assertIn("proxy.example:8080", message)
 
+    def test_retry_log_redacts_proxy_credentials(self) -> None:
+        """The per-attempt retry log must redact like the final message:
+        transport errors embed the proxy URL (with credentials) verbatim."""
+        import urllib.error
+
+        cfg = self.cfg.replace(log_requests=True)
+        leak = f"Cannot connect to proxy {self.PROXY}: connection refused"
+        err = io.StringIO()
+        with (
+            mock.patch("freegem.gemini._post", side_effect=urllib.error.URLError(leak)),
+            contextlib.redirect_stderr(err),
+        ):
+            with self.assertRaises(BridgeError):
+                generate(cfg, "hi", 1, 0)
+        log_line = err.getvalue()
+        self.assertIn("retrying in", log_line)  # the retry log actually fired
+        self.assertNotIn("secret", log_line)
+        self.assertNotIn("user:", log_line)
+
 
 class BuildTagRecoveryTests(unittest.TestCase):
     """One session-authenticated build-tag re-fetch on BardErrorInfo (#38)."""
@@ -1214,6 +1287,27 @@ class BuildTagRecoveryTests(unittest.TestCase):
             with self.assertRaises(BridgeError):
                 list(generate_stream(cfg, "hi", 1, 0))
         fetch.assert_called_once()
+
+    def test_build_tag_fetch_failure_log_redacts_proxy(self) -> None:
+        """A proxied page fetch whose error embeds the proxy URL must not
+        leak the credentials into the (stderr) log line."""
+        cfg = BridgeConfig(
+            guard=True,
+            log_requests=True,
+            proxy="http://user:secret@proxy.example:8080",
+        )
+        leak = "Cannot connect to proxy http://user:secret@proxy.example:8080: refused"
+        opener = mock.MagicMock()
+        opener.open.side_effect = OSError(leak)
+        err = io.StringIO()
+        with (
+            mock.patch.object(self.gem.urllib.request, "build_opener", return_value=opener),
+            contextlib.redirect_stderr(err),
+        ):
+            self.assertIsNone(fetch_build_tag(cfg))
+        self.assertIn("build-tag fetch failed", err.getvalue())
+        self.assertNotIn("secret", err.getvalue())
+        self.assertNotIn("user:", err.getvalue())
 
 
 class RateLimitKindTests(unittest.TestCase):

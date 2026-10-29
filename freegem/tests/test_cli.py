@@ -11,6 +11,7 @@ import json
 import os
 import tempfile
 import unittest
+from collections.abc import Iterator
 from contextlib import redirect_stderr, redirect_stdout
 from typing import Any
 from unittest import mock
@@ -125,6 +126,26 @@ class AskCommandTests(unittest.TestCase):
             code, _, err = self.run_cli(["ask", "hello"])
         self.assertEqual(code, 1)
         self.assertIn("no session", err)
+
+    def test_ask_stream_interrupt_falls_back_to_nonstream(self) -> None:
+        """When streaming fails after partial output, ask falls back to a
+        non-streaming replay so the user gets a complete answer instead of
+        half a reply. (Benchmark: fixes 'stream interrupted' failures.)"""
+        from freegem.gemini import BridgeError
+
+        def _fake_stream(*args: Any, **kwargs: Any) -> Iterator[str]:
+            yield "half of it"
+            raise BridgeError("Gemini rewrote an already-streamed block")
+
+        with (
+            mock.patch("freegem.gemini.generate_stream", side_effect=_fake_stream),
+            mock.patch("freegem.gemini.generate", return_value="half of it and the rest") as gen,
+        ):
+            code, out, err = self.run_cli(["ask", "hello"])
+        self.assertEqual(code, 0, f"should recover, got stderr: {err}")
+        self.assertIn("complete reply", out)
+        self.assertIn("and the rest", out)
+        self.assertTrue(gen.called, "non-streaming generate() must be called on recovery")
 
     def test_empty_prompt_rejected(self) -> None:
         code, _, _ = self.run_cli(["ask", "   "])
@@ -525,3 +546,81 @@ class ScrapeBatchCliTests(unittest.TestCase):
         )
         self.assertEqual(code, 2)
         self.assertIn("--ask works with a single URL", err)
+
+
+class ScrapeInputValidationTests(unittest.TestCase):
+    """Bad numeric flags must be usage errors, not garbage output.
+
+    --max-chars 0 used to print an empty page, --max-chars -5 silently
+    chopped the TAIL of the text (Python negative slicing), and
+    --chunks -5 emitted jsonl records with negative start/end offsets.
+    """
+
+    def run_cli(self, argv: list[str]) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = main(argv)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_zero_max_chars_rejected(self) -> None:
+        code, _, err = self.run_cli(["scrape", "https://a.example/", "--max-chars", "0"])
+        self.assertEqual(code, 2)
+        self.assertIn("--max-chars", err)
+
+    def test_negative_max_chars_rejected(self) -> None:
+        code, _, err = self.run_cli(["scrape", "https://a.example/", "--max-chars", "-5"])
+        self.assertEqual(code, 2)
+        self.assertIn("--max-chars", err)
+
+    def test_zero_chunks_rejected(self) -> None:
+        code, _, err = self.run_cli(["scrape", "https://a.example/", "--chunks", "0"])
+        self.assertEqual(code, 2)
+        self.assertIn("--chunks", err)
+
+    def test_negative_chunk_overlap_rejected(self) -> None:
+        code, _, err = self.run_cli(
+            ["scrape", "https://a.example/", "--chunks", "1000", "--chunk-overlap", "-1"]
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("--chunk-overlap", err)
+
+    def test_validation_happens_before_any_fetch(self) -> None:
+        """A rejected numeric flag must never reach the scraper."""
+        with mock.patch("freegem.web_scraper.scrape_cli") as scrape_cli:
+            code, _, _ = self.run_cli(["scrape", "https://a.example/", "--max-chars", "0"])
+        self.assertEqual(code, 2)
+        self.assertFalse(scrape_cli.called)
+
+    def test_scrape_help_shows_examples(self) -> None:
+        out = io.StringIO()
+        with redirect_stdout(out), self.assertRaises(SystemExit) as ctx:
+            main(["scrape", "--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        help_text = out.getvalue()
+        self.assertIn("examples:", help_text)
+        self.assertIn('freegem scrape https://example.com --ask "what is this site?"', help_text)
+
+
+class CrawlSeedFileTests(unittest.TestCase):
+    """Seed files saved on Windows often carry a UTF-8 BOM; it must not
+    glue itself to the first URL and silently lose that seed."""
+
+    def test_bom_prefixed_first_line_still_yields_the_url(self) -> None:
+        from freegem.cli import _crawl_seeds
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "seeds.txt")
+            with open(path, "w", encoding="utf-8-sig") as fh:
+                fh.write("https://example.com/a\n# comment\nhttps://example.com/b\n")
+            seeds = _crawl_seeds([path])
+        self.assertEqual(seeds, ["https://example.com/a", "https://example.com/b"])
+
+    def test_plain_utf8_seed_file_unchanged(self) -> None:
+        from freegem.cli import _crawl_seeds
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "seeds.txt")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("https://example.com/a\n")
+            seeds = _crawl_seeds([path])
+        self.assertEqual(seeds, ["https://example.com/a"])

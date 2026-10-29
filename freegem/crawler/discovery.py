@@ -36,7 +36,7 @@ __all__ = [
 # deliberately skipped: half of them are per-page dynamic junk.
 _URL_BODY = r"""(?:https?://[^"'`\s]{1,300}|/[^"'`\s]{1,300})"""
 _FETCH_RE = re.compile(
-    r"""(?:fetch|axios(?:\.(?:get|post|put|delete|patch))?|\$\.(?:get|getJSON|ajax)|
+    r"""(?:\bfetch|\baxios(?:\.(?:get|post|put|delete|patch))?|\$\.(?:get|getJSON|ajax)|
         \bopen\s*\(\s*["'](?:GET|POST|PUT|DELETE|HEAD)["']\s*,)
     \s*\(\s*(?:event\.preventDefault\(\)\s*,\s*)?
     ["'`]("""
@@ -167,7 +167,7 @@ def _absolutize(raw: str, base_url: str) -> str:
         if not base_url:
             return ""
         parts = urllib.parse.urlsplit(base_url)
-        return f"{parts.scheme}:{raw}"
+        return f"{parts.scheme}:{raw.split('#', 1)[0]}"  # fragments dropped like http(s)
     if raw.startswith(("http://", "https://")):
         return raw.split("#", 1)[0]
     if raw.startswith("/"):

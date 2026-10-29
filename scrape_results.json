@@ -1,0 +1,331 @@
+{
+  "summary": {
+    "total_tests": 30,
+    "by_tool": {
+      "WebFetch": {
+        "pass": 0,
+        "js_shell": 0,
+        "fail": 10,
+        "avg_chars": 0,
+        "avg_latency": 1.0
+      },
+      "Firecrawl": {
+        "pass": 10,
+        "js_shell": 0,
+        "fail": 0,
+        "avg_chars": 43911,
+        "avg_latency": 3.1
+      },
+      "FreeGem": {
+        "pass": 8,
+        "js_shell": 1,
+        "fail": 1,
+        "avg_chars": 8666,
+        "avg_latency": 1.4
+      }
+    },
+    "notes": "Systemic: (1) WebFetch failed 10/10 with 'Unable to verify if domain is safe to fetch' - environment blocks claude.ai domain-safety verification, so the tool returned zero content for every URL. (2) Firecrawl passed 10/10 (HTTP 200, titles present, no JS-shell cases; react.dev and rust-lang.org returned server-rendered content); mostly cache hits; BBC result had an injected 'ERR_BLOCKED_BY_CLIENT' artifact line at top. (3) FreeGem: 8 pass, 1 short (example.com 156 chars), 1 hard fail (stackoverflow 403 bot-block); fastest ~1.4s avg; no JS rendering needed for the SSR pages tested; big pages truncated by --max-chars 20000. Latency for MCP tools (WebFetch/Firecrawl) is approximate from observed call duration; FreeGem measured wall-clock. Firecrawl content_chars marked exact where measured from persisted output, otherwise estimated from inline payload."
+  },
+  "results": [
+    {
+      "url": "https://example.com",
+      "tool": "WebFetch",
+      "status": "fail",
+      "content_chars": 0,
+      "latency_s": 1.0,
+      "latency_basis": "approx",
+      "title_present": "no",
+      "notes": "error: 'Unable to verify if domain is safe to fetch' - network/enterprise policy blocking claude.ai verification"
+    },
+    {
+      "url": "https://httpbin.org/html",
+      "tool": "WebFetch",
+      "status": "fail",
+      "content_chars": 0,
+      "latency_s": 1.0,
+      "latency_basis": "approx",
+      "title_present": "no",
+      "notes": "error: 'Unable to verify if domain is safe to fetch' - network/enterprise policy blocking claude.ai verification"
+    },
+    {
+      "url": "https://en.wikipedia.org/wiki/World_Wide_Web",
+      "tool": "WebFetch",
+      "status": "fail",
+      "content_chars": 0,
+      "latency_s": 1.0,
+      "latency_basis": "approx",
+      "title_present": "no",
+      "notes": "error: 'Unable to verify if domain is safe to fetch' - network/enterprise policy blocking claude.ai verification"
+    },
+    {
+      "url": "https://news.ycombinator.com",
+      "tool": "WebFetch",
+      "status": "fail",
+      "content_chars": 0,
+      "latency_s": 1.0,
+      "latency_basis": "approx",
+      "title_present": "no",
+      "notes": "error: 'Unable to verify if domain is safe to fetch' - network/enterprise policy blocking claude.ai verification"
+    },
+    {
+      "url": "https://docs.python.org/3/library/argparse.html",
+      "tool": "WebFetch",
+      "status": "fail",
+      "content_chars": 0,
+      "latency_s": 1.0,
+      "latency_basis": "approx",
+      "title_present": "no",
+      "notes": "error: 'Unable to verify if domain is safe to fetch' - network/enterprise policy blocking claude.ai verification"
+    },
+    {
+      "url": "https://www.gnu.org/licenses/gpl-3.0.en.html",
+      "tool": "WebFetch",
+      "status": "fail",
+      "content_chars": 0,
+      "latency_s": 1.0,
+      "latency_basis": "approx",
+      "title_present": "no",
+      "notes": "error: 'Unable to verify if domain is safe to fetch' - network/enterprise policy blocking claude.ai verification"
+    },
+    {
+      "url": "https://react.dev",
+      "tool": "WebFetch",
+      "status": "fail",
+      "content_chars": 0,
+      "latency_s": 1.0,
+      "latency_basis": "approx",
+      "title_present": "no",
+      "notes": "error: 'Unable to verify if domain is safe to fetch' - network/enterprise policy blocking claude.ai verification"
+    },
+    {
+      "url": "https://www.rust-lang.org/",
+      "tool": "WebFetch",
+      "status": "fail",
+      "content_chars": 0,
+      "latency_s": 1.0,
+      "latency_basis": "approx",
+      "title_present": "no",
+      "notes": "error: 'Unable to verify if domain is safe to fetch' - network/enterprise policy blocking claude.ai verification"
+    },
+    {
+      "url": "https://www.bbc.com/news",
+      "tool": "WebFetch",
+      "status": "fail",
+      "content_chars": 0,
+      "latency_s": 1.0,
+      "latency_basis": "approx",
+      "title_present": "no",
+      "notes": "error: 'Unable to verify if domain is safe to fetch' - network/enterprise policy blocking claude.ai verification"
+    },
+    {
+      "url": "https://stackoverflow.com/questions/7569904",
+      "tool": "WebFetch",
+      "status": "fail",
+      "content_chars": 0,
+      "latency_s": 1.0,
+      "latency_basis": "approx",
+      "title_present": "no",
+      "notes": "error: 'Unable to verify if domain is safe to fetch' - network/enterprise policy blocking claude.ai verification"
+    },
+    {
+      "url": "https://example.com",
+      "tool": "Firecrawl",
+      "status": "pass",
+      "content_chars": 946,
+      "latency_s": 2.0,
+      "latency_basis": "approx",
+      "title_present": "yes",
+      "notes": "HTTP 200, cache hit, title 'Example Domain' in metadata; chars measured exactly"
+    },
+    {
+      "url": "https://httpbin.org/html",
+      "tool": "Firecrawl",
+      "status": "pass",
+      "content_chars": 3600,
+      "latency_s": 2.0,
+      "latency_basis": "approx",
+      "title_present": "yes",
+      "notes": "HTTP 200, cache hit; markdown has '# Herman Melville - Moby-Dick' heading; chars approx from inline payload (FreeGem same source measured 3598); content_chars ESTIMATED from inline response"
+    },
+    {
+      "url": "https://en.wikipedia.org/wiki/World_Wide_Web",
+      "tool": "Firecrawl",
+      "status": "pass",
+      "content_chars": 199308,
+      "latency_s": 4.0,
+      "latency_basis": "approx",
+      "title_present": "yes",
+      "notes": "HTTP 200, cache hit, full wiki article; chars measured from persisted output file"
+    },
+    {
+      "url": "https://news.ycombinator.com",
+      "tool": "Firecrawl",
+      "status": "pass",
+      "content_chars": 10500,
+      "latency_s": 2.0,
+      "latency_basis": "approx",
+      "title_present": "yes",
+      "notes": "HTTP 200, cache hit, full front page with 30 stories; chars approx from inline payload; content_chars ESTIMATED from inline response"
+    },
+    {
+      "url": "https://docs.python.org/3/library/argparse.html",
+      "tool": "Firecrawl",
+      "status": "pass",
+      "content_chars": 122456,
+      "latency_s": 4.0,
+      "latency_basis": "approx",
+      "title_present": "yes",
+      "notes": "HTTP 200, cache hit, full argparse doc; chars measured from persisted output file"
+    },
+    {
+      "url": "https://www.gnu.org/licenses/gpl-3.0.en.html",
+      "tool": "Firecrawl",
+      "status": "pass",
+      "content_chars": 38000,
+      "latency_s": 3.0,
+      "latency_basis": "approx",
+      "title_present": "yes",
+      "notes": "HTTP 200, cache hit, full GPLv3 text + nav; chars approx from inline payload; content_chars ESTIMATED from inline response"
+    },
+    {
+      "url": "https://react.dev",
+      "tool": "Firecrawl",
+      "status": "pass",
+      "content_chars": 13000,
+      "latency_s": 3.0,
+      "latency_basis": "approx",
+      "title_present": "yes",
+      "notes": "HTTP 200, cache hit, full SSR marketing page (NOT a JS shell); chars approx from inline payload; content_chars ESTIMATED from inline response"
+    },
+    {
+      "url": "https://www.rust-lang.org/",
+      "tool": "Firecrawl",
+      "status": "pass",
+      "content_chars": 3300,
+      "latency_s": 2.0,
+      "latency_basis": "approx",
+      "title_present": "yes",
+      "notes": "HTTP 200, cache hit, homepage sections extracted; chars approx from inline payload; content_chars ESTIMATED from inline response"
+    },
+    {
+      "url": "https://www.bbc.com/news",
+      "tool": "Firecrawl",
+      "status": "pass",
+      "content_chars": 20000,
+      "latency_s": 4.0,
+      "latency_basis": "approx",
+      "title_present": "yes",
+      "notes": "HTTP 200, cache hit; NOTE: markdown starts with injected 'blocked by extension / ERR_BLOCKED_BY_CLIENT' artifact from scraper browser, then full BBC content; chars approx; content_chars ESTIMATED from inline response"
+    },
+    {
+      "url": "https://stackoverflow.com/questions/7569904",
+      "tool": "Firecrawl",
+      "status": "pass",
+      "content_chars": 28000,
+      "latency_s": 5.0,
+      "latency_basis": "approx",
+      "title_present": "yes",
+      "notes": "HTTP 200, cache miss, full question + 14 answers; chars approx from inline payload; content_chars ESTIMATED from inline response"
+    },
+    {
+      "url": "https://example.com",
+      "tool": "FreeGem",
+      "status": "js_shell",
+      "content_chars": 156,
+      "latency_s": 0.7,
+      "latency_basis": "measured",
+      "title_present": "yes",
+      "notes": "RC=0 but only English paragraph extracted (156 chars < 300); title 'Example Domain' present; NOT an app shell - just short extraction"
+    },
+    {
+      "url": "https://httpbin.org/html",
+      "tool": "FreeGem",
+      "status": "pass",
+      "content_chars": 3598,
+      "latency_s": 1.7,
+      "latency_basis": "measured",
+      "title_present": "yes",
+      "notes": "RC=0; header title '(none)' but body has recognizable 'Herman Melville - Moby-Dick' heading"
+    },
+    {
+      "url": "https://en.wikipedia.org/wiki/World_Wide_Web",
+      "tool": "FreeGem",
+      "status": "pass",
+      "content_chars": 20048,
+      "latency_s": 1.5,
+      "latency_basis": "measured",
+      "title_present": "yes",
+      "notes": "RC=0; truncated at --max-chars 20000; title 'World Wide Web'"
+    },
+    {
+      "url": "https://news.ycombinator.com",
+      "tool": "FreeGem",
+      "status": "pass",
+      "content_chars": 4071,
+      "latency_s": 1.6,
+      "latency_basis": "measured",
+      "title_present": "yes",
+      "notes": "RC=0; title 'Hacker News'; full front page list"
+    },
+    {
+      "url": "https://docs.python.org/3/library/argparse.html",
+      "tool": "FreeGem",
+      "status": "pass",
+      "content_chars": 20086,
+      "latency_s": 1.1,
+      "latency_basis": "measured",
+      "title_present": "yes",
+      "notes": "RC=0; truncated at 20k; title 'argparse - Parser for command-line options...'"
+    },
+    {
+      "url": "https://www.gnu.org/licenses/gpl-3.0.en.html",
+      "tool": "FreeGem",
+      "status": "pass",
+      "content_chars": 20190,
+      "latency_s": 1.6,
+      "latency_basis": "measured",
+      "title_present": "yes",
+      "notes": "RC=0; truncated at 20k; title 'The GNU General Public License v3.0'"
+    },
+    {
+      "url": "https://react.dev",
+      "tool": "FreeGem",
+      "status": "pass",
+      "content_chars": 7667,
+      "latency_s": 1.2,
+      "latency_basis": "measured",
+      "title_present": "yes",
+      "notes": "RC=0; title 'React'; SSR content extracted, not a JS shell"
+    },
+    {
+      "url": "https://www.rust-lang.org/",
+      "tool": "FreeGem",
+      "status": "pass",
+      "content_chars": 2851,
+      "latency_s": 2.6,
+      "latency_basis": "measured",
+      "title_present": "yes",
+      "notes": "RC=0; title 'Rust Programming Language'"
+    },
+    {
+      "url": "https://www.bbc.com/news",
+      "tool": "FreeGem",
+      "status": "pass",
+      "content_chars": 7920,
+      "latency_s": 1.4,
+      "latency_basis": "measured",
+      "title_present": "yes",
+      "notes": "RC=0; title 'News'; headlines extracted"
+    },
+    {
+      "url": "https://stackoverflow.com/questions/7569904",
+      "tool": "FreeGem",
+      "status": "fail",
+      "content_chars": 70,
+      "latency_s": 0.9,
+      "latency_basis": "measured",
+      "title_present": "no",
+      "notes": "RC=1; error: HTTP 403 fetching - Stack Overflow bot-blocked freegem"
+    }
+  ]
+}

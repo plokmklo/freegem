@@ -39,9 +39,21 @@ def _open(path: str, *, append: bool) -> _Sink:
     directory = os.path.dirname(os.path.abspath(path))
     os.makedirs(directory, exist_ok=True)
     if append:
-        return _Sink(path, open(path, "a", encoding="utf-8", newline=""), True)
+        handle = open(path, "a", encoding="utf-8", newline="")
+        # A killed run can leave a partial last line; resuming must not
+        # concatenate onto it (that corrupts the first resumed record).
+        if os.path.getsize(path) > 0 and not _endswith_newline(path):
+            handle.write("\n")
+        return _Sink(path, handle, True)
     tmp = path + ".tmp"
     return _Sink(path, open(tmp, "w", encoding="utf-8", newline=""), False)
+
+
+def _endswith_newline(path: str) -> bool:
+    """Whether an existing file ends on a clean record boundary."""
+    with open(path, "rb") as probe:
+        probe.seek(-1, os.SEEK_END)
+        return probe.read(1) == b"\n"
 
 
 def _flatten(value: Any) -> str:
@@ -91,10 +103,14 @@ class _JsonWriter:
 
 class _CsvWriter:
     def __init__(self, path: str, columns: list[str], *, append: bool) -> None:
+        # Append mode assumes an existing file with the header row; when the
+        # file is missing or empty (fresh resume target), write the header
+        # or every subsequent row lands in a headerless CSV.
+        write_header = not append or not (os.path.exists(path) and os.path.getsize(path) > 0)
         self._sink = _open(path, append=append)
         self._columns = columns
         self._writer = csv.writer(self._sink.handle, lineterminator="\n")
-        if not append:
+        if write_header:
             self._writer.writerow(columns)
 
     def write(self, item: dict[str, Any]) -> None:
@@ -112,24 +128,20 @@ class _CsvWriter:
 
 def redact_secrets_json(item: dict[str, Any]) -> dict[str, Any]:
     """Redact secret-shaped strings anywhere inside a result record."""
-    out: dict[str, Any] = {}
-    for key, value in item.items():
-        if isinstance(value, str):
-            out[key] = redact_secrets(value)
-        elif isinstance(value, list):
-            out[key] = [
-                redact_secrets(v)
-                if isinstance(v, str)
-                else redact_secrets_json(v)
-                if isinstance(v, dict)
-                else v
-                for v in value
-            ]
-        elif isinstance(value, dict):
-            out[key] = redact_secrets_json(value)
-        else:
-            out[key] = value
-    return out
+    return {key: _redact_value(value) for key, value in item.items()}
+
+
+def _redact_value(value: Any) -> Any:
+    """Recursively redact strings in dicts, lists, and tuples at any depth."""
+    if isinstance(value, str):
+        return redact_secrets(value)
+    if isinstance(value, dict):
+        return {k: _redact_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_value(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_value(v) for v in value)
+    return value
 
 
 def make_writer(

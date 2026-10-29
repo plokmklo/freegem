@@ -53,6 +53,10 @@ def _status_from_error(error: str | None) -> int | None:
 
 def _connect(db: sqlite3.Connection | str) -> sqlite3.Connection:
     if isinstance(db, sqlite3.Connection):
+        # build_receipts accesses rows by column name; a caller-supplied
+        # connection without a row factory would crash with tuple indices.
+        if db.row_factory is None:
+            db.row_factory = sqlite3.Row
         return db
     conn = sqlite3.connect(db)
     conn.row_factory = sqlite3.Row

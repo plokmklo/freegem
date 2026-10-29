@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import random
 import re
 import ssl
+import sys
 import threading
 import time
 import urllib.error
@@ -117,6 +119,18 @@ def _classify_empty_answer(body: str) -> str:
     return "rate_limit"
 
 
+class _StreamRewriteError(BridgeError):
+    """A Gemini streaming snapshot did not extend the previous one.
+
+    Gemini serves progressively longer snapshots rather than true deltas. When a
+    snapshot does not begin with what was already emitted (the model's output
+    was rewritten mid-stream), retrying the whole request is safe ONLY if no
+    meaningful output reached the client yet. If ``emitted`` is empty, this
+    behaves as a transient retry; if non-empty, the stream aborts to avoid
+    duplicating partial output.
+    """
+
+
 class _StaleBuildTagError(BridgeError):
     """The upstream answered with a ``BardErrorInfo`` marker.
 
@@ -162,7 +176,6 @@ def log(cfg: BridgeConfig, message: str) -> None:
     if not cfg.log_requests:
         return
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    import sys
 
     print(f"[{stamp}] {message}", file=sys.stderr, flush=True)
 
@@ -261,11 +274,25 @@ def _backoff_delay(base: float, attempt: int, retry_after: float | None = None) 
     honored when it asks for more than the exponential delay would -- the
     server knows its own capacity better than our curve does -- but is capped
     by the same ceiling.
+
+    A half-random jitter (``±50%``) is folded into the exponential delay so
+    that concurrent workers (e.g. the 3-worker benchmark) do not all retry on
+    the same tick and re-trigger a fresh 429. The jitter never pushes the
+    delay to zero or beyond the cap; Retry-After overrides it when present.
     """
     delay = min(base * (2 ** (attempt - 1)), _RETRY_BACKOFF_CAP_SEC)
     if retry_after is not None and retry_after > delay:
-        delay = min(retry_after, _RETRY_BACKOFF_CAP_SEC)
-    return delay
+        # Honor the server's own hint when it asks for more than our curve.
+        return min(retry_after, _RETRY_BACKOFF_CAP_SEC)
+    # ±50% jitter prevents synchronized retries across concurrent workers
+    # without ever zeroing the backoff or exceeding the cap. When the
+    # exponential curve is already pinned at the ceiling, jitter is skipped:
+    # there is nothing to spread and reducing a capped delay below the cap
+    # would only invite fresh retries at exactly the wrong moment.
+    if delay >= _RETRY_BACKOFF_CAP_SEC:
+        return _RETRY_BACKOFF_CAP_SEC
+    jitter = random.uniform(-0.5, 0.5) * delay
+    return min(max(delay + jitter, 0.001), _RETRY_BACKOFF_CAP_SEC)
 
 
 def account_prefix(cfg: BridgeConfig) -> str:
@@ -522,8 +549,10 @@ def clean_text(text: str, strip: bool = True) -> str:
 def _extract_texts_from_line(line: str) -> list[str]:
     """Yield candidate answer strings from one ``wrb.fr`` response line.
 
-    Gemini streams progressively longer snapshots of the same answer, so the
-    longest string in a line is the current best version.
+    Slot 0 of the line is the primary answer snapshot; the remaining strings
+    are siblings (cards, related-question chips) that callers must not treat
+    as answer text -- see ``extract_response_text`` and the streaming loop,
+    both of which read slot 0 only.
     """
     if '"wrb.fr"' not in line or len(line) < 200:
         return []
@@ -586,7 +615,17 @@ def _httpx_client(cfg: BridgeConfig) -> Any:
         client = _HTTPX_CLIENTS.get(key)
         if client is None and HAS_HTTPX:
             transport = httpx.HTTPTransport(proxy=cfg.proxy) if cfg.proxy else None
-            client = httpx.Client(transport=transport, timeout=cfg.request_timeout_sec, verify=True)
+            # Separate connect (fast-fail for unreachable hosts) from read
+            # (longer allowance for slow servers). A single blanket timeout
+            # either fails too fast on slow reads or hangs too long on dead
+            # hosts. Connect gets 10s; read gets the configured timeout.
+            timeout = httpx.Timeout(
+                connect=10.0,
+                read=cfg.request_timeout_sec,
+                write=10.0,
+                pool=cfg.request_timeout_sec,
+            )
+            client = httpx.Client(transport=transport, timeout=timeout, verify=True)
             _HTTPX_CLIENTS[key] = client
         return client
 
@@ -729,7 +768,11 @@ def generate(
                 note_gemini_retry()
                 log(
                     cfg,
-                    f"attempt {attempt}/{cfg.retry_attempts} failed: {exc}; "
+                    # Redact like the streaming branch: transport errors embed
+                    # the proxy URL (with credentials) verbatim, and a
+                    # retry-loop log line must not be the leak.
+                    f"attempt {attempt}/{cfg.retry_attempts} failed: "
+                    f"{_safe_error_text(cfg, exc)}; "
                     f"retrying in {delay:.1f}s",
                 )
                 time.sleep(delay)
@@ -809,27 +852,18 @@ def generate_stream(
                             )
                     while "\n" in buffer:
                         line, buffer = buffer.split("\n", 1)
-                        for text in _extract_texts_from_line(line):
-                            if text == emitted or emitted.startswith(text):
-                                continue
-                            if not text.startswith(emitted):
-                                raise BridgeError(
-                                    "Gemini rewrote an already-streamed block; "
-                                    "aborting to avoid corrupting the answer."
-                                )
-                            delta = clean_text(text[len(emitted) :], strip=False)
-                            emitted = text
-                            if delta:
-                                yield delta
-                # Flush the remainder: a final frame without a trailing newline
-                # would otherwise be dropped (the non-streaming path does not
-                # have this asymmetry).
-                if buffer:
-                    for text in _extract_texts_from_line(buffer):
+                        texts = _extract_texts_from_line(line)
+                        if not texts:
+                            continue
+                        # Slot 0 is the answer snapshot (the same choice
+                        # extract_response_text makes); siblings -- cards,
+                        # related-question chips -- are not deltas of the
+                        # answer and must never trip the rewrite guard.
+                        text = texts[0]
                         if text == emitted or emitted.startswith(text):
                             continue
                         if not text.startswith(emitted):
-                            raise BridgeError(
+                            raise _StreamRewriteError(
                                 "Gemini rewrote an already-streamed block; "
                                 "aborting to avoid corrupting the answer."
                             )
@@ -837,6 +871,23 @@ def generate_stream(
                         emitted = text
                         if delta:
                             yield delta
+                # Flush the remainder: a final frame without a trailing newline
+                # would otherwise be dropped (the non-streaming path does not
+                # have this asymmetry).
+                if buffer:
+                    texts = _extract_texts_from_line(buffer)
+                    if texts:
+                        text = texts[0]
+                        if not (text == emitted or emitted.startswith(text)):
+                            if not text.startswith(emitted):
+                                raise _StreamRewriteError(
+                                    "Gemini rewrote an already-streamed block; "
+                                    "aborting to avoid corrupting the answer."
+                                )
+                            delta = clean_text(text[len(emitted) :], strip=False)
+                            emitted = text
+                            if delta:
+                                yield delta
             if not emitted:
                 # Same failure shape as the non-streaming path: a 200 whose
                 # body never yields an answer is the rate limit or a login
@@ -864,6 +915,26 @@ def generate_stream(
             # Same one-time recovery as the non-streaming path.
             _refresh_build_tag_once(cfg)
             raise
+        except _StreamRewriteError as exc:
+            # Gemini rewrote a snapshot that was never emitted. If nothing
+            # reached the client (emitted is empty), retry is safe -- but
+            # in practice the rewrite check only fires after at least one
+            # chunk was extracted, so this usually falls through to the
+            # BridgeError path and the CLI's non-streaming fallback handles
+            # recovery. Keep the guard so a parser refactor cannot silently
+            # duplicate partial output.
+            if emitted:
+                raise
+            last_error = exc
+            if attempt < cfg.retry_attempts:
+                delay = _backoff_delay(cfg.retry_delay_sec, attempt, None)
+                note_gemini_retry()
+                log(
+                    cfg,
+                    f"stream attempt {attempt}/{cfg.retry_attempts} had a "
+                    f"mid-stream rewrite before any output; retrying in {delay:.1f}s",
+                )
+                time.sleep(delay)
         except BridgeError:
             raise
         except Exception as exc:
@@ -980,7 +1051,7 @@ def fetch_build_tag(cfg: BridgeConfig, session: bool = False) -> str | None:
             response = urllib.request.urlopen(request, context=_ssl_ctx(), timeout=15)
         html = response.read().decode("utf-8", errors="replace")
     except Exception as exc:
-        log(cfg, f"build-tag fetch failed: {exc}")
+        log(cfg, f"build-tag fetch failed: {_safe_error_text(cfg, exc)}")
         return None
 
     for pattern in (

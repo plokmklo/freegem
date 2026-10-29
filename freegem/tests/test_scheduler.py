@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 import time
 import unittest
 from typing import Any
@@ -137,6 +138,40 @@ class SchedulerLoopTests(unittest.TestCase):
             time.sleep(0.05)
         loop.stop()
         self.assertIn("error", (loop.last_summary or {}))
+
+
+class StopSemanticsTests(unittest.TestCase):
+    def test_stop_timeout_does_not_forget_live_thread(self) -> None:
+        """stop(join_timeout) that lapses mid-tick must keep the reference.
+
+        The old stop() cleared ``_thread`` unconditionally: a later start()
+        then reset the stop event and spawned a SECOND tick loop alongside
+        the still-running zombie -- double-ticking, unstoppable forever.
+        """
+        _state_db("/tmp/p3_sched_g.sqlite", {"https://g/1": 10_000.0})
+        entered = threading.Event()
+        release = threading.Event()
+
+        def slow_runner(_candidates: list[Any]) -> dict[str, bool]:
+            entered.set()
+            release.wait(5.0)
+            return {}
+
+        loop = SchedulerLoop("/tmp/p3_sched_g.sqlite", slow_runner, every_sec=0.2, policy=POLICY)
+        loop.start()
+        self.assertTrue(entered.wait(2.0), "runner must be inside the tick")
+        loop.stop(join_timeout=0.05)  # tick is wedged in the runner: join lapses
+        self.assertIsNotNone(loop._thread, "a live thread must stay referenced")
+        assert loop._thread is not None
+        self.assertTrue(loop._thread.is_alive())
+        with self.assertRaises(RuntimeError):
+            loop.start()  # refusing is the point: no second loop
+        release.set()
+        loop._thread.join(timeout=5.0)
+        # Once the old tick finished, a clean restart is allowed again.
+        loop.start()
+        loop.stop()
+        self.assertIsNone(loop._thread)
 
 
 if __name__ == "__main__":

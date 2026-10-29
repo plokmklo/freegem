@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
+
+import pytest
 
 from freegem.dedup import Deduper, Simhash, hamming, jaccard, shingles
 from freegem.search_sinks import JsonlSink, NullSink, SqliteFtsSink
@@ -102,6 +105,41 @@ def test_deduper_is_duplicate_does_not_mutate() -> None:
     assert d.stats()["kept"] == before
 
 
+def test_deduper_readd_same_id_refreshes_not_self_duplicate() -> None:
+    t = (
+        "an entirely unique paragraph about maritime insurance underwriting practices "
+        "covering hull policies cargo liability and the reinsurance treaties that spread "
+        "catastrophe risk across syndicates with quarterly renewal cycles and surveyed "
+        "vessels "
+    ) * 3
+    d = Deduper()
+    assert d.add("a", t) is True
+    # a recrawl re-adding the same id must not call it its own duplicate
+    assert d.add("a", t) is True
+    assert d.stats()["kept"] == 1
+    assert d.original_of("a") is None
+
+
+def test_deduper_readd_clears_stale_rejection() -> None:
+    dup = (
+        "the quarterly earnings report showed steady growth across all regions "
+        "with margins improving for the third consecutive quarter "
+    ) * 20
+    unique = (
+        "fresh powder snow reports from the alpine patrol stations weekly "
+        "describing avalanche control work above the tree line "
+    ) * 20
+    d = Deduper()
+    assert d.add("a", dup) is True
+    assert d.add("b", dup) is False
+    assert d.original_of("b") == "a"
+    # the same doc_id later arriving with unique text is kept again ...
+    assert d.add("b", unique) is True
+    # ... and no longer remembered as a rejected duplicate
+    assert d.original_of("b") is None
+    assert d.stats()["kept"] == 2
+
+
 # ─── search sinks ────────────────────────────────────────────────────────────
 
 
@@ -179,3 +217,38 @@ def test_null_sink_is_a_silent_noop() -> None:
     assert s.count() == 0
     assert s.search("anything") == []
     s.close()
+
+
+def test_jsonl_sink_reload_does_not_duplicate_hits(tmp_path: Path) -> None:
+    path = tmp_path / "dup.jsonl"
+    s1 = JsonlSink(path)
+    s1.upsert("a", url="u", title="t", text="bridge instructions one")
+    s1.upsert("a", url="u", title="t", text="bridge instructions two")
+    s1.close()
+    s2 = JsonlSink(path)  # disk log has both lines for doc "a"
+    assert s2.count() == 1
+    hits = s2.search("bridge")
+    assert [h["doc_id"] for h in hits] == ["a"]  # one hit, not one per log line
+
+
+def test_sqlite_sink_failed_upsert_rolls_back() -> None:
+    sink = SqliteFtsSink(":memory:")
+    sink.upsert("1", url="u1", title="keep", text="keep me")
+    with pytest.raises(sqlite3.Error):
+        # unbindable text fails mid-statement, after the replace deletes
+        sink.upsert("2", url="u2", title="bad", text=object())
+    assert sink.count() == 1  # no half-written doc left behind
+    assert sink.search("keep")[0]["doc_id"] == "1"
+    sink.close()
+
+
+def test_sqlite_sink_fallback_matches_any_term(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("freegem.search_sinks.fts5_available", lambda: False)
+    sink = SqliteFtsSink(":memory:")
+    assert sink._use_fts5 is False
+    sink.upsert("1", url="u1", title="Crawler manual", text="politeness delays")
+    sink.upsert("2", url="u2", title="Bridge guide", text="run the local bridge")
+    # same membership as the FTS5 path: ANY term in text OR title
+    hits = sink.search("bridge manual", limit=5)
+    assert {h["doc_id"] for h in hits} == {"1", "2"}
+    sink.close()

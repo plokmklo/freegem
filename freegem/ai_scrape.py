@@ -148,6 +148,21 @@ _EQUAL_GRADE_GAIN = 1.10
 #: The model's way of saying "there is no recoverable content here".
 _SENTINEL_NONE = "NONE"
 
+
+def _is_none_sentinel(text: str) -> bool:
+    """True when the answer's FIRST line is the sentinel, and only then.
+
+    The sentinel contract is "return exactly NONE and nothing else", so it
+    must match a whole first line (trailing punctuation tolerated). A prefix
+    check misclassified honest content opening with "Nonetheless, ..." or
+    "None of the ..." as a refusal and silently threw away a valid rescue.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return False
+    first_line = stripped.splitlines()[0].strip()
+    return first_line.rstrip(".!").upper() == _SENTINEL_NONE
+
 Complete = Callable[[str], str]
 SearchFn = Callable[[str], str]
 
@@ -321,6 +336,17 @@ def _context_block(text: str, notes: list[str]) -> str:
     return f"{_UNTRUSTED_OPEN}\n{text}\n{_UNTRUSTED_CLOSE}"
 
 
+def _safe_title(title: str) -> str:
+    """Defuse, flatten, and cap a page title before it enters a prompt.
+
+    The title is page-derived exactly like the body, but it sits OUTSIDE the
+    untrusted frame (it precedes the markers), so its literal markers must be
+    defused here and its length capped: a runaway or hostile ``<title>`` must
+    not rewrite the instruction zone or bloat the prompt.
+    """
+    return " ".join(_defuse_untrusted_markers(title or "").split())[:300]
+
+
 def _rescue_prompt(title: str, text: str, notes: list[str]) -> str:
     return (
         "You are the extraction-rescue rung of an automated web reader. The "
@@ -331,7 +357,7 @@ def _rescue_prompt(title: str, text: str, notes: list[str]) -> str:
         "anything the page does not say. If there is no recoverable page "
         f"content in the text below, return exactly {_SENTINEL_NONE} and "
         "nothing else.\n"
-        f"\nTitle: {title}\n\n{_context_block(text, notes)}"
+        f"\nTitle: {_safe_title(title)}\n\n{_context_block(text, notes)}"
     )
 
 
@@ -339,7 +365,8 @@ def _question_prompt(question: str, title: str, text: str, notes: list[str]) -> 
     return (
         "Answer the question below using ONLY the web page content provided. "
         "If the page does not contain the answer, say so plainly. Be concise.\n"
-        f"\nQuestion: {question}\n\nTitle: {title}\n\n{_context_block(text, notes)}"
+        f"\nQuestion: {question}\n\nTitle: {_safe_title(title)}\n\n"
+        f"{_context_block(text, notes)}"
     )
 
 
@@ -468,7 +495,7 @@ def rescue_text(
         rescued = complete(_rescue_prompt(title, text, notes)).strip()
     except Exception as exc:  # BridgeError, RateLimitError, ...
         return None, f"ai-extract failed: {type(exc).__name__}: {exc}"
-    if not rescued or rescued.upper().startswith(_SENTINEL_NONE):
+    if not rescued or _is_none_sentinel(rescued):
         return None, "ai-extract: model found no recoverable content"
     if _gate_rescue(text, quality, rescued):
         return rescued, f"ai-extract accepted ({len(rescued)} chars)"
@@ -523,7 +550,9 @@ def _wall_recovery(
         failure.text = answer[:max_chars]
         failure.truncated = len(answer) > max_chars
         failure.via = "ai-wall-rescue"
-        failure.quality = extraction_quality(answer)
+        # Grade what ships, not what the model returned: quality describes
+        # result.text (the truncated view), exactly like the scrape rung.
+        failure.quality = extraction_quality(failure.text)
         failure.ai_used = True
         notes.append(
             f"ai-wall-rescue accepted ({len(answer)} chars, AI-mediated with citations, "
@@ -634,29 +663,44 @@ def ai_scrape(
         except Exception as exc:  # BridgeError, RateLimitError, URLError, ...
             notes.append(f"ai-extract failed: {type(exc).__name__}: {exc}")
         else:
-            if not rescued or rescued.upper().startswith(_SENTINEL_NONE):
+            if not rescued or _is_none_sentinel(rescued):
                 notes.append("ai-extract: model found no recoverable content")
-            elif _gate_rescue(page.text, quality, rescued):
-                result.text = rescued
-                result.via = "ai-extract"
-                result.quality = extraction_quality(rescued)
-                result.ai_used = True
-                rescue_won = True
-                notes.append(f"ai-extract accepted ({len(rescued)} chars, grade {result.quality})")
             else:
-                notes.append(
-                    f"ai-extract rejected: model text did not improve on "
-                    f"the {quality} heuristic extraction"
-                )
+                # Cap BEFORE the gate: the gate must judge the text that
+                # will actually ship, and a model answer must never be
+                # unbounded (the heuristic and wall paths both cap).
+                shipped = rescued[:max_chars]
+                if _gate_rescue(page.text, quality, shipped):
+                    result.text = shipped
+                    result.via = "ai-extract"
+                    result.truncated = len(rescued) > max_chars
+                    result.quality = extraction_quality(shipped)
+                    result.ai_used = True
+                    rescue_won = True
+                    notes.append(
+                        f"ai-extract accepted ({len(shipped)} chars, grade {result.quality})"
+                    )
+                else:
+                    notes.append(
+                        f"ai-extract rejected: model text did not improve on "
+                        f"the {quality} heuristic extraction"
+                    )
     # ── rung 2: grounded question ─────────────────────────────────────────
     if query:
         try:
-            result.answer = complete(_question_prompt(query, result.title, result.text, notes))
-            result.ai_used = True
-            if not rescue_won:
-                notes.append("answered via ai (grounded on the heuristic text)")
+            answer = complete(_question_prompt(query, result.title, result.text, notes)).strip()
         except Exception as exc:
             notes.append(f"ai-answer failed: {type(exc).__name__}: {exc}")
+        else:
+            if answer:
+                result.answer = answer
+                result.ai_used = True
+                if not rescue_won:
+                    notes.append("answered via ai (grounded on the heuristic text)")
+            else:
+                # An empty completion is not an answer; say so instead of
+                # shipping "" with ai_used=True.
+                notes.append("ai-answer failed: model returned no text")
     # ── rung 3: schema-constrained fields ─────────────────────────────────
     if schema is not None:
         try:
@@ -668,6 +712,12 @@ def ai_scrape(
                 notes.append("fields extracted via ai")
         except ExtractionError as exc:
             notes.append(f"ai-schema failed: {exc}")
+        except Exception as exc:
+            # The provider seam can fail in transport (RateLimitError,
+            # BridgeError, ...): same honest note as the other rungs. This
+            # scrape otherwise never raises for model problems, and rung 3
+            # must not be the one exception that breaks that contract.
+            notes.append(f"ai-schema failed: {type(exc).__name__}: {exc}")
     # ── memory (advisory, never fatal) ────────────────────────────────────
     if memory is not None:
         with contextlib.suppress(OSError):

@@ -198,5 +198,56 @@ class FrontierTests(unittest.TestCase):
         self.assertEqual(rows[0], 1)
 
 
+    def test_error_count_recorded_without_prior_host_touch(self) -> None:
+        """mark_error/mark_done must create the host_state row themselves.
+
+        The counters used to be a plain UPDATE ... WHERE host=(subquery),
+        which matches zero rows when the host was never touched -- the
+        failure silently vanished from stats().top_hosts.
+        """
+        frontier = Frontier(self.path)
+        self.addCleanup(frontier.close)
+        frontier.push("https://stats.example/err", host="stats.example")
+        (item,) = frontier.claim(1)
+        self.assertFalse(frontier.mark_error(item.url, "boom", retry=False))
+        with frontier._lock:
+            row = frontier._db.execute(
+                "SELECT err_count FROM host_state WHERE host=?", ("stats.example",)
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["err_count"], 1)
+        self.assertEqual(frontier.stats().top_hosts, [("stats.example", 1)])
+
+    def test_ok_count_recorded_without_prior_host_touch(self) -> None:
+        frontier = Frontier(self.path)
+        self.addCleanup(frontier.close)
+        frontier.push("https://stats.example/ok", host="stats.example")
+        (item,) = frontier.claim(1)
+        frontier.mark_done(item.url, http_status=200)
+        with frontier._lock:
+            row = frontier._db.execute(
+                "SELECT ok_count FROM host_state WHERE host=?", ("stats.example",)
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["ok_count"], 1)
+
+    def test_host_counters_accumulate_across_fetches(self) -> None:
+        frontier = Frontier(self.path)
+        self.addCleanup(frontier.close)
+        frontier.push("https://h.example/a", host="h.example")
+        frontier.push("https://h.example/b", host="h.example")
+        for item in frontier.claim(2):
+            frontier.mark_done(item.url, http_status=200)
+        frontier.push("https://h.example/c", host="h.example")
+        (item,) = frontier.claim(1)
+        frontier.mark_error(item.url, "HTTP 500", retry=False)
+        with frontier._lock:
+            row = frontier._db.execute(
+                "SELECT ok_count, err_count FROM host_state WHERE host=?", ("h.example",)
+            ).fetchone()
+        self.assertEqual((row["ok_count"], row["err_count"]), (2, 1))
+        self.assertEqual(frontier.stats().top_hosts, [("h.example", 1)])
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

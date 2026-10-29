@@ -441,5 +441,56 @@ class RetentionArtifactPurgeTests(unittest.TestCase):
                 store2.close()
 
 
+class PlaywrightJobParamTests(unittest.TestCase):
+    """The playwright branch must tolerate runner-managed param keys.
+
+    JobRunner reads ``params["timeout_sec"]`` and ``params["max_retries"]``
+    as its own per-job controls (documented on JobRunner), and MCP/REST
+    callers pass ``params`` verbatim -- but ``PlaywrightOptions(**job.params)``
+    used to TypeError on those keys, failing the job after pointless retries.
+    The selenium branch already filters; playwright must too.
+    """
+
+    def test_runner_managed_keys_do_not_crash_dispatch(self) -> None:
+        from types import SimpleNamespace
+
+        from freegem.config import BridgeConfig
+        from freegem.jobs import GLOBAL_JOB_MANAGER, execute_job
+
+        job = GLOBAL_JOB_MANAGER.create_job(
+            "playwright",
+            {
+                "url": "https://example.com/",
+                "timeout_sec": 30,  # runner-managed per-job timeout
+                "max_retries": 1,  # runner-managed retry budget
+                "wait_selector": "body",
+            },
+        )
+        self.addCleanup(lambda: GLOBAL_JOB_MANAGER.jobs.pop(job.id, None))
+        fetched = SimpleNamespace(
+            ok=True,
+            url="https://example.com/",
+            final_url="https://example.com/",
+            title="T",
+            text="body",
+            status=200,
+            error=None,
+            screenshot_path=None,
+            pdf_path=None,
+            trace_path=None,
+        )
+        with mock.patch(
+            "freegem.playwright_fetcher.fetch_with_playwright", return_value=fetched
+        ) as fetch:
+            execute_job(job, BridgeConfig(guard=True))
+        opts = fetch.call_args[0][0]
+        self.assertEqual(opts.url, "https://example.com/")
+        self.assertEqual(opts.wait_selector, "body")
+        current = GLOBAL_JOB_MANAGER.get_job(job.id)
+        assert current is not None
+        self.assertEqual(current.status, "completed")
+        self.assertIsNone(current.error)
+
+
 if __name__ == "__main__":
     unittest.main()

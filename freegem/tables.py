@@ -82,11 +82,12 @@ class TableData:
         return "\n".join(lines)
 
     def to_csv(self) -> str:
-        """RFC 4180 CSV (header row included when present)."""
+        """RFC 4180 CSV (header row included when present, padded to the
+        frame width so every line has the same field count)."""
         buf = io.StringIO()
         writer = csv.writer(buf, lineterminator="\n")
         if self.header:
-            writer.writerow(self.header)
+            writer.writerow(_pad_row(self.header, self.ncols))
         for row in self.rows:
             writer.writerow(_pad_row(row, self.ncols))
         return buf.getvalue()
@@ -174,8 +175,11 @@ def extract_tables(root: Any) -> list[TableData]:
         if (n.tag or "").lower() == "table":
             rows, header, caption, spans = _split_rows(n)
             tables.append(TableData(header=header, rows=rows, caption=caption, spanned_cells=spans))
-            # A table nested inside another table is its own TableData;
-            # do not also walk it here (its cells were already flattened).
+            # A table nested inside another table is its own TableData too;
+            # its cells were already flattened into this table's cells above,
+            # so keep descending only to find it.
+            for child in n.children:
+                walk(child)
             return
         for child in n.children:
             walk(child)

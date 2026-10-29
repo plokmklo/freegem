@@ -189,7 +189,9 @@ class JobsRestHttpTests(unittest.TestCase):
         self.server.shutdown()
         reset_job_runner_for_tests()
 
-    def _req(self, method: str, path: str, body: Any = None) -> tuple[int, Any]:
+    def _req(
+        self, method: str, path: str, body: Any = None, headers: dict[str, str] | None = None
+    ) -> tuple[int, Any]:
         import http.client
         import json
 
@@ -202,6 +204,7 @@ class JobsRestHttpTests(unittest.TestCase):
                 headers={
                     "Content-Type": "application/json",
                     "Authorization": "Bearer jobs-rest-key",
+                    **(headers or {}),
                 },
             )
             resp = conn.getresponse()
@@ -263,3 +266,145 @@ class JobsRestHttpTests(unittest.TestCase):
             resp.read()
         finally:
             conn.close()
+
+    # -- auth/header parsing edge cases -------------------------------------
+
+    def test_bearer_scheme_is_case_insensitive(self) -> None:
+        """RFC 6750: the scheme is case-insensitive; lowercase must not 401."""
+        status, _ = self._req(
+            "POST",
+            "/v1/jobs",
+            {"type": "no-such-type", "params": {}},
+            headers={"Authorization": "bearer jobs-rest-key"},
+        )
+        self.assertEqual(status, 202)
+
+    def test_unauthenticated_get_401_carries_request_id(self) -> None:
+        """GET never set _request_id, so 401 audits and responses had none."""
+        import http.client
+
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=15)
+        try:
+            conn.request("GET", "/v1/jobs", headers={"Authorization": "Bearer wrong"})
+            resp = conn.getresponse()
+            resp.read()
+            self.assertEqual(resp.status, 401)
+            self.assertTrue(resp.headers.get("X-Request-Id"))
+        finally:
+            conn.close()
+
+    # -- request validation on POST /v1/jobs --------------------------------
+
+    def test_post_jobs_non_object_body_is_400(self) -> None:
+        """A JSON array body used to 500 with an AttributeError message."""
+        status, payload = self._req("POST", "/v1/jobs", [1, 2, 3])
+        self.assertEqual(status, 400)
+        self.assertIn("error", payload)
+
+    def test_post_jobs_missing_type_is_400(self) -> None:
+        status, _ = self._req("POST", "/v1/jobs", {})
+        self.assertEqual(status, 400)
+
+    def test_post_jobs_non_string_type_is_400(self) -> None:
+        status, _ = self._req("POST", "/v1/jobs", {"type": 123, "params": {}})
+        self.assertEqual(status, 400)
+
+    def test_post_jobs_params_must_be_object(self) -> None:
+        """A list params used to return 202, then crash a worker thread."""
+        status, payload = self._req("POST", "/v1/jobs", {"type": "t", "params": [1, 2]})
+        self.assertEqual(status, 400)
+        self.assertIn("params", str(payload))
+
+    # -- body framing on POST /v1/jobs (raw sockets; http.client cannot
+    #    declare a Content-Length that disagrees with what it sends) --------
+
+    def _raw_request(self, request: bytes, timeout: float = 5.0) -> tuple[bytes, bytes]:
+        """Send a hand-built request; return (head, body) of the response."""
+        import socket
+
+        sock = socket.create_connection(("127.0.0.1", self.port), timeout=timeout)
+        try:
+            sock.sendall(request)
+            response = b""
+            while b"\r\n\r\n" not in response:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                response += chunk
+            head, _, rest = response.partition(b"\r\n\r\n")
+            marker = b"Content-Length:"
+            if marker in head:
+                length = int(
+                    head.lower().split(marker.lower(), 1)[1].split(b"\r\n", 1)[0].strip()
+                )
+                while len(rest) < length:
+                    chunk = sock.recv(65536)
+                    if not chunk:
+                        break
+                    rest += chunk
+            return head, rest
+        finally:
+            sock.close()
+
+    def test_post_jobs_oversized_declared_length_is_413(self) -> None:
+        """The chat face 413'd; the jobs face fell into the generic 500.
+
+        The oversized body also stays unread, so the response must close the
+        connection or the leftover bytes desync the keep-alive stream (#27).
+        """
+        head, _ = self._raw_request(
+            b"POST /v1/jobs HTTP/1.1\r\n"
+            b"Host: localhost\r\n"
+            b"Authorization: Bearer jobs-rest-key\r\n"
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: 99999999999\r\n\r\n"
+            b"{}"
+        )
+        self.assertTrue(head.startswith(b"HTTP/1.1 413"), head[:80])
+        self.assertIn(b"connection: close", head.lower())
+
+    def test_post_jobs_invalid_content_length_is_400(self) -> None:
+        head, _ = self._raw_request(
+            b"POST /v1/jobs HTTP/1.1\r\n"
+            b"Host: localhost\r\n"
+            b"Authorization: Bearer jobs-rest-key\r\n"
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: not-a-number\r\n\r\n"
+            b"{}"
+        )
+        self.assertTrue(head.startswith(b"HTTP/1.1 400"), head[:80])
+        self.assertIn(b"connection: close", head.lower())
+
+    # -- routing ------------------------------------------------------------
+
+    def test_delete_requires_v1_jobs_prefix(self) -> None:
+        """DELETE /anything/jobs/{id} used to cancel a real job (200)."""
+        job = GLOBAL_JOB_MANAGER.create_job("scrape", {})
+        status, _ = self._req("DELETE", f"/anything/jobs/{job.id}")
+        self.assertEqual(status, 400)
+        self.assertEqual(GLOBAL_JOB_MANAGER.get_job(job.id).status, "queued")
+
+    def test_delete_still_works_on_canonical_path(self) -> None:
+        """Backward compatibility: /v1/jobs/{id} keeps cancelling."""
+        status, _ = self._req("DELETE", "/v1/jobs/job-does-not-exist")
+        self.assertEqual(status, 404)
+
+    def test_get_jobs_unknown_suffix_is_404(self) -> None:
+        """The suffix branch used to fall through and return the job (200)."""
+        status, created = self._req("POST", "/v1/jobs", {"type": "no-such-type", "params": {}})
+        self.assertEqual(status, 202)
+        status, _ = self._req("GET", f"/v1/jobs/{created['id']}/bogus")
+        self.assertEqual(status, 404)
+
+    def test_artifact_read_failure_does_not_leak_filesystem_paths(self) -> None:
+        """A vanished artifact file 500'd with the OS error and full path."""
+        import os
+
+        job = GLOBAL_JOB_MANAGER.create_job("scrape", {})
+        art = GLOBAL_JOB_MANAGER.save_artifact(job.id, "x.txt", "text/plain", b"data")
+        os.remove(art.file_path)
+        with patch("freegem.server.os.path.exists", return_value=True):
+            status, raw = self._req("GET", f"/v1/artifacts/{art.id}")
+        self.assertEqual(status, 500)
+        self.assertNotIn(art.file_path, str(raw))
+        self.assertIn("failed to read artifact", str(raw))

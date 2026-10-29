@@ -100,25 +100,37 @@ class SqliteDocumentStore:
     def upsert(self, doc: dict[str, Any]) -> str:
         doc_id = doc.get("doc_id") or hashlib.sha256(doc["url"].encode("utf-8")).hexdigest()[:16]
         with self._lock:
-            self._conn.execute(
-                "INSERT INTO documents(doc_id, url, title, text, metadata, updated_at)"
-                " VALUES(?,?,?,?,?,COALESCE((SELECT updated_at FROM documents WHERE doc_id = ?), ?))"
-                " ON CONFLICT(doc_id) DO UPDATE SET url=excluded.url, title=excluded.title,"
-                " text=excluded.text, metadata=excluded.metadata",
-                (
-                    doc_id,
-                    doc["url"],
-                    doc.get("title", ""),
-                    doc.get("text", ""),
-                    json.dumps(doc.get("metadata") or {}, ensure_ascii=False),
-                    doc_id,
-                    _now(),
-                ),
-            )
-            self._conn.execute(
-                "UPDATE documents SET updated_at = ? WHERE doc_id = ?", (_now(), doc_id)
-            )
-            self._conn.commit()
+            try:
+                # Upsert-by-url: the same url under a different doc_id would
+                # trip UNIQUE(url) inside ON CONFLICT(doc_id) -- replace it.
+                self._conn.execute(
+                    "DELETE FROM documents WHERE url = ? AND doc_id != ?",
+                    (doc["url"], doc_id),
+                )
+                self._conn.execute(
+                    "INSERT INTO documents(doc_id, url, title, text, metadata, updated_at)"
+                    " VALUES(?,?,?,?,?,COALESCE((SELECT updated_at FROM documents WHERE doc_id = ?), ?))"
+                    " ON CONFLICT(doc_id) DO UPDATE SET url=excluded.url, title=excluded.title,"
+                    " text=excluded.text, metadata=excluded.metadata",
+                    (
+                        doc_id,
+                        doc["url"],
+                        doc.get("title", ""),
+                        doc.get("text", ""),
+                        json.dumps(doc.get("metadata") or {}, ensure_ascii=False),
+                        doc_id,
+                        _now(),
+                    ),
+                )
+                self._conn.execute(
+                    "UPDATE documents SET updated_at = ? WHERE doc_id = ?", (_now(), doc_id)
+                )
+                self._conn.commit()
+            except Exception:
+                # a failed upsert must not leave the guard DELETE (or a
+                # half-applied insert) behind to be committed by a later call
+                self._conn.rollback()
+                raise
         return doc_id
 
     def get(self, doc_id: str) -> dict[str, Any] | None:
@@ -137,12 +149,18 @@ class SqliteDocumentStore:
         self, *, metadata: dict[str, Any] | None = None, limit: int = 50
     ) -> list[dict[str, Any]]:
         """Metadata containment query: every key/value must appear in the doc's
-        metadata. Client-side filtering over an indexed scan -- honest about
-        scale, and identical semantics to the Postgres JSONB @> version."""
+        metadata. The metadata form scans the whole table client-side (bounded
+        by the crawl budget, and matching every row the way Postgres JSONB
+        @> does); the unfiltered form is a newest-first LIMIT scan."""
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT * FROM documents ORDER BY updated_at DESC LIMIT ?", (limit * 4,)
-            ).fetchall()
+            if metadata:
+                rows = self._conn.execute(
+                    "SELECT * FROM documents ORDER BY updated_at DESC"
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT * FROM documents ORDER BY updated_at DESC LIMIT ?", (limit,)
+                ).fetchall()
         docs = [self._row_to_doc(r) for r in rows]
         if metadata:
             docs = [d for d in docs if all(d["metadata"].get(k) == v for k, v in metadata.items())]
@@ -233,24 +251,35 @@ class PostgresDocumentStore:
     def upsert(self, doc: dict[str, Any]) -> str:
         doc_id = doc.get("doc_id") or hashlib.sha256(doc["url"].encode("utf-8")).hexdigest()[:16]
         with self._conn.cursor() as cur:
-            cur.execute(
-                self._q(
-                    "INSERT INTO __TABLE__(doc_id, url, title, text, metadata, updated_at)"
-                    " VALUES(%s, %s, %s, %s, %s, %s)"
-                    " ON CONFLICT(doc_id) DO UPDATE SET url = EXCLUDED.url,"
-                    " title = EXCLUDED.title, text = EXCLUDED.text,"
-                    " metadata = EXCLUDED.metadata, updated_at = EXCLUDED.updated_at"
-                ),
-                (
-                    doc_id,
-                    doc["url"],
-                    doc.get("title", ""),
-                    doc.get("text", ""),
-                    json.dumps(doc.get("metadata") or {}),
-                    _now(),
-                ),
-            )
-            self._conn.commit()
+            try:
+                # Upsert-by-url: same url under a different doc_id would trip
+                # UNIQUE(url); ON CONFLICT can only target one constraint.
+                cur.execute(
+                    self._q("DELETE FROM __TABLE__ WHERE url = %s AND doc_id <> %s"),
+                    (doc["url"], doc_id),
+                )
+                cur.execute(
+                    self._q(
+                        "INSERT INTO __TABLE__(doc_id, url, title, text, metadata, updated_at)"
+                        " VALUES(%s, %s, %s, %s, %s::jsonb, %s)"
+                        " ON CONFLICT(doc_id) DO UPDATE SET url = EXCLUDED.url,"
+                        " title = EXCLUDED.title, text = EXCLUDED.text,"
+                        " metadata = EXCLUDED.metadata, updated_at = EXCLUDED.updated_at"
+                    ),
+                    (
+                        doc_id,
+                        doc["url"],
+                        doc.get("title", ""),
+                        doc.get("text", ""),
+                        json.dumps(doc.get("metadata") or {}),
+                        _now(),
+                    ),
+                )
+                self._conn.commit()
+            except Exception:
+                # do not leave the guard DELETE pending in the transaction
+                self._conn.rollback()
+                raise
         return doc_id
 
     def get(self, doc_id: str) -> dict[str, Any] | None:
@@ -431,7 +460,7 @@ class S3BlobStore:
         digest = hashlib.sha256(data).hexdigest()
         full = self._key(digest) + suffix
         self._client.put_object(Bucket=self.bucket, Key=full, Body=data)
-        return digest
+        return digest + suffix  # the key get()/exists()/delete() resolve
 
     def get(self, key: str) -> bytes:
         resp = self._client.get_object(Bucket=self.bucket, Key=self._key(key))

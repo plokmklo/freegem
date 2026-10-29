@@ -235,6 +235,10 @@ def fetch_with_selenium(opts: SeleniumOptions) -> SeleniumResult:
                 elapsed_ms=_elapsed(),
             )
 
+        # Captures are BEST-EFFORT: the page is already fetched, so a
+        # screenshot/CDP-PDF failure must not discard the content (nor leak
+        # the placeholder temp file just created). PDF is chromium-only --
+        # Firefox's driver raises SeleniumError here by design.
         screenshot_path: str | None = None
         pdf_path: str | None = None
         if opts.capture_screenshot:
@@ -242,16 +246,28 @@ def fetch_with_selenium(opts: SeleniumOptions) -> SeleniumResult:
             if not screenshot_path:
                 fd, screenshot_path = tempfile.mkstemp(prefix="freegem-ss-", suffix=".png")
                 os.close(fd)
-            driver.save_screenshot(screenshot_path)
+            try:
+                driver.save_screenshot(screenshot_path)
+            except Exception:
+                if screenshot_path != opts.screenshot_path:
+                    with contextlib.suppress(OSError):
+                        os.unlink(screenshot_path)
+                screenshot_path = None
 
         if opts.capture_pdf:
             pdf_path = opts.pdf_path
             if not pdf_path:
                 fd, pdf_path = tempfile.mkstemp(prefix="freegem-pdf-", suffix=".pdf")
                 os.close(fd)
-            result = driver.execute_cdp_cmd("Page.printToPDF", {"printBackground": False})
-            with open(pdf_path, "wb") as fh:
-                fh.write(base64.b64decode(result["data"]))
+            try:
+                result = driver.execute_cdp_cmd("Page.printToPDF", {"printBackground": False})
+                with open(pdf_path, "wb") as fh:
+                    fh.write(base64.b64decode(result["data"]))
+            except Exception:
+                if pdf_path != opts.pdf_path:
+                    with contextlib.suppress(OSError):
+                        os.unlink(pdf_path)
+                pdf_path = None
 
         return SeleniumResult(
             url=opts.url,

@@ -115,21 +115,30 @@ class Deduper:
     _original_of: dict[str, str] = field(default_factory=dict)
 
     def add(self, doc_id: str, text: str) -> bool:
-        """True when unique (kept); False when a near-duplicate of a kept doc."""
+        """True when unique (kept); False when a near-duplicate of a kept doc.
+
+        Re-adding a ``doc_id`` already in the index refreshes its record
+        instead of comparing it against itself (a recrawl replaces -- the doc
+        never becomes its own duplicate).
+        """
         fp = Simhash.from_text(text, self.shingle_k)
+        sh = shingles(text, self.shingle_k)
         for kept_id, kept_fp in self._kept.items():
+            if kept_id == doc_id:
+                continue
             if fp.distance(kept_fp) > self.threshold:
                 continue
             if (
                 self.jaccard_verify
-                and jaccard(shingles(text, self.shingle_k), self._shingles_by_id[kept_id])
+                and jaccard(sh, self._shingles_by_id[kept_id])
                 < self.jaccard_floor
             ):
                 continue  # fingerprint collision, not a real duplicate
             self._original_of[doc_id] = kept_id
             return False
         self._kept[doc_id] = fp
-        self._shingles_by_id[doc_id] = shingles(text, self.shingle_k)
+        self._shingles_by_id[doc_id] = sh
+        self._original_of.pop(doc_id, None)  # no longer a rejected duplicate
         return True
 
     def is_duplicate(self, text: str) -> bool:

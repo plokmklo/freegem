@@ -389,5 +389,86 @@ class UploadFlowTests(unittest.TestCase):
         self.assertEqual(urlopen2.call_count, 1)
 
 
+class DecodeDataUrlTests(unittest.TestCase):
+    """data: URLs as model output actually writes them."""
+
+    def test_plain_base64(self) -> None:
+        from freegem.multimodal import decode_data_url
+
+        self.assertEqual(decode_data_url("data:image/png;base64,aGVsbG8="), (b"hello", "image/png"))
+
+    def test_line_wrapped_base64_is_decoded(self) -> None:
+        """Models wrap base64 at 76 chars; validate=True rejects whitespace,
+        so the decoder must strip it first."""
+        from freegem.multimodal import decode_data_url
+
+        self.assertEqual(decode_data_url("data:image/png;base64,aGVs\nbG8="), (b"hello", "image/png"))
+
+    def test_extra_header_parameters_are_tolerated(self) -> None:
+        from freegem.multimodal import decode_data_url
+
+        decoded = decode_data_url("data:image/jpeg;charset=utf-8;base64,aGVsbG8=")
+        self.assertEqual(decoded, (b"hello", "image/jpeg"))
+
+    def test_url_encoded_payload(self) -> None:
+        from freegem.multimodal import decode_data_url
+
+        self.assertEqual(decode_data_url("data:,hello%20world"), (b"hello world", "image/png"))
+
+    def test_garbage_is_none(self) -> None:
+        from freegem.multimodal import decode_data_url
+
+        self.assertIsNone(decode_data_url("not a data url"))
+        self.assertIsNone(decode_data_url("data:image/png;base64,%%%"))  # invalid alphabet
+        self.assertIsNone(decode_data_url("data:image/png;base64"))  # no comma
+
+
+class ProxyLogRedactionTests(unittest.TestCase):
+    """Failure logs must not leak proxy credentials (#38, log-line variant)."""
+
+    PROXY = "http://user:secret@proxy.example:8080"
+
+    def test_fetch_image_failure_log_redacts_proxy(self) -> None:
+        import io
+        from contextlib import redirect_stderr
+
+        cfg = BridgeConfig(guard=True, log_requests=True, proxy=self.PROXY)
+        leak = f"Cannot connect to proxy {self.PROXY}: connection refused"
+        opener = mock.MagicMock()
+        opener.open.side_effect = OSError(leak)
+        err = io.StringIO()
+        with (
+            mock.patch("freegem.multimodal._host_resolves_public", return_value=True),
+            mock.patch("freegem.multimodal.build_guarded_opener", return_value=opener),
+            redirect_stderr(err),
+        ):
+            self.assertEqual(fetch_image_bytes(cfg, "https://example.com/x.png"), b"")
+        self.assertIn("image fetch failed", err.getvalue())
+        self.assertNotIn("secret", err.getvalue())
+        self.assertNotIn("user:", err.getvalue())
+
+    def test_page_token_failure_log_redacts_proxy(self) -> None:
+        import io
+        from contextlib import redirect_stderr
+
+        from freegem import multimodal
+
+        reset_page_tokens()
+        cfg = BridgeConfig(guard=True, log_requests=True, proxy=self.PROXY)
+        leak = f"Cannot connect to proxy {self.PROXY}: connection refused"
+        err = io.StringIO()
+        with (
+            mock.patch(
+                "freegem.multimodal.urllib.request.build_opener",
+                side_effect=OSError(leak),
+            ),
+            redirect_stderr(err),
+        ):
+            self.assertEqual(multimodal._page_tokens(cfg), {})
+        self.assertIn("upload-token fetch failed", err.getvalue())
+        self.assertNotIn("secret", err.getvalue())
+        self.assertNotIn("user:", err.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

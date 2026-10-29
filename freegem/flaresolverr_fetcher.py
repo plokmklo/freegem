@@ -91,8 +91,23 @@ def flaresolverr_html(cfg: Any, url: str, *, timeout: float) -> str:
         message = str(data.get("message") or data.get("error") or "unknown error")
         raise FlareSolverrError(f"flaresolverr refused {url!r}: {message}")
     solution = data.get("solution") or {}
+    if not isinstance(solution, dict):
+        # v1 success replies carry a solution OBJECT; a list/string/null here
+        # must be refused by name -- `solution.get` would raise AttributeError
+        # past the ladder's FlareSolverrError taxonomy.
+        raise FlareSolverrError(
+            f"flaresolverr at {endpoint} returned a malformed solution for {url!r}: "
+            f"{str(solution)[:80]!r}"
+        )
     html = str(solution.get("response") or "")
-    status = int(solution.get("status") or 0)
+    try:
+        status = int(solution.get("status") or 0)
+    except (TypeError, ValueError):
+        # A non-numeric status must not leak ValueError out of this client.
+        raise FlareSolverrError(
+            f"flaresolverr solved {url!r} but reported a malformed status "
+            f"{solution.get('status')!r}"
+        ) from None
     if status and not (200 <= status < 300):
         raise FlareSolverrError(f"flaresolverr solved {url!r} but got HTTP {status}")
     if not html.strip():

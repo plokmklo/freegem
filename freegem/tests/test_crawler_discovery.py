@@ -61,6 +61,30 @@ def test_discover_dedupes() -> None:
     assert eps == ["https://x.org/a"]
 
 
+def test_discover_protocol_relative_strips_fragment() -> None:
+    """Protocol-relative endpoints drop the fragment like absolute ones."""
+    eps = discover_js_endpoints(
+        'fetch("//cdn.example.org/api#frag")', base_url="https://example.org/"
+    )
+    assert eps == ["https://cdn.example.org/api"]
+
+
+def test_discover_requires_word_boundary_before_fetch_axios() -> None:
+    """`myaxios.get(...)` / `myfetch(...)` are not fetch/axios calls.
+
+    Without a ``\\b`` the regex matched the substring inside identifiers and
+    volunteered endpoints the page never calls.
+    """
+    eps = discover_js_endpoints(
+        'myprefetch("/api/x"); myaxios.get("/api/y"); prefetch("/p")',
+        base_url="https://x.org/",
+    )
+    assert eps == []
+    # the real calls still match, with boundaries intact
+    eps2 = discover_js_endpoints('fetch("/a"); axios.get("/b")', base_url="https://x.org/")
+    assert eps2 == ["https://x.org/a", "https://x.org/b"]
+
+
 # ─── scoring ─────────────────────────────────────────────────────────────────
 
 

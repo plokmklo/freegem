@@ -67,6 +67,9 @@ _HTTP_STATUS_REASONS: dict[int, str] = dict(http.client.responses)
 #: Guard against a corrupted Content-Length steering the reader into RAM.
 _MAX_BLOCK_BYTES = 256 * 1024 * 1024
 
+#: Chunk size for hashing/copying spilled response bodies.
+_COPY_CHUNK = 1 << 20
+
 
 class WARCError(ValueError):
     """A WARC file (or record) violates ISO 28500 enough to refuse it."""
@@ -105,6 +108,24 @@ def _request_target(url: str) -> str:
     if parts.query:
         target += "?" + parts.query
     return target
+
+
+def _check_http_field(name: str, value: str) -> None:
+    """Refuse HTTP fields that could forge extra lines inside a record block.
+
+    The block is length-delimited so WARC framing stays intact, but a CRLF
+    in a request/response header would let the archived HTTP exchange claim
+    headers that were never sent -- forged evidence. http.client already
+    rejects such wire headers; this guards the writer's own callers.
+    """
+    if not name or any(ch in name for ch in " \t\r\n:"):
+        raise WARCError(f"invalid HTTP field name in record: {name!r}")
+    if "\r" in str(value) or "\n" in str(value):
+        raise WARCError(f"HTTP field {name} value contains a line break")
+
+
+def _digest_of(hasher: Any) -> str:
+    return "sha-256:" + base64.b64encode(hasher.digest()).decode("ascii")
 
 
 @dataclass(frozen=True)
@@ -149,7 +170,8 @@ class WarcWriter:
         self.path = path
         self._uuid_gen = uuid_gen or uuid.uuid4
         self._clock = clock or time.time
-        self._lock = threading.Lock()
+        # RLock: warcinfo() holds the lock while delegating to _write().
+        self._lock = threading.RLock()
         self._fh = open(path, "wb")  # noqa: SIM115 - append-only writer, closed in close()
         self.records = 0
         self._warcinfo_id: str | None = None
@@ -192,6 +214,7 @@ class WarcWriter:
         """One HTTP request record (GET bodies are not supported here)."""
         lines = [f"{method} {_request_target(url)} HTTP/1.1"]
         for name, value in sorted((headers or {}).items()):
+            _check_http_field(name, value)
             lines.append(f"{name}: {value}")
         block = _CRLF.join(line.encode("ascii", "replace") for line in lines) + _CRLF + _CRLF
         return self._typed(
@@ -214,14 +237,23 @@ class WarcWriter:
     ) -> str:
         """One HTTP response record; ``body_path`` streams a spilled body.
 
-        ``truncated`` uses the standard vocabulary (``length`` for byte caps)
-        and is emitted as WARC-Truncated so readers know the body is partial.
+        The archived HTTP message must describe the bytes actually stored,
+        or replay tools (warcio, pywb) reconstruct a body that never
+        existed. Callers hand over the DECODED body (the fetch layer
+        inflates Content-Encoding before storing), possibly capped by a
+        byte budget, so the head is reconciled: ``Content-Encoding`` and
+        ``Transfer-Encoding`` are dropped and ``Content-Length`` is reset
+        to the stored body length. All other headers pass through exactly;
+        a partial body is additionally marked via the standard
+        ``WARC-Truncated`` (``length`` for byte caps).
         """
         reason = _HTTP_STATUS_REASONS.get(status, "")
         head_lines = [f"HTTP/1.1 {status} {reason}".rstrip()]
         for name, value in sorted((headers or {}).items()):
+            _check_http_field(name, value)
+            if name.lower() in ("content-length", "content-encoding", "transfer-encoding"):
+                continue
             head_lines.append(f"{name}: {value}")
-        head = _CRLF.join(line.encode("latin-1", "replace") for line in head_lines) + _CRLF + _CRLF
 
         extra: list[tuple[str, str]] = []
         if truncated:
@@ -230,9 +262,19 @@ class WarcWriter:
             extra.append(("WARC-Concurrent-To", request_id))
 
         if body is None and body_path:
-            with open(body_path, "rb") as fh:
-                body = fh.read()
+            # Stream the spilled body in bounded chunks so a multi-megabyte
+            # spill never sits in RAM; digests are computed on disk passes.
+            return self._write_streamed(
+                warc_type="response",
+                url=url,
+                head_lines=head_lines,
+                body_path=body_path,
+                content_type="application/http;msgtype=response",
+                extra_fields=extra,
+            )
         body = body or b""
+        head_lines.append(f"Content-Length: {len(body)}")
+        head = _CRLF.join(line.encode("latin-1", "replace") for line in head_lines) + _CRLF + _CRLF
 
         payload_digest = _digest(body)
         block = head + body
@@ -309,6 +351,86 @@ class WarcWriter:
     ) -> str:
         """Serialize one record: headers, blank line, block, blank line."""
         record_id = f"<urn:uuid:{self._uuid_gen()}>"
+        header = self._record_header(
+            record_id=record_id,
+            warc_type=warc_type,
+            url=url,
+            content_type=content_type,
+            content_length=len(payload),
+            payload_digest=payload_digest,
+            block_digest=_digest(payload),
+            extra_fields=extra_fields,
+        )
+        # Serialization (including digests) happens outside the lock; only
+        # the file mutation is serialized, so worker threads queue on I/O
+        # and the records counter never loses an update.
+        with self._lock:
+            self._fh.write(header + payload + _CRLF + _CRLF)
+            self.records += 1
+        return record_id
+
+    def _write_streamed(
+        self,
+        *,
+        warc_type: str,
+        url: str,
+        head_lines: list[str],
+        body_path: str,
+        content_type: str,
+        extra_fields: list[tuple[str, str]] | None = None,
+    ) -> str:
+        """One record whose block is an HTTP head plus a spilled body file.
+
+        Three bounded disk passes instead of one multi-megabyte RAM copy:
+        (1) body size + payload digest, (2) block digest over the final
+        head+body, (3) the locked write itself. The digests cover exactly
+        the bytes that land in the archive.
+        """
+        payload_hash = hashlib.sha256()
+        size = 0
+        with open(body_path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(_COPY_CHUNK), b""):
+                payload_hash.update(chunk)
+                size += len(chunk)
+        head_lines.append(f"Content-Length: {size}")
+        head = _CRLF.join(line.encode("latin-1", "replace") for line in head_lines) + _CRLF + _CRLF
+        block_hash = hashlib.sha256(head)
+        with open(body_path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(_COPY_CHUNK), b""):
+                block_hash.update(chunk)
+        record_id = f"<urn:uuid:{self._uuid_gen()}>"
+        header = self._record_header(
+            record_id=record_id,
+            warc_type=warc_type,
+            url=url,
+            content_type=content_type,
+            content_length=len(head) + size,
+            payload_digest=_digest_of(payload_hash),
+            block_digest=_digest_of(block_hash),
+            extra_fields=extra_fields,
+        )
+        with self._lock:
+            self._fh.write(header + head)
+            with open(body_path, "rb") as fh:
+                for chunk in iter(lambda: fh.read(_COPY_CHUNK), b""):
+                    self._fh.write(chunk)
+            self._fh.write(_CRLF + _CRLF)
+            self.records += 1
+        return record_id
+
+    def _record_header(
+        self,
+        *,
+        record_id: str,
+        warc_type: str,
+        url: str,
+        content_type: str,
+        content_length: int,
+        payload_digest: str | None,
+        block_digest: str,
+        extra_fields: list[tuple[str, str]] | None,
+    ) -> bytes:
+        """The named-field header block, terminated by a blank line."""
         fields: list[tuple[str, str]] = [
             ("WARC-Record-ID", record_id),
             ("WARC-Date", _warc_date(self._clock())),
@@ -323,25 +445,11 @@ class WarcWriter:
         fields.append(("Content-Type", content_type))
         if extra_fields:
             fields.extend(extra_fields)
-        fields.append(("Content-Length", str(len(payload))))
-
-        block_digest = _digest(payload)
-        lines = [f"{WARC_VERSION}"]
+        fields.append(("Content-Length", str(content_length)))
+        lines = [WARC_VERSION]
         lines.extend(f"{name}: {value}" for name, value in fields)
         lines.append(f"WARC-Block-Digest: {block_digest}")
-        record = (
-            _CRLF.join(line.encode("utf-8") for line in lines)
-            + _CRLF
-            + _CRLF
-            + payload
-            + _CRLF
-            + _CRLF
-        )
-        # _field_lines raised earlier for bad names; _write itself never fails
-        # on content, so holding the lock across the write is enough.
-        self._fh.write(record)
-        self.records += 1
-        return record_id
+        return _CRLF.join(line.encode("utf-8") for line in lines) + _CRLF + _CRLF
 
 
 # ── reading / verification ───────────────────────────────────────────────────
@@ -387,6 +495,10 @@ def iter_records(path: str, *, max_block: int = _MAX_BLOCK_BYTES) -> Iterator[Wa
                         raise WARCError(f"{path}: bad Content-Length {value!r}") from exc
             if content_length is None:
                 raise WARCError(f"{path}: record at byte {offset} has no Content-Length")
+            if content_length < 0:
+                # fh.read(-1) means "read everything": a negative length must
+                # be refused before it steers the reader past the cap.
+                raise WARCError(f"{path}: negative Content-Length at byte {offset}")
             if content_length > max_block:
                 raise WARCError(f"{path}: Content-Length {content_length} exceeds the read cap")
             payload = fh.read(content_length)

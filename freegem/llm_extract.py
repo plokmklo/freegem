@@ -49,8 +49,6 @@ __all__ = [
 
 _FIELD_TYPES = ("string", "integer", "number", "boolean", "array", "enum")
 
-_JSON_OBJ_RE = re.compile(r"\{.*\}", re.DOTALL)
-
 
 def _parse_json_object(raw: str) -> Any:
     """Parse the model's answer, tolerating code fences and stray prose."""
@@ -60,10 +58,21 @@ def _parse_json_object(raw: str) -> Any:
     try:
         return json.loads(raw)
     except ValueError:
-        m = _JSON_OBJ_RE.search(raw)
-        if m:
-            return json.loads(m.group(0))
-        raise
+        pass
+    # Prose braces are the norm ("items: {n} -> {json}"). The old greedy
+    # {...} match spanned the FIRST brace to the LAST, which never decodes
+    # the moment any stray pair appears. Scan each '{' instead and take the
+    # first balanced object that actually parses.
+    decoder = json.JSONDecoder()
+    index = raw.find("{")
+    while index != -1:
+        try:
+            value, _consumed = decoder.raw_decode(raw, index)
+        except ValueError:
+            index = raw.find("{", index + 1)
+            continue
+        return value
+    raise ValueError("no JSON object found in the answer")
 
 
 class ExtractionError(Exception):
@@ -251,12 +260,22 @@ class ExtractionProvider(Protocol):
 
 
 def _extraction_prompt(schema: ExtractionSchema, text: str) -> str:
+    from .web_scraper import (  # lazy: keep this module import-light
+        _UNTRUSTED_CLOSE,
+        _UNTRUSTED_OPEN,
+        _defuse_untrusted_markers,
+    )
+
+    # The document is page-derived, hence untrusted: cap it first, then
+    # defuse BOTH the shared untrusted markers and this frame's own closer so
+    # page text cannot end the [DOCUMENT] block early and answer the schema
+    # itself. The real closer is appended after the defused content.
+    document = _defuse_untrusted_markers(text[:200_000])
+    document = re.sub(r"\[/document\]", "[/DOCUMENT removed]", document, flags=re.IGNORECASE)
     return (
         "You are a JSON extraction engine. Do not chat.\n"
         + schema.to_prompt_block()
-        + "\n\n[DOCUMENT]\n"
-        + text[:200_000]
-        + "\n[/DOCUMENT]"
+        + f"\n\n[DOCUMENT]\n{_UNTRUSTED_OPEN}\n{document}\n{_UNTRUSTED_CLOSE}\n[/DOCUMENT]"
     )
 
 
@@ -340,23 +359,52 @@ def extract_structured(
 ) -> tuple[dict[str, Any], list[str]]:
     """Extract once, validate, and (optionally) retry once with the problems shown.
 
-    The retry is the cheap 80%: a model that stringified numbers or invented
-    a field usually fixes it when the validator's complaints are read back
-    verbatim. Returns ``(clean, problems)``; raises :class:`ExtractionError`
-    when required fields are still missing or the provider is unreachable.
-    The better of the two attempts wins (fewest problems; ties go to the
-    repair, which saw the complaints).
+    The retry is the cheap 80%: a model that stringified numbers, invented a
+    field, or answered with unparseable prose usually fixes it when the
+    complaint is read back verbatim. Returns ``(clean, problems)``; raises
+    :class:`ExtractionError` when required fields are still missing or the
+    provider is unreachable. The better of the two attempts wins (fewest
+    problems; ties go to the repair, which saw the complaints). One repair is
+    spent either on the parse failure or on the validation problems, never on
+    both.
     """
+    prompt = _extraction_prompt(schema, text)
     try:
-        first_raw = provider.complete(_extraction_prompt(schema, text))
+        first_raw = provider.complete(prompt)
         first_data = _parse_json_object(first_raw)
     except ValueError as exc:
-        raise ExtractionError(f"provider returned unparseable JSON: {exc}") from exc
+        # Unparseable output is the most common malformation; give the model
+        # one shot at it, exactly like the validation round gets one.
+        if max_repairs <= 0:
+            raise ExtractionError(f"provider returned unparseable JSON: {exc}") from exc
+        try:
+            second_raw = provider.complete(
+                prompt
+                + f"\n\nYour previous answer could not be parsed as JSON ({exc}). "
+                "Answer again with ONLY the JSON object, no prose, no code fences."
+            )
+        except Exception as retry_exc:
+            # The repair call itself failed (or a second answer never
+            # arrived); the original parse failure is what the caller needs.
+            raise ExtractionError(
+                f"provider returned unparseable JSON: {exc}"
+            ) from retry_exc
+        try:
+            second_data = _parse_json_object(second_raw)
+        except ValueError as retry_exc:
+            raise ExtractionError(
+                f"provider returned unparseable JSON: {retry_exc}"
+            ) from retry_exc
+        clean, problems = validate_extraction(schema, second_data)
+        missing = [p for p in problems if p.startswith("missing required")]
+        if missing:
+            raise ExtractionError("; ".join(missing))
+        return clean, problems
     clean, problems = validate_extraction(schema, first_data)
 
     if max_repairs > 0 and problems:
         repair_prompt = (
-            _extraction_prompt(schema, text)
+            prompt
             + "\n\nYour previous answer had these problems:\n- "
             + "\n- ".join(problems)
             + "\n\nAnswer again with ONLY the corrected JSON object."

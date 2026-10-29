@@ -20,6 +20,7 @@ from typing import Any
 from .config import BridgeConfig
 from .gemini import (
     BridgeError,
+    _safe_error_text,
     _ssl_ctx,
     account_prefix,
     load_cookie,
@@ -127,7 +128,7 @@ def _page_tokens(cfg: BridgeConfig) -> dict[str, str]:
             if match:
                 tokens[key] = match.group(1)
     except Exception as exc:
-        log(cfg, f"upload-token fetch failed: {exc}")
+        log(cfg, f"upload-token fetch failed: {_safe_error_text(cfg, exc)}")
 
     if tokens:
         _PAGE_TOKENS.update({"tokens": tokens, "ts": now, "fetched": True})
@@ -324,20 +325,30 @@ def fetch_image_bytes(cfg: BridgeConfig, url: str) -> bytes:
                     return b""
             return bytes(payload)
     except Exception as exc:
-        log(cfg, f"image fetch failed: {exc}")
+        log(cfg, f"image fetch failed: {_safe_error_text(cfg, exc)}")
         return b""
 
 
 def decode_data_url(url: str) -> tuple[bytes, str] | None:
-    """Decode ``data:[mime][;base64],<payload>`` into (bytes, mime)."""
-    match = re.match(r"^data:([^;,]+)?(;base64)?,(.*)$", url, re.DOTALL)
-    if not match:
+    """Decode ``data:[mime][;params][;base64],<payload>`` into (bytes, mime).
+
+    Tolerant of what model output actually looks like: extra header
+    parameters (``;charset=utf-8``), and line-wrapped base64 payloads --
+    whitespace is stripped before decoding because ``validate=True`` (kept,
+    to reject outright garbage) treats any whitespace as invalid.
+    """
+    if not url.startswith("data:"):
         return None
-    mime = match.group(1) or "image/png"
-    payload = match.group(3)
+    header, comma, payload = url[5:].partition(",")
+    if not comma:
+        return None
+    parts = header.split(";")
+    mime = parts[0].strip() or "image/png"
+    is_base64 = any(part.strip().lower() == "base64" for part in parts[1:])
     try:
-        if match.group(2):
-            return base64.b64decode(payload, validate=True), mime
+        if is_base64:
+            cleaned = re.sub(r"\s+", "", payload)
+            return base64.b64decode(cleaned, validate=True), mime
         return urllib.parse.unquote_to_bytes(payload), mime
     except (ValueError, TypeError, binascii.Error):
         return None

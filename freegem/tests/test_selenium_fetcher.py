@@ -256,6 +256,40 @@ def test_grid_url_uses_remote(fake_selenium: type[FakeDriver]) -> None:
     assert res.ok is True
 
 
+def test_pdf_capture_failure_keeps_the_fetched_content(
+    fake_selenium: type[FakeDriver], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PDF export is chromium-only best effort: a CDP failure (Firefox,
+    restricted session) must not discard the already-fetched HTML."""
+    real_cdp = FakeDriver.execute_cdp_cmd
+
+    def flaky_cdp(self: FakeDriver, cmd: str, params: dict[str, Any]) -> dict[str, Any]:
+        if cmd == "Page.printToPDF":
+            raise RuntimeError("Method not supported on this session")
+        return real_cdp(self, cmd, params)
+
+    monkeypatch.setattr(FakeDriver, "execute_cdp_cmd", flaky_cdp)
+    res = fetch_with_selenium(SeleniumOptions(url="https://example.org/", capture_pdf=True))
+    assert res.ok is True
+    assert "rendered body" in res.text
+    assert res.pdf_path is None, "a failed capture must not claim a path"
+    assert fake_selenium.instances[0].quit_called is True
+
+
+def test_screenshot_capture_failure_keeps_the_fetched_content(
+    fake_selenium: type[FakeDriver], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken_shot(self: FakeDriver, path: str) -> None:
+        raise RuntimeError("unable to capture screenshot")
+
+    monkeypatch.setattr(FakeDriver, "save_screenshot", broken_shot)
+    res = fetch_with_selenium(SeleniumOptions(url="https://example.org/", capture_screenshot=True))
+    assert res.ok is True
+    assert "rendered body" in res.text
+    assert res.screenshot_path is None
+    assert fake_selenium.instances[0].quit_called is True
+
+
 def test_should_fallback_heuristics() -> None:
     ok = FetchOutcome(url="u", kind="ok", status=200, body=b"<html>" + b"x" * 400)
     assert should_fallback_to_selenium(ok) is False

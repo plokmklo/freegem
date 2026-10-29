@@ -100,6 +100,33 @@ class CapacityTests(unittest.TestCase):
         self.assertTrue(pool.remove_node("z"))
         self.assertFalse(pool.remove_node("never-existed"))
 
+    def test_concurrent_double_release_cannot_overbook(self) -> None:
+        """Two threads releasing the SAME lease at once must decrement once.
+
+        The old code tested ``lease.released`` outside the lock, so both
+        racers could pass the check and double-decrement -- the node then
+        hands out a third session on a max-2 budget.
+        """
+        for _ in range(100):
+            pool = GridPool([GridNode("n", "http://n:4444", 2)], checkout_timeout_sec=0.1)
+            lease_a = pool.checkout()
+            lease_b = pool.checkout()
+            barrier = threading.Barrier(2)
+
+            def racer(lease: GridLease = lease_a) -> None:
+                barrier.wait()
+                pool.release(lease)
+
+            threads = [threading.Thread(target=racer) for _ in range(2)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            # b is still held: a correct pool reports exactly 1 in flight.
+            self.assertEqual(pool.stats()["in_flight_total"], 1)
+            pool.release(lease_b)
+            self.assertEqual(pool.stats()["in_flight_total"], 0)
+
 
 class FetchWithGridTests(unittest.TestCase):
     def test_routes_to_leased_endpoint_and_releases(self) -> None:

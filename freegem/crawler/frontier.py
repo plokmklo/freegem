@@ -207,9 +207,13 @@ class Frontier:
                 " last_modified=?, content_hash=?, error=NULL WHERE url=?",
                 (DONE, time.time(), http_status, etag, last_modified, content_hash, url),
             )
+            # UPSERT so the counter is never silently lost when the host was
+            # never touched (plain UPDATE ... WHERE host=(subquery) matches
+            # zero rows and the success vanishes from stats().top_hosts).
             self._db.execute(
-                "UPDATE host_state SET ok_count=ok_count+1 WHERE host="
-                "(SELECT host FROM frontier WHERE url=?)",
+                "INSERT INTO host_state(host, ok_count)"
+                " SELECT host, 1 FROM frontier WHERE url=?"
+                " ON CONFLICT(host) DO UPDATE SET ok_count=host_state.ok_count+1",
                 (url,),
             )
             self._db.commit()
@@ -257,8 +261,9 @@ class Frontier:
                     (ERROR, attempts, error[:500], time.time(), http_status, url),
                 )
             self._db.execute(
-                "UPDATE host_state SET err_count=err_count+1 WHERE host="
-                "(SELECT host FROM frontier WHERE url=?)",
+                "INSERT INTO host_state(host, err_count)"
+                " SELECT host, 1 FROM frontier WHERE url=?"
+                " ON CONFLICT(host) DO UPDATE SET err_count=host_state.err_count+1",
                 (url,),
             )
             self._db.commit()
