@@ -31,6 +31,7 @@ with verified citations, claim verification, and a bounded, resumable crawler.
 ## Contents
 
 - [Why FreeGem](#why-freegem)
+- [Two engines](#two-engines-one-process)
 - [Installation](#installation)
 - [Quick start](#quick-start)
 - [The three faces](#the-three-faces)
@@ -84,6 +85,46 @@ What it provides beyond protocol translation:
 What it deliberately is not: unofficial by nature — it drives a private web
 endpoint, subject to Google's availability, rate limits, and policies. Read
 [Limitations](#limitations) before building on it.
+
+---
+
+## Two engines, one process
+
+FreeGem is two products that share one process, and the boundary between them
+decides what breaks when Google changes something:
+
+- **The Gemini bridge** — everything that forwards to Gemini Web
+  (`StreamGenerate`): chat completions, the `gemini_*` MCP tools,
+  `freegem ask`, grounded search, and every AI-mediated view of a page
+  (`--ai-clean`, the `ai-search` ladder rung, AI wall rescue, crawl
+  `--ai-rescue`/distill). This engine is **unofficial by nature**: it drives
+  Google's private web interface and depends on Google's availability, rate
+  limits, and policies (see [Limitations](#limitations)).
+- **The web-intelligence engine** — everything that reads pages and keeps the
+  books: guarded fetching, the smart-fetch ladder, HTML-to-text extraction,
+  tables, chunks, `map`, research/verify fetching with budgets and statuses,
+  the citation and evidence bookkeeping, the crawler (frontier, scope, WARC,
+  politeness receipts, scheduling, sources, discovery), `watch`, dedup, and
+  the stores/queues/search sinks. **Self-hosted and stdlib-first: none of it
+  talks to Google**, and all of it keeps working with no session configured.
+
+| Capability | Needs the Gemini web session? |
+| --- | --- |
+| Chat, completions, function calling, images (`serve`, `gemini_*` tools) | **Yes** — this is the bridge itself |
+| Grounded search (`gemini_search`, `ask --search`) | **Yes** |
+| Fetch, extract, tables, chunks, `map` (`scrape`, `web_scrape`) | **No** |
+| Research / verify: fetching, budgets, statuses, citation table | **No** |
+| Research answers, verify verdicts, evidence quotes | **Yes** — without a session you get labeled raw extracts and `source_unavailable`, never a fabricated answer |
+| `--ai-clean`, `ai-search` rung, AI wall rescue, crawl `--ai-rescue`, distill, `extract` jobs on the default provider | **Yes** — every AI-mediated view is labeled (`via="ai-search"`, `ai-clean view`, `ai_rescued`) and never written to a cache |
+| Crawler: frontier, scope, typed extraction, WARC, receipts, scheduling, sources | **No** |
+| `watch` change monitoring, dedup, search sinks, stores, queues | **No** |
+
+Two switch positions make the split explicit at run time: setting
+`smart_fetch_ai: false` removes the only ladder rung that needs the bridge,
+and `smart_fetch` false keeps the direct fetch only — a fully Google-free
+read path. The server states the same boundary itself: `GET /health`
+carries the `non_guarantees` labels and `GET /v1/about` the full
+assumption/reality detail.
 
 ---
 
