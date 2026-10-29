@@ -130,8 +130,7 @@ class Deduper:
                 continue
             if (
                 self.jaccard_verify
-                and jaccard(sh, self._shingles_by_id[kept_id])
-                < self.jaccard_floor
+                and jaccard(sh, self._shingles_by_id[kept_id]) < self.jaccard_floor
             ):
                 continue  # fingerprint collision, not a real duplicate
             self._original_of[doc_id] = kept_id

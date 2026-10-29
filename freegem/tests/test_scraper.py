@@ -1731,9 +1731,7 @@ class ParallelScraperTests(unittest.TestCase):
         self.cfg = BridgeConfig(guard=True, log_requests=False)
 
     @staticmethod
-    def _fake_scrape(
-        delays: dict[str, float] | None = None, fail: set[str] | None = None
-    ) -> Any:
+    def _fake_scrape(delays: dict[str, float] | None = None, fail: set[str] | None = None) -> Any:
         def fake(cfg: Any, url: str, **_kwargs: Any) -> ScrapeResult:
             delay = (delays or {}).get(url, 0.0)
             if delay:
@@ -1802,8 +1800,7 @@ class ParallelScraperTests(unittest.TestCase):
         from freegem.parallel_scraper import ParallelResult, summarize_results
 
         results = [
-            ParallelResult(url=f"https://x.test/{i}", ok=True, text="body " * 50)
-            for i in range(8)
+            ParallelResult(url=f"https://x.test/{i}", ok=True, text="body " * 50) for i in range(8)
         ]
         with mock.patch("freegem.mcp_tools.run_tool", return_value="A summary.") as run:
             digest_text = summarize_results(self.cfg, results, digest=True)
@@ -1832,8 +1829,7 @@ class ParallelScraperTests(unittest.TestCase):
         from freegem.parallel_scraper import ParallelResult, summarize_results
 
         results = [
-            ParallelResult(url=f"https://x.test/{i}", ok=True, text="body " * 20)
-            for i in range(5)
+            ParallelResult(url=f"https://x.test/{i}", ok=True, text="body " * 20) for i in range(5)
         ]
         with mock.patch("freegem.mcp_tools.run_tool", return_value="s") as run:
             out = summarize_results(self.cfg, results, question="what?", digest=False)

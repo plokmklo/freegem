@@ -148,9 +148,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
 
         # Constant-time comparison: a plain == on the shared secret leaks key
         # bytes through response timing to anything that can loop back.
-        if token and hmac.compare_digest(
-            token.encode("utf-8"), str(api_key).encode("utf-8")
-        ):
+        if token and hmac.compare_digest(token.encode("utf-8"), str(api_key).encode("utf-8")):
             return True
 
         record_audit_event("auth_failure", client_ip, req_id, {"path": self.path})

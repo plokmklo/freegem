@@ -334,9 +334,7 @@ class JobsRestHttpTests(unittest.TestCase):
             head, _, rest = response.partition(b"\r\n\r\n")
             marker = b"Content-Length:"
             if marker in head:
-                length = int(
-                    head.lower().split(marker.lower(), 1)[1].split(b"\r\n", 1)[0].strip()
-                )
+                length = int(head.lower().split(marker.lower(), 1)[1].split(b"\r\n", 1)[0].strip())
                 while len(rest) < length:
                     chunk = sock.recv(65536)
                     if not chunk:
@@ -410,4 +408,3 @@ class JobsRestHttpTests(unittest.TestCase):
         self.assertEqual(status, 500)
         self.assertNotIn(art.file_path, str(raw))
         self.assertIn("failed to read artifact", str(raw))
-

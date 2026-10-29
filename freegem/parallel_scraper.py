@@ -174,7 +174,9 @@ def summarize_results(
     # `digest` gates the top-level digest even when a question is set: the old
     # precedence (`digest and ok > 3 or (question ...)` built one anyway).
     if digest and (digest_ok(results) > 3 or (question is not None and results)):
-        return _batch_digest(cfg, results, model=model, budget_chars=budget_chars, question=question)
+        return _batch_digest(
+            cfg, results, model=model, budget_chars=budget_chars, question=question
+        )
     return ""
 
 
@@ -396,7 +398,12 @@ def scrape_parallel(
 
         # Adapt concurrency for the next wave based on what this wave saw.
         ratio = botwall_ratio([r for r in results if r is not None])
-        wave_size = max(_MIN_WORKERS, int(wave_size * (_THROTTLE_FACTOR if ratio > _BOTWALL_THROTTLE_RATIO else _WIDEN_FACTOR)))
+        wave_size = max(
+            _MIN_WORKERS,
+            int(
+                wave_size * (_THROTTLE_FACTOR if ratio > _BOTWALL_THROTTLE_RATIO else _WIDEN_FACTOR)
+            ),
+        )
         wave_size = min(wave_size, max_workers)
         index += len(chunk)
 
@@ -418,7 +425,9 @@ def scrape_parallel(
         _summarize_batch(cfg, final, model=model, budget_chars=budget_chars, question=question)
 
         if digest.ok > 3 or question is not None:
-            digest.digest_text = _batch_digest(cfg, final, model=model, budget_chars=budget_chars, question=question)
+            digest.digest_text = _batch_digest(
+                cfg, final, model=model, budget_chars=budget_chars, question=question
+            )
 
     return final, digest
 
@@ -467,7 +476,9 @@ def _summarize_batch(
                 f"[PAGE TEXT]\n{snippet}\n[/PAGE TEXT]"
             )
         try:
-            future = ai_pool.submit(run_tool, cfg, "gemini_ask", {"question": prompt, "model": model})
+            future = ai_pool.submit(
+                run_tool, cfg, "gemini_ask", {"question": prompt, "model": model}
+            )
             try:
                 r.summary = future.result(timeout=20).strip()
             except FuturesTimeout:
@@ -569,4 +580,3 @@ __all__ = [
     "scrape_parallel",
     "summarize_results",
 ]
-

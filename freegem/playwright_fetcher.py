@@ -203,9 +203,7 @@ def fetch_with_playwright(opts: PlaywrightOptions) -> PlaywrightResult:
                         fd, screenshot_file = tempfile.mkstemp(prefix="freegem-ss-", suffix=".png")
                         os.close(fd)
                     try:
-                        page.screenshot(
-                            path=screenshot_file, full_page=opts.screenshot_full_page
-                        )
+                        page.screenshot(path=screenshot_file, full_page=opts.screenshot_full_page)
                     except Exception:
                         if screenshot_file != opts.screenshot_path:
                             with contextlib.suppress(OSError):

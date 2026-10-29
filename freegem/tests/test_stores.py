@@ -370,9 +370,7 @@ def test_s3_blob_store_suffix_returns_retrievable_key(monkeypatch: pytest.Monkey
         def delete_object(self, *, Bucket: str, Key: str) -> None:
             objects.pop((Bucket, Key), None)
 
-    fake_boto3 = type(
-        "boto3", (), {"client": staticmethod(lambda *a, **k: FakeS3())}
-    )
+    fake_boto3 = type("boto3", (), {"client": staticmethod(lambda *a, **k: FakeS3())})
     monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
     store = S3BlobStore("mybucket", prefix="crawl")
     key = store.put(b"pdf bytes", suffix=".pdf")

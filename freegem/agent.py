@@ -123,14 +123,23 @@ class AgentLimits:
 #: The allowlisted registry of tools the agent can call.
 #: Each entry maps a tool name to a callable that takes (cfg, **args) and
 #: returns a result object with `.sources` or `.urls` attributes.
-_AGENT_TOOLS = frozenset({
-    "scrape", "scrape_batch", "research", "verify_claims",
-    "extract", "crawl_plan", "crawl_run", "ask",
-})
+_AGENT_TOOLS = frozenset(
+    {
+        "scrape",
+        "scrape_batch",
+        "research",
+        "verify_claims",
+        "extract",
+        "crawl_plan",
+        "crawl_run",
+        "ask",
+    }
+)
 
 
-def _agent_scrape(cfg: BridgeConfig, url: str, max_chars: int,
-                  depth: int = 0, _seen: set[str] | None = None) -> ScrapeResult:
+def _agent_scrape(
+    cfg: BridgeConfig, url: str, max_chars: int, depth: int = 0, _seen: set[str] | None = None
+) -> ScrapeResult:
     """Scrape a single URL with depth guard."""
     _seen = _seen or set()
     if depth > 3:
@@ -141,8 +150,14 @@ def _agent_scrape(cfg: BridgeConfig, url: str, max_chars: int,
     return scrape_page(cfg, url, max_chars=max_chars, smart=True)
 
 
-def _agent_research(cfg: BridgeConfig, question: str, urls: list[str],
-                    max_chars: int, depth: int = 0, _seen: set[str] | None = None) -> ResearchResult:
+def _agent_research(
+    cfg: BridgeConfig,
+    question: str,
+    urls: list[str],
+    max_chars: int,
+    depth: int = 0,
+    _seen: set[str] | None = None,
+) -> ResearchResult:
     """Run multi-source research with depth guard."""
     _seen = _seen or set()
     if depth > 3:
@@ -165,22 +180,28 @@ def _plan_task(task: str, limits: AgentLimits) -> list[dict[str, Any]]:
     plan: list[dict[str, Any]] = []
 
     # Step 1: Search for relevant URLs (using Gemini bridge search)
-    plan.append({
-        "tool": "ask",
-        "args": {"question": task, "search": True, "max_sources": min(limits.max_pages, 10)},
-    })
+    plan.append(
+        {
+            "tool": "ask",
+            "args": {"question": task, "search": True, "max_sources": min(limits.max_pages, 10)},
+        }
+    )
 
     # Step 2: Research the top results
-    plan.append({
-        "tool": "research",
-        "args": {"question": task, "urls": [], "max_chars": min(limits.max_chars, 30_000)},
-    })
+    plan.append(
+        {
+            "tool": "research",
+            "args": {"question": task, "urls": [], "max_chars": min(limits.max_chars, 30_000)},
+        }
+    )
 
     # Step 3: Verify key claims
-    plan.append({
-        "tool": "verify_claims",
-        "args": {"claims": [], "urls": [], "max_chars": 10_000},
-    })
+    plan.append(
+        {
+            "tool": "verify_claims",
+            "args": {"claims": [], "urls": [], "max_chars": 10_000},
+        }
+    )
 
     return plan
 
@@ -209,6 +230,7 @@ def _extract_sources_from_result(result: Any) -> list[str]:
 def _extract_urls_from_text(text: Any) -> list[str]:
     """Pull URLs out of a search-result string (the gemini_search MCP tool returns a string)."""
     import re
+
     if not isinstance(text, str):
         return []
     return re.findall(r"https?://[^\s)]+", text)
@@ -229,8 +251,7 @@ def _chars_from_result(result: Any) -> int:
     return 0
 
 
-def run_agent(cfg: BridgeConfig, task: str,
-              limits: AgentLimits | None = None) -> AgentResult:
+def run_agent(cfg: BridgeConfig, task: str, limits: AgentLimits | None = None) -> AgentResult:
     """Execute a bounded single-agent task using FreeGem's existing tools.
 
     The agent decomposes the task, calls allowlisted tools with strict limits,
@@ -266,7 +287,8 @@ def run_agent(cfg: BridgeConfig, task: str,
         step = AgentStep(step=step_num, tool="ask", args={"question": task})
         try:
             search_result = run_tool(
-                cfg, "gemini_search",
+                cfg,
+                "gemini_search",
                 {"query": task, "recency": None, "model": None},
             )
             total_llm_calls += 1
@@ -288,12 +310,15 @@ def run_agent(cfg: BridgeConfig, task: str,
     if search_urls and total_llm_calls < limits.max_llm_calls and len(steps) < limits.max_steps:
         step_num = len(steps) + 1
         step = AgentStep(
-            step=step_num, tool="research",
+            step=step_num,
+            tool="research",
             args={"question": task, "urls": search_urls},
         )
         try:
             research_result = _agent_research(
-                cfg, task, search_urls,
+                cfg,
+                task,
+                search_urls,
                 max_chars=min(limits.max_chars, 30_000),
             )
             total_llm_calls += 1
@@ -338,7 +363,8 @@ def run_agent(cfg: BridgeConfig, task: str,
         if total_llm_calls < limits.max_llm_calls and len(steps) < limits.max_steps + 2:
             step_num = len(steps) + 1
             step = AgentStep(
-                step=step_num, tool="verify_claims",
+                step=step_num,
+                tool="verify_claims",
                 args={"claims": [answer], "urls": list(all_sources)[:5]},
             )
             try:
@@ -348,8 +374,11 @@ def run_agent(cfg: BridgeConfig, task: str,
                 step.ok = True
                 step.result = {
                     "verdicts": [
-                        {"claim": c.claim, "status": c.status,
-                         "evidence": [e.quote[:500] for e in c.evidence]}
+                        {
+                            "claim": c.claim,
+                            "status": c.status,
+                            "evidence": [e.quote[:500] for e in c.evidence],
+                        }
                         for c in verified.claims
                     ]
                 }
@@ -363,7 +392,9 @@ def run_agent(cfg: BridgeConfig, task: str,
     # Check limits
     elapsed = time.perf_counter() - start_time
     if elapsed > limits.max_exec_seconds:
-        limitations.append(f"execution time {elapsed:.1f}s exceeded limit {limits.max_exec_seconds}s")
+        limitations.append(
+            f"execution time {elapsed:.1f}s exceeded limit {limits.max_exec_seconds}s"
+        )
     if total_pages > limits.max_pages:
         limitations.append(f"page count {total_pages} exceeded limit {limits.max_pages}")
     if total_chars > limits.max_chars:

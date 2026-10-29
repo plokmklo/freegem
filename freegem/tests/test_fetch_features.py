@@ -808,9 +808,7 @@ class FlareSolverrResponseShapeTests(unittest.TestCase):
         from freegem.flaresolverr_fetcher import FlareSolverrError
 
         with self.assertRaises(FlareSolverrError) as caught:
-            self._call(
-                {"status": "ok", "solution": {"status": "NaN", "response": "<p>x</p>"}}
-            )
+            self._call({"status": "ok", "solution": {"status": "NaN", "response": "<p>x</p>"}})
         self.assertIn("malformed status", str(caught.exception))
 
     def test_service_error_message_still_carries_through(self) -> None:
@@ -823,4 +821,3 @@ class FlareSolverrResponseShapeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

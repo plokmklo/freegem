@@ -845,9 +845,7 @@ class RetryPhaseBudgetTests(unittest.TestCase):
             mock.patch("freegem.smart_fetch._PAUSE_SEC", 0.0),
             mock.patch("freegem.smart_fetch._5XX_BACKOFF_BASE_SEC", 0.2),
             mock.patch("freegem.smart_fetch.random.random", return_value=0.5),
-            mock.patch(
-                "freegem.smart_fetch.scrape_page", side_effect=ScrapeError("HTTP 503")
-            ),
+            mock.patch("freegem.smart_fetch.scrape_page", side_effect=ScrapeError("HTTP 503")),
             mock.patch("freegem.smart_fetch._try_strategy", side_effect=try_strategy),
         ):
             with self.assertRaises(ScrapeError) as caught:

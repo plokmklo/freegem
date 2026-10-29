@@ -635,4 +635,3 @@ def build_guarded_opener(
     ):
         opener.add_handler(handler)
     return opener
-

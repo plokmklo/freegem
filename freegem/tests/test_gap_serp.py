@@ -67,9 +67,7 @@ class DdgParserEdgeTests(unittest.TestCase):
         self.assertEqual(hits[0].position, 2)
 
     def test_missing_snippet_is_empty_string(self) -> None:
-        html = (
-            '<a class="result__a" href="https://a.example.com/">Title A</a>'
-        )
+        html = '<a class="result__a" href="https://a.example.com/">Title A</a>'
         hits = _parse_ddg(html, 10)
         self.assertEqual(hits[0].snippet, "")
 
@@ -82,9 +80,7 @@ class DdgParserEdgeTests(unittest.TestCase):
         self.assertEqual(len(_parse_ddg(html, 0)), 2)
 
     def test_unencoded_uddg_is_decoded(self) -> None:
-        html = (
-            '<a class="result__a" href="/l/?uddg=https://ex.com/a b">T</a>'
-        )
+        html = '<a class="result__a" href="/l/?uddg=https://ex.com/a b">T</a>'
         hits = _parse_ddg(html, 10)
         self.assertEqual(hits[0].url, "https://ex.com/a b")
 
@@ -160,4 +156,3 @@ class OpenerAndRegistryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -253,4 +253,3 @@ def test_sqlite_sink_fallback_matches_any_term(monkeypatch: pytest.MonkeyPatch) 
     hits = sink.search("bridge manual", limit=5)
     assert {h["doc_id"] for h in hits} == {"1", "2"}
     sink.close()
-

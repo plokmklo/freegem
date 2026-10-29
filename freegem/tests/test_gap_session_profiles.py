@@ -34,9 +34,7 @@ class ProfilePathSanitizationTests(unittest.TestCase):
 
     def test_case_variants_collide_on_one_file(self) -> None:
         """Names differing only by case share a file -- last save wins."""
-        self.mgr.save_profile(
-            SessionProfile(name="Work", cookies=[{"name": "a", "value": "1"}])
-        )
+        self.mgr.save_profile(SessionProfile(name="Work", cookies=[{"name": "a", "value": "1"}]))
         path_b = self.mgr.save_profile(
             SessionProfile(name="work", cookies=[{"name": "b", "value": "2"}])
         )

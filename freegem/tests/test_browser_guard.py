@@ -477,11 +477,8 @@ class ResolverTaxonomyTests(unittest.TestCase):
         for exc in (OSError("no dns"), UnicodeError("embedded null byte")):
             with self.subTest(exc=exc):
                 with patch("freegem.ssrf.socket.getaddrinfo", side_effect=exc):
-                    self.assertEqual(
-                        host_public_or_unresolvable("split.example"), "split.example"
-                    )
+                    self.assertEqual(host_public_or_unresolvable("split.example"), "split.example")
 
 
 if __name__ == "__main__":
     unittest.main()
-

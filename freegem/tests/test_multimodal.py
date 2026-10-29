@@ -402,7 +402,9 @@ class DecodeDataUrlTests(unittest.TestCase):
         so the decoder must strip it first."""
         from freegem.multimodal import decode_data_url
 
-        self.assertEqual(decode_data_url("data:image/png;base64,aGVs\nbG8="), (b"hello", "image/png"))
+        self.assertEqual(
+            decode_data_url("data:image/png;base64,aGVs\nbG8="), (b"hello", "image/png")
+        )
 
     def test_extra_header_parameters_are_tolerated(self) -> None:
         from freegem.multimodal import decode_data_url

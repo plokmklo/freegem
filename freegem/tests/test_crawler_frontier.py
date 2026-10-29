@@ -197,7 +197,6 @@ class FrontierTests(unittest.TestCase):
         conn.close()
         self.assertEqual(rows[0], 1)
 
-
     def test_error_count_recorded_without_prior_host_touch(self) -> None:
         """mark_error/mark_done must create the host_state row themselves.
 

@@ -1329,4 +1329,3 @@ def _check_mcp_auth(cfg: BridgeConfig, api_key: str | None = None) -> None:
     expected_key = getattr(cfg, "api_key", None) or os.environ.get("FREEGEM_API_KEY")
     if expected_key and api_key != expected_key:
         raise PermissionError("Unauthorized: invalid or missing MCP API key")
-

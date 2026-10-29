@@ -1241,4 +1241,3 @@ class HandlerFaultMappingTests(unittest.TestCase):
             handler.do_DELETE()
         handler.send_error_json.assert_called_once()
         self.assertEqual(handler.send_error_json.call_args[0][1], 408)
-

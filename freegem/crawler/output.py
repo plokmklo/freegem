@@ -172,4 +172,3 @@ def make_writer(
             columns.append("_index")
         return _CsvWriter(path, columns, append=append)
     raise ValueError(f"unknown output format {fmt!r} (jsonl|json|csv)")
-

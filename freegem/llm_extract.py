@@ -379,22 +379,17 @@ def extract_structured(
             raise ExtractionError(f"provider returned unparseable JSON: {exc}") from exc
         try:
             second_raw = provider.complete(
-                prompt
-                + f"\n\nYour previous answer could not be parsed as JSON ({exc}). "
+                prompt + f"\n\nYour previous answer could not be parsed as JSON ({exc}). "
                 "Answer again with ONLY the JSON object, no prose, no code fences."
             )
         except Exception as retry_exc:
             # The repair call itself failed (or a second answer never
             # arrived); the original parse failure is what the caller needs.
-            raise ExtractionError(
-                f"provider returned unparseable JSON: {exc}"
-            ) from retry_exc
+            raise ExtractionError(f"provider returned unparseable JSON: {exc}") from retry_exc
         try:
             second_data = _parse_json_object(second_raw)
         except ValueError as retry_exc:
-            raise ExtractionError(
-                f"provider returned unparseable JSON: {retry_exc}"
-            ) from retry_exc
+            raise ExtractionError(f"provider returned unparseable JSON: {retry_exc}") from retry_exc
         clean, problems = validate_extraction(schema, second_data)
         missing = [p for p in problems if p.startswith("missing required")]
         if missing:
@@ -422,4 +417,3 @@ def extract_structured(
     if missing:
         raise ExtractionError("; ".join(missing))
     return clean, problems
-

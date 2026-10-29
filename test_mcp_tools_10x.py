@@ -16,10 +16,8 @@ from __future__ import annotations
 
 import json
 import os
-import random
 import sys
 import time
-import traceback
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -44,9 +42,7 @@ if not _LIVE:
     except ImportError:  # pragma: no cover - dev-only dependency
         pytest = None
     if pytest is not None:
-        pytestmark = pytest.mark.skip(
-            reason="live-API harness: set FREEGEM_LIVE_MCP=1 to opt in"
-        )
+        pytestmark = pytest.mark.skip(reason="live-API harness: set FREEGEM_LIVE_MCP=1 to opt in")
 
 # Minimal, fast queries per tool. These are designed to return quickly so
 # 10 iterations * 14 tools = 140 calls complete in reasonable time.
@@ -58,13 +54,29 @@ TOOL_QUERIES = {
     "gemini_chat": {"messages": [{"role": "user", "content": "say hello world"}]},
     "gemini_list_models": {},
     "web_scrape": {"url": "https://example.com"},
-    "web_research": {"urls": ["https://en.wikipedia.org/wiki/Web_scraping"], "question": "what is web scraping"},
-    "web_verify": {"claims": ["web scraping is the automated extraction of data from websites"], "urls": ["https://en.wikipedia.org/wiki/Web_scraping"]},
+    "web_research": {
+        "urls": ["https://en.wikipedia.org/wiki/Web_scraping"],
+        "question": "what is web scraping",
+    },
+    "web_verify": {
+        "claims": ["web scraping is the automated extraction of data from websites"],
+        "urls": ["https://en.wikipedia.org/wiki/Web_scraping"],
+    },
     "ai_clean": {"url": "https://en.wikipedia.org/wiki/Web_scraping"},
     "ai_summarize": {"url": "https://en.wikipedia.org/wiki/Web_scraping"},
-    "ai_extract": {"urls": ["https://en.wikipedia.org/wiki/Web_scraping"], "query": "what is web scraping"},
-    "ai_research": {"urls": ["https://en.wikipedia.org/wiki/Web_scraping"], "query": "what is web scraping used for"},
-    "ai_crawl": {"seeds": ["https://en.wikipedia.org/wiki/Web_scraping"], "query": "web scraping", "max_pages": 3},
+    "ai_extract": {
+        "urls": ["https://en.wikipedia.org/wiki/Web_scraping"],
+        "query": "what is web scraping",
+    },
+    "ai_research": {
+        "urls": ["https://en.wikipedia.org/wiki/Web_scraping"],
+        "query": "what is web scraping used for",
+    },
+    "ai_crawl": {
+        "seeds": ["https://en.wikipedia.org/wiki/Web_scraping"],
+        "query": "web scraping",
+        "max_pages": 3,
+    },
 }
 
 
@@ -116,7 +128,7 @@ def main() -> None:
             # Shuffle order each round to test resilience
             pass
         for name in ALL_TOOLS:
-            print(f"  Round {i+1}/10: {name}...", end=" ", flush=True)
+            print(f"  Round {i + 1}/10: {name}...", end=" ", flush=True)
             r = run_one(cfg, name)
             status = "OK" if r["ok"] else "FAIL"
             print(f"{status} ({r['elapsed_sec']:.2f}s)")

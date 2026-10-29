@@ -17,13 +17,13 @@ import email.message
 import json
 import unittest
 import urllib.error
-from typing import Any, Literal
+from typing import Any
 from unittest import mock
 
 from freegem.config import BridgeConfig
-from freegem.mcp_tools import TOOL_SPECS, _ROBOTS_MAX_BYTES, run_tool
+from freegem.mcp_tools import _ROBOTS_MAX_BYTES, TOOL_SPECS, run_tool
 from freegem.ssrf import SSRFRefused
-from freegem.web_scraper import ScrapeError, _UA
+from freegem.web_scraper import _UA, ScrapeError
 
 DEFAULT_URL = "https://example.com/dir/page?q=1"
 ROBOTS_URL = "https://example.com/robots.txt"
@@ -91,9 +91,7 @@ class RobotsCheckTestCase(unittest.TestCase):
     ) -> tuple[dict[str, Any], _FakeOpenerFactory]:
         factory = _FakeOpenerFactory(outcome)
         with mock.patch("freegem.web_scraper._network_opener", factory):
-            raw = run_tool(
-                self.cfg, "freegem_robots_check", {"url": url, **kwargs}
-            )
+            raw = run_tool(self.cfg, "freegem_robots_check", {"url": url, **kwargs})
         return json.loads(raw), factory
 
 
@@ -209,7 +207,9 @@ class ErrorPathTests(RobotsCheckTestCase):
         self.assertIn("untrusted", report["note"])
 
     def test_server_error_is_unreachable_never_silent_allow(self) -> None:
-        err = urllib.error.HTTPError(ROBOTS_URL, 503, "Service Unavailable", email.message.Message(), None)
+        err = urllib.error.HTTPError(
+            ROBOTS_URL, 503, "Service Unavailable", email.message.Message(), None
+        )
         report, _ = self._check(err)
         self.assertEqual(report["status"], "unreachable")
         self.assertFalse(report["found"])
@@ -233,9 +233,7 @@ class ErrorPathTests(RobotsCheckTestCase):
         factory = _FakeOpenerFactory(SSRFRefused("169.254.169.254 is link-local"))
         with mock.patch("freegem.web_scraper._network_opener", factory):
             with self.assertRaises(ScrapeError) as ctx:
-                run_tool(
-                    self.cfg, "freegem_robots_check", {"url": "http://169.254.169.254/"}
-                )
+                run_tool(self.cfg, "freegem_robots_check", {"url": "http://169.254.169.254/"})
         self.assertIn("SSRF", str(ctx.exception))
 
     def test_empty_robots_txt_is_ok_and_allows(self) -> None:
@@ -249,4 +247,3 @@ class ErrorPathTests(RobotsCheckTestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

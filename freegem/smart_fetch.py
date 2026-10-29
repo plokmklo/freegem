@@ -335,7 +335,9 @@ def _retry_5xx(
                 f"({max(remaining, 0.0):.2f}s left); giving up"
             )
         if progress is not None:
-            progress(f"smart-fetch: 5xx/429 retry {attempt}/{_5XX_MAX_ATTEMPTS} for {url!r}, waiting {delay:.1f}s")
+            progress(
+                f"smart-fetch: 5xx/429 retry {attempt}/{_5XX_MAX_ATTEMPTS} for {url!r}, waiting {delay:.1f}s"
+            )
         time.sleep(delay)
         try:
             result = scrape_page(
@@ -352,9 +354,7 @@ def _retry_5xx(
             # Memory is updated by the caller's normal ``remember`` path.
             return result
         last_error = "5xx/429 retry returned a challenge page, not content"
-    raise ScrapeError(
-        f"5xx/429 retry exhausted for {url!r}: {last_error}"
-    )
+    raise ScrapeError(f"5xx/429 retry exhausted for {url!r}: {last_error}")
 
 
 def _looks_like_challenge(text: str) -> bool:
@@ -962,9 +962,7 @@ def _ai_search_answer(
             # errors. Unwrapped, one would escape fallback_scrape's
             # ScrapeError handler and kill the whole ladder (and its honest
             # taxonomy) instead of recording this rung's failure.
-            raise ScrapeError(
-                f"ai-search failed for {url!r}: {type(exc).__name__}: {exc}"
-            ) from exc
+            raise ScrapeError(f"ai-search failed for {url!r}: {type(exc).__name__}: {exc}") from exc
     finally:
         # Do NOT wait: the whole point is that a wedged generation cannot
         # hold the ladder (or a batch worker) hostage.

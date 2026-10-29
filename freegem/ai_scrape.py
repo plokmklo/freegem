@@ -163,6 +163,7 @@ def _is_none_sentinel(text: str) -> bool:
     first_line = stripped.splitlines()[0].strip()
     return first_line.rstrip(".!").upper() == _SENTINEL_NONE
 
+
 Complete = Callable[[str], str]
 SearchFn = Callable[[str], str]
 

@@ -193,7 +193,9 @@ class WarcWriterTestCase(unittest.TestCase):
     def test_threaded_writes_stay_verifiable(self) -> None:
         def worker(n: int) -> None:
             for i in range(50):
-                self.writer.response(f"http://site.test/{n}-{i}", status=200, body=f"b{n}-{i}".encode())
+                self.writer.response(
+                    f"http://site.test/{n}-{i}", status=200, body=f"b{n}-{i}".encode()
+                )
 
         threads = [threading.Thread(target=worker, args=(n,)) for n in range(4)]
         for t in threads:
@@ -211,7 +213,9 @@ class WarcWriterTestCase(unittest.TestCase):
         # refused BEFORE it steers the reader past the block-size cap.
         self.writer.close()
         Path(self.path).write_bytes(
-            b"WARC/1.1\r\nWARC-Type: response\r\nContent-Length: -1\r\n\r\n" + b"A" * 64 + b"\r\n\r\n"
+            b"WARC/1.1\r\nWARC-Type: response\r\nContent-Length: -1\r\n\r\n"
+            + b"A" * 64
+            + b"\r\n\r\n"
         )
         with self.assertRaises(WARCError):
             list(iter_records(self.path))
@@ -755,4 +759,3 @@ class EvidenceEndToEndTests(unittest.TestCase):
         self.assertEqual(code, 0, out)
         report = verify(out_path)
         self.assertTrue(report["ok"], report["problems"])
-
