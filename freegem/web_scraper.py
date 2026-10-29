@@ -1159,10 +1159,11 @@ def _mediawiki_parse_extract(
 ) -> ScrapeResult | None:
     """FULL article text through the site's ``action=parse`` API.
 
-    The ``prop=extracts`` API (below) returns a plain-text extract that the
-    extension itself caps -- on long articles tens of thousands of
-    characters never make it out, which is exactly the gap a reader service
-    exploits to look "better" on Wikipedia. ``action=parse`` returns the
+    The ``prop=extracts`` fallback (below) returns complete plain text, but
+    a plain-text serialization flattens rendered structure -- tables,
+    infoboxes, and reference lists lose their shape, which is exactly the
+    gap a reader service exploits to look "better" on Wikipedia.
+    ``action=parse`` returns the
     complete rendered HTML of the article, tables and all; the same
     extractor used for ordinary pages turns that into text. Returns None on
     ANY failure so the caller falls back to the extracts path -- this
@@ -1217,7 +1218,11 @@ def _mediawiki_extract(cfg: BridgeConfig, url: str) -> ScrapeResult | None:
     an article, robots allows the API, and the API call still fails.
 
     The full-parse path is tried first (whole article, tables included);
-    the plain-text extract API is the fallback.
+    the plain-text extract API is the fallback. That fallback sends NO
+    explicit ``exchars`` budget on purpose (#67): the TextExtracts extension
+    truncates an extract only when exchars/exsentences is requested, its
+    ``exchars`` is capped at 1200, and freegem's own budgets apply after
+    the full extraction -- see the comment at the request itself.
     """
     hit = _mediawiki_article(url)
     if hit is None:
@@ -1226,6 +1231,18 @@ def _mediawiki_extract(cfg: BridgeConfig, url: str) -> ScrapeResult | None:
     full = _mediawiki_parse_extract(cfg, url, canonical, title)
     if full is not None:
         return full
+    # (#67) No explicit `exchars` in this request, deliberately. The
+    # TextExtracts extension truncates an extract ONLY when exchars or
+    # exsentences is requested (ApiQueryExtracts::truncate() is a no-op
+    # without them) and exchars is hard-capped at 1200 by the extension, so
+    # an explicit budget would CUT a long article's extract from the
+    # complete plain text to ~1200 characters. The budget-free request is
+    # the bounded one: upstream returns the whole extract, and freegem's
+    # own budgets (the caller's max_chars view, the research module's
+    # per-page and total budgets) apply AFTER the full extraction.
+    # Truncation stays distinguishable by construction: a
+    # via="mediawiki-api" result can only carry truncated=True from
+    # freegem's own caller-budget cut, never from a silent upstream cap.
     api_url = f"https://{canonical}/w/api.php?" + urllib.parse.urlencode(
         {
             "action": "query",

@@ -110,17 +110,19 @@ TOOL_SPECS: list[dict[str, Any]] = [
         "name": "web_research",
         "summary": "Answer one question from several pages, cited [S1]..[Sn]",
         "description": (
-            "Fetch up to max_pages URLs with the same SSRF/caps guard as "
-            "web_scrape, then answer one question across all of them with inline "
-            "[S1], [S2] citations, key points, and disagreements/gaps. With "
-            "evidence enabled (default), the answer is followed by per-source "
-            "verbatim quotes, each checked against the text actually fetched and "
-            "flagged verified or UNVERIFIED. Successful "
-            "fetches are cached locally with a TTL; per-page and total character "
-            "budgets are enforced; page text stays inside untrusted-content "
-            "markers end to end. When Gemini is unavailable, returns labeled raw "
-            "extracts instead of failing. Not a crawler: give it the specific "
-            "pages to compare or read."
+            "Research pages YOU provide — pass `urls` (2-10) and a `question` "
+            "(alias: `query`); this tool does not search the web, use "
+            "gemini_search to find pages first. Fetches up to max_pages URLs "
+            "with the same SSRF/caps guard as web_scrape, then answers one "
+            "question across all of them with inline [S1], [S2] citations, key "
+            "points, and disagreements/gaps. With evidence enabled (default), "
+            "the answer is followed by per-source verbatim quotes, each checked "
+            "against the text actually fetched and flagged verified or "
+            "UNVERIFIED. Successful fetches are cached locally with a TTL; "
+            "per-page and total character budgets are enforced; page text stays "
+            "inside untrusted-content markers end to end. When Gemini is "
+            "unavailable, returns labeled raw extracts instead of failing. "
+            "Not a crawler: give it the specific pages to compare or read."
         ),
     },
     {
@@ -473,12 +475,15 @@ def build_server(cfg: BridgeConfig, name: str = "freegem") -> Any:
     @server.tool()
     def web_research(
         urls: list,
-        question: str,
+        question: str | None = None,
+        query: str | None = None,
         max_pages: int = 5,
         max_chars_per_page: int = 12000,
         evidence: bool = True,
     ) -> str:
-        """Answer one question from several pages, with [S1]..[Sn] citations.
+        """Research pages YOU provide — pass `urls` (2-10) and a `question`
+        (alias: `query`); this tool does not search the web, use
+        gemini_search to find pages first.
 
         Fetches each URL with the same SSRF/caps guard as web_scrape,
         extracts readable text, and returns a cited answer (Answer / Key
@@ -492,18 +497,23 @@ def build_server(cfg: BridgeConfig, name: str = "freegem") -> Any:
         Args:
             urls: The pages to research, http/https (2-10 works best).
             question: What to answer or compare across the pages.
+            query: Alias for `question` — the other research tools name this
+                parameter `query`, so both spellings are accepted.
             max_pages: Fetch at most this many URLs (1-10, default 5).
             max_chars_per_page: Truncate each page's text to this many
                 characters (500-50000, default 12000).
             evidence: Quote and verify supporting passages per source
                 (default True).
         """
+        resolved = (question or "").strip() or (query or "").strip()
+        if not resolved:
+            raise ValueError("web_research requires a 'question' (or 'query') argument")
         return run_tool(
             cfg,
             "web_research",
             {
                 "urls": urls,
-                "question": question,
+                "question": resolved,
                 "max_pages": max_pages,
                 "max_chars_per_page": max_chars_per_page,
                 "evidence": evidence,

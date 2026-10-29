@@ -1394,14 +1394,20 @@ def research_cli(
 
 
 def run_research_tool(cfg: BridgeConfig, arguments: dict[str, Any]) -> str:
-    """MCP ``web_research`` dispatch. Text output with the full source table."""
+    """MCP ``web_research`` dispatch. Text output with the full source table.
+
+    ``query`` is accepted as an alias for ``question`` (#70/#71): the other
+    research-style tools (ai_research, ai_extract, ai_crawl) name the prompt
+    parameter ``query``, so a caller following that convention gets the same
+    research instead of a ValueError naming a parameter it never used.
+    """
     raw_urls = arguments.get("urls")
     if not isinstance(raw_urls, list) or not raw_urls:
         raise ValueError("web_research requires a non-empty 'urls' list")
     urls = [str(u).strip() for u in raw_urls if str(u).strip()]
-    question = str(arguments.get("question") or "").strip()
+    question = str(arguments.get("question") or arguments.get("query") or "").strip()
     if not question:
-        raise ValueError("web_research requires a 'question' argument")
+        raise ValueError("web_research requires a 'question' (or 'query') argument")
 
     def _int(name: str, default: int, low: int, high: int) -> int:
         try:

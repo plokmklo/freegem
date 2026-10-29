@@ -1,3 +1,34 @@
+## [Unreleased]
+
+### Fixed
+
+- **MCP `web_research` accepts `query` as an alias for `question`** (#70,
+  #71): the other research-style tools name the prompt parameter `query`,
+  and a caller following that convention got a `ValueError` instead of
+  research. Both names now work through the MCP schema and the `run_tool`
+  dispatch, and a missing prompt names both accepted parameters in the
+  error. The generated schema requires only `urls`.
+- **`web_research`'s advertised description leads with the requirement**
+  (#73): the description sent over `tools/list` now opens with "Research
+  pages YOU provide — pass `urls` (2-10) and a `question` (alias: `query`);
+  this tool does not search the web, use gemini_search to find pages
+  first" instead of burying `urls` twelve lines into the docstring.
+- **MediaWiki fallback honesty** (#67): the `prop=extracts` fallback keeps
+  its deliberate budget-free request, now documented and regression-tested:
+  the TextExtracts extension truncates an extract only when
+  `exchars`/`exsentences` is requested and hard-caps `exchars` at 1200, so
+  an explicit budget would CUT a long article's extract instead of bounding
+  a bigger one. Upstream returns the complete plain text, freegem's own
+  budgets cut after the full extraction, and `truncated=True` on a
+  `mediawiki-api` result can only be freegem's own caller cut.
+
+### Tests
+
+- `test_version_consistency.py` (#65): runtime version, pyproject, and
+  installed metadata must agree with the changelog, or CI fails.
+- `test_web_research_contract.py` and `test_mediawiki_budget.py`: the
+  issue-round contract tests — hermetic, every seam mocked.
+
 ## [2.12.0] — 2026-10-20
 
 Two research waves landed under one version. The **research wave** turned a
