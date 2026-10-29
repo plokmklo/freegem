@@ -2,7 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # improvements: GitHub is currently not delivering pull_request
+    # synchronize events reliably for this PR, so the branch gets a direct
+    # push trigger for the full matrix.
+    branches: [main, improvements]
   pull_request:
   workflow_dispatch:
 
