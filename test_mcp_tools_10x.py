@@ -3,7 +3,13 @@
 Runs each tool with a minimal, sensible query, collecting success/failure,
 latency, and error taxonomy. Results are saved to mcptools_10x_results.json.
 
-Run:  .venv/bin/python test_mcp_tools_10x.py
+NOT a test suite (#72): this harness makes ~140 LIVE calls -- real Gemini
+sessions, real network fetches, real rate limits. Nothing here is hermetic.
+Both pytest collection and direct execution are gated behind an explicit
+opt-in environment variable, so an accidental `pytest` at the repo root
+never fires a live-API loop:
+
+Run:  FREEGEM_LIVE_MCP=1 .venv/bin/python test_mcp_tools_10x.py
 """
 
 from __future__ import annotations
@@ -26,6 +32,21 @@ OUT = os.path.join(CWD, "mcptools_10x_results.json")
 
 ALL_TOOLS = [t["name"] for t in TOOL_SPECS]
 assert len(ALL_TOOLS) == 14, f"expected 14 tools, got {len(ALL_TOOLS)}"
+
+# (#72) Live-API opt-in gate: unset (the default) means this module is
+# inert -- pytest collects the filename, so collection itself must never
+# fire 140 live calls, and a direct run refuses instead of dialing.
+_LIVE = bool(os.environ.get("FREEGEM_LIVE_MCP"))
+
+if not _LIVE:
+    try:
+        import pytest
+    except ImportError:  # pragma: no cover - dev-only dependency
+        pytest = None
+    if pytest is not None:
+        pytestmark = pytest.mark.skip(
+            reason="live-API harness: set FREEGEM_LIVE_MCP=1 to opt in"
+        )
 
 # Minimal, fast queries per tool. These are designed to return quickly so
 # 10 iterations * 14 tools = 140 calls complete in reasonable time.
@@ -77,6 +98,12 @@ def run_one(cfg: BridgeConfig, name: str) -> dict:
 
 
 def main() -> None:
+    if not _LIVE:
+        sys.exit(
+            "test_mcp_tools_10x.py makes ~140 LIVE Gemini/web calls.\n"
+            "Opt in explicitly:\n"
+            "  FREEGEM_LIVE_MCP=1 .venv/bin/python test_mcp_tools_10x.py"
+        )
     cfg = BridgeConfig()
     results: list[dict] = []
 

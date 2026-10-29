@@ -179,21 +179,27 @@ TOOL_SPECS: list[dict[str, Any]] = [
         "name": "ai_research",
         "summary": "Multi-page AI research: answer a question with cited sources",
         "description": (
-            "Fetch several pages, then answer one question with [S1]..[Sn] inline "
-            "citations. Each page is AI-summarized into a per-source note; the "
-            "answer is distilled from those notes. Citations and fetch metadata "
-            "remain the source of truth; AI quotes are marked UNVERIFIED if not "
-            "checkable against fetched text. Same SSRF-safe fetch path as web_scrape."
+            "Research pages YOU provide — pass `urls` (2-10) and a `query`; this "
+            "tool does not search the web, use gemini_search to find pages "
+            "first. Fetch several pages, then answer one question with [S1]..[Sn] "
+            "inline citations. Each page is AI-summarized into a per-source "
+            "note; the answer is distilled from those notes. Citations and fetch "
+            "metadata remain the source of truth; AI quotes are marked "
+            "UNVERIFIED if not checkable against fetched text. Same SSRF-safe "
+            "fetch path as web_scrape."
         ),
     },
     {
         "name": "ai_crawl",
         "summary": "AI-powered crawl: score pages against a query, discover links",
         "description": (
-            "Start from seed URLs, fetch pages through the SSRF-safe path, score "
-            "each page's relevance to a query, distill oversized pages, and use AI "
-            "link discovery to find semantically relevant next hops. Bounded by "
-            "max_pages and max_depth. Returns per-page scores and summaries."
+            "Crawl from seeds YOU provide — pass `seeds` and a `query`; AI link "
+            "discovery only finds next hops FROM those pages, it does not search "
+            "the web for topics (use gemini_search first). Fetch pages through "
+            "the SSRF-safe path, score each page's relevance to the query, "
+            "distill oversized pages, and follow semantically relevant next "
+            "hops. Bounded by max_pages and max_depth. Returns per-page scores "
+            "and summaries."
         ),
     },
     {
@@ -1152,7 +1158,23 @@ def build_server(cfg: BridgeConfig, name: str = "freegem") -> Any:
         no_limit: bool = False,
         model: str | None = None,
     ) -> str:
-        """Multi-page AI research: answer a question with cited sources."""
+        """Research pages YOU provide — pass `urls` (2-10) and a `query`;
+        this tool does not search the web, use gemini_search to find pages
+        first. Multi-page AI research: fetch the pages, then answer the
+        question with [S1]..[Sn] citations distilled from per-source notes.
+
+        Args:
+            urls: The pages to research, http/https (2-10 works best).
+            query: What to answer or compare across the pages.
+            max_chars: Truncate each page's text to this many characters.
+            smart: Use the smart-fetch ladder on refusals (default True).
+            no_cache: Skip the local fetch cache (default False).
+            refresh: Force re-fetching cached pages (default False).
+            budget_chars: Total character budget across pages.
+            concurrency: Pages fetched at once.
+            no_limit: Lift the per-page budget split (default False).
+            model: Optional Gemini model id override.
+        """
         return run_tool(
             cfg,
             "ai_research",
@@ -1185,7 +1207,26 @@ def build_server(cfg: BridgeConfig, name: str = "freegem") -> Any:
         no_limit: bool = False,
         model: str | None = None,
     ) -> str:
-        """AI-powered crawl: score pages against a query, discover links."""
+        """Crawl from seeds YOU provide — pass `seeds` and a `query`; AI
+        link discovery only finds next hops FROM those pages, it does not
+        search the web for topics (use gemini_search first). AI-powered
+        crawl: fetch pages, score each against the query, distill oversized
+        pages, and follow semantically relevant next hops.
+
+        Args:
+            seeds: The seed URLs to start the crawl from, http/https.
+            query: What the crawl scores pages and discovered links against.
+            max_pages: Fetch at most this many pages (default 50).
+            max_depth: Follow links at most this many hops from a seed (default 2).
+            max_chars: Truncate each page's text to this many characters.
+            smart: Use the smart-fetch ladder on refusals (default True).
+            no_cache: Skip the local fetch cache (default False).
+            refresh: Force re-fetching cached pages (default False).
+            budget_chars: Total character budget across pages.
+            concurrency: Pages fetched at once.
+            no_limit: Lift the per-page budget split (default False).
+            model: Optional Gemini model id override.
+        """
         return run_tool(
             cfg,
             "ai_crawl",
