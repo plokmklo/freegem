@@ -24,6 +24,11 @@
 
 ### Tests
 
+- `test_tool_description_guard.py` (#73): an ast-based guard that fails CI
+  when an MCP tool's advertised description hides what the call requires —
+  every required argument is named, and a research tool taking pre-supplied
+  URLs must lead with that requirement. The three job tools' descriptions
+  now name their required arguments too.
 - `test_version_consistency.py` (#65): runtime version, pyproject, and
   installed metadata must agree with the changelog, or CI fails.
 - `test_web_research_contract.py` and `test_mediawiki_budget.py`: the
