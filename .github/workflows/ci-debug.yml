@@ -1,3 +1,4 @@
+# TEMPORARY debug harness - remove after diagnosing CI failures
 name: CI Debug
 
 on:
