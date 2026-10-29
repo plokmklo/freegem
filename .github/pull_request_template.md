@@ -1,47 +1,14 @@
-<!--
-  Keep the PR title in conventional-commit form: fix:, feat:, docs:, chore:,
-  refactor:, test:. The CI gates run ruff check, ruff format --check, mypy,
-  and the test suite -- run them locally before pushing.
+## What
 
-    pip install -e ".[dev]"
-    ruff check .
-    ruff format --check .
-    mypy freegem --ignore-missing-imports
-    pytest
--->
+<!-- One or two sentences: what does this PR change and why? -->
 
-## Kind of change
+## Verification
 
-- [ ] Bug fix
-- [ ] New feature
-- [ ] Documentation
-- [ ] Refactor, no behaviour change
-- [ ] Build / packaging / CI
-- [ ] Tests only
+<!-- How was this checked? "CI only" is a valid answer. -->
 
-## What changed and why
+- [ ] `ci.yml` green (12-job matrix + smoke-mcp + smoke-no-extras)
 
-<!-- Lead with the reason. If the "what" is not obvious from the diff, explain it. -->
+## Notes
 
-## How you verified it
-
-<!-- Commands and their output. "It works on my machine" is not verification. -->
-
-## Breaking changes
-
-<!-- Config keys, env vars, CLI flags, endpoints. Write "none" if none. -->
-
-## Gates
-
-- [ ] `ruff check .` passes
-- [ ] `ruff format --check .` passes
-- [ ] `mypy freegem --ignore-missing-imports` passes
-- [ ] `pytest` passes
-- [ ] Tests added for behaviour changes; no new test hits the network
-
-## Hygiene
-
-- [ ] No credential, cookie value, SAPISID, or XSRF token is included
-- [ ] No new third-party dependency in the core (extras only)
-- [ ] `CHANGELOG.md` updated under `[Unreleased]` if user-visible
-- [ ] No authentication or API-key support added
+<!-- Anything reviewers should look at twice, out-of-scope follow-ups,
+     or links to relevant issues/docs. -->
