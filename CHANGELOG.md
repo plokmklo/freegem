@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+### Added
+
+- **Pull request template** (`.github/pull_request_template.md`):
+  What / Verification / Notes, with the `ci.yml` matrix as the default
+  verification step.
+
 ### Fixed
 
 - **CI gates pass on this branch again**: cleared all 16 `ruff check`
@@ -11,6 +17,11 @@
   strict errors in the test suite (precise `__exit__` signatures, RLock
   spy typing, deliberate monkey-patches tagged with exact `type:
   ignore[method-assign]` codes).
+- **Round two of CI hygiene**: bound the loop-owned `pool` in the
+  grid-pool racer (ruff `B023`), removed a dead placeholder loop from
+  the live-MCP harness (ruff `B007`), and taught the
+  version-consistency test to skip a leading `[Unreleased]` changelog
+  section instead of reading it as version drift.
 
 ### Removed
 
