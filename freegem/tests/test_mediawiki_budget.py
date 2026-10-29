@@ -86,9 +86,7 @@ class MediaWikiFallbackBudgetTests(unittest.TestCase):
         )
         self.assertEqual(result.via, "mediawiki-api")
         self.assertEqual(len(fetch.call_args_list), 2)
-        params = urllib.parse.parse_qs(
-            urllib.parse.urlsplit(fetch.call_args_list[1].args[1]).query
-        )
+        params = urllib.parse.parse_qs(urllib.parse.urlsplit(fetch.call_args_list[1].args[1]).query)
         self.assertNotIn("exchars", params)
         self.assertNotIn("exsentences", params)
         self.assertEqual(params["prop"], ["extracts"])
