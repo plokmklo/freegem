@@ -113,7 +113,11 @@ class CapacityTests(unittest.TestCase):
             lease_b = pool.checkout()
             barrier = threading.Barrier(2)
 
-            def racer(lease: GridLease = lease_a, barrier: threading.Barrier = barrier) -> None:
+            def racer(
+                lease: GridLease = lease_a,
+                barrier: threading.Barrier = barrier,
+                pool: GridPool = pool,
+            ) -> None:
                 barrier.wait()
                 pool.release(lease)
 

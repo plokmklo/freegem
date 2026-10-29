@@ -125,9 +125,6 @@ def main() -> None:
 
     for i in range(10):
         for name in ALL_TOOLS:
-            # Shuffle order each round to test resilience
-            pass
-        for name in ALL_TOOLS:
             print(f"  Round {i + 1}/10: {name}...", end=" ", flush=True)
             r = run_one(cfg, name)
             status = "OK" if r["ok"] else "FAIL"

@@ -32,11 +32,15 @@ def _extract_pyproject_version() -> str:
 
 def _extract_changelog_version() -> str:
     text = CHANGELOG.read_text()
-    first_line = text.strip().splitlines()[0]
-    # Format: ## [2.11.0] — 2026-10-20
-    if first_line.startswith("## ["):
-        return first_line.split("[")[1].split("]")[0]
-    raise AssertionError(f"Unexpected CHANGELOG header: {first_line}")
+    # Format: ## [2.11.0] — 2026-10-20. A leading "## [Unreleased]"
+    # section is normal between releases; the released version is the
+    # first dated heading at or below it.
+    for line in text.strip().splitlines():
+        if line.startswith("## ["):
+            version = line.split("[")[1].split("]")[0]
+            if version.lower() != "unreleased":
+                return version
+    raise AssertionError("versioned CHANGELOG header not found")
 
 
 class VersionConsistencyTests(unittest.TestCase):
