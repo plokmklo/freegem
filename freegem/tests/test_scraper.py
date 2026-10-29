@@ -916,8 +916,9 @@ class MediaWikiAdapterTests(unittest.TestCase):
         self.assertIn("titles=Alexander_the_Great", api_url)
 
     def test_full_parse_api_returns_whole_article(self) -> None:
-        """action=parse returns the COMPLETE rendered article (tables and all)
-        -- the extracts API caps its output and loses the tail of long pages."""
+        """action=parse returns the COMPLETE rendered article (tables and all);
+        the extracts fallback keeps the whole plain text but flattens tables
+        and structure, so parse wins whenever it answers (#67)."""
         long_html = (
             '<div class="mw-parser-output"><p>' + ("Real content sentence. " * 500) + "</p></div>"
         )
