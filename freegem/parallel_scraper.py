@@ -29,9 +29,6 @@ built from per-page summaries, not the raw concatenation.
 
 from __future__ import annotations
 
-import json
-import os
-import threading
 import time
 from collections.abc import Callable, Iterable
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
@@ -40,14 +37,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .config import BridgeConfig
-from .web_scraper import BatchItem, ScrapeError, ScrapeResult, scrape_page, _clamp_batch_concurrency
+from .web_scraper import ScrapeError, ScrapeResult, _clamp_batch_concurrency, scrape_page
 
 __all__ = [
-    "ParallelResult",
     "ParallelDigest",
+    "ParallelResult",
+    "botwall_ratio",
     "scrape_parallel",
     "summarize_results",
-    "botwall_ratio",
 ]
 
 #: When this fraction of in-flight results are bot walls / rate limited,
@@ -566,9 +563,10 @@ def _batch_digest(
 
 # Re-export for convenience.
 __all__ = [
-    "ParallelResult",
     "ParallelDigest",
+    "ParallelResult",
+    "botwall_ratio",
     "scrape_parallel",
     "summarize_results",
-    "botwall_ratio",
 ]
+

@@ -7,7 +7,6 @@ inputs, and the guarded-opener wiring behind ``cfg``.
 
 from __future__ import annotations
 
-import json
 import unittest
 from unittest import mock
 
@@ -161,3 +160,4 @@ class OpenerAndRegistryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

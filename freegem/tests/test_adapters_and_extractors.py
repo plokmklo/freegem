@@ -5,7 +5,7 @@ import types
 import unittest
 from unittest import mock
 
-from freegem.adapters import parse_docx, parse_document, parse_pdf
+from freegem.adapters import parse_document, parse_docx, parse_pdf
 from freegem.crawler.extract import extract_metadata, html_to_markdown
 from freegem.crawler.hardening import HtmlDom
 
@@ -132,3 +132,4 @@ class TestAdaptersAndExtractors(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

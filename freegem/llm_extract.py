@@ -398,7 +398,7 @@ def extract_structured(
         clean, problems = validate_extraction(schema, second_data)
         missing = [p for p in problems if p.startswith("missing required")]
         if missing:
-            raise ExtractionError("; ".join(missing))
+            raise ExtractionError("; ".join(missing)) from exc
         return clean, problems
     clean, problems = validate_extraction(schema, first_data)
 
@@ -422,3 +422,4 @@ def extract_structured(
     if missing:
         raise ExtractionError("; ".join(missing))
     return clean, problems
+

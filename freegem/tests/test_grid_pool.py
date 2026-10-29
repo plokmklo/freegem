@@ -113,7 +113,9 @@ class CapacityTests(unittest.TestCase):
             lease_b = pool.checkout()
             barrier = threading.Barrier(2)
 
-            def racer(lease: GridLease = lease_a) -> None:
+            def racer(
+                lease: GridLease = lease_a, barrier: threading.Barrier = barrier
+            ) -> None:
                 barrier.wait()
                 pool.release(lease)
 
@@ -157,3 +159,4 @@ class FetchWithGridTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

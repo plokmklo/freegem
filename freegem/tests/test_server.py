@@ -6,6 +6,7 @@ or chunked-body bugs, and one of those (an SSE response with no Content-Length
 never terminating) shipped in the original and hung clients.
 """
 
+import email.message
 import http.client
 import inspect
 import io
@@ -1165,25 +1166,27 @@ class HandlerFaultMappingTests(unittest.TestCase):
         server = mock.MagicMock()
         server.config = BridgeConfig(guard=True, log_requests=False)
         server.server_metrics = mock.MagicMock()
-        handler.server = server  # type: ignore[assignment]
+        handler.server = server
         handler.path = path
         handler.command = command
-        handler.headers = {"Host": "localhost"}
+        headers = email.message.Message()
+        headers["Host"] = "localhost"
+        handler.headers = headers
         handler.client_address = ("127.0.0.1", 0)
         return handler
 
     def test_get_timeout_is_408_not_500(self) -> None:
         handler = self._stub_handler()
-        handler.send_json = mock.Mock(side_effect=TimeoutError("timed out"))
-        handler.send_error_json = mock.Mock()
+        handler.send_json = mock.Mock(side_effect=TimeoutError("timed out"))  # type: ignore[method-assign]
+        handler.send_error_json = mock.Mock()  # type: ignore[method-assign]
         handler.do_GET()
         handler.send_error_json.assert_called_once()
         self.assertEqual(handler.send_error_json.call_args[0][1], 408)
 
     def test_get_unexpected_error_is_generic_500(self) -> None:
         handler = self._stub_handler()
-        handler.send_json = mock.Mock(side_effect=RuntimeError("C:\\secret\\db.sqlite open"))
-        handler.send_error_json = mock.Mock()
+        handler.send_json = mock.Mock(side_effect=RuntimeError("C:\\secret\\db.sqlite open"))  # type: ignore[method-assign]
+        handler.send_error_json = mock.Mock()  # type: ignore[method-assign]
         handler.do_GET()
         message, status = handler.send_error_json.call_args[0]
         self.assertEqual(status, 500)
@@ -1191,14 +1194,14 @@ class HandlerFaultMappingTests(unittest.TestCase):
 
     def test_get_sets_request_id(self) -> None:
         handler = self._stub_handler()
-        handler.send_json = mock.Mock()
+        handler.send_json = mock.Mock()  # type: ignore[method-assign]
         handler.do_GET()
         self.assertTrue(handler._request_id)
 
     def test_delete_foreign_prefix_is_400_before_the_runner(self) -> None:
         handler = self._stub_handler(path="/anything/jobs/job-1", command="DELETE")
-        handler.send_json = mock.Mock()
-        handler.send_error_json = mock.Mock()
+        handler.send_json = mock.Mock()  # type: ignore[method-assign]
+        handler.send_error_json = mock.Mock()  # type: ignore[method-assign]
         with mock.patch("freegem.server.job_runner") as runner:
             handler.do_DELETE()
         handler.send_error_json.assert_called_once_with("expected DELETE /v1/jobs/{id}", 400)
@@ -1206,8 +1209,8 @@ class HandlerFaultMappingTests(unittest.TestCase):
 
     def test_delete_unexpected_error_is_generic_500(self) -> None:
         handler = self._stub_handler(path="/v1/jobs/job-1", command="DELETE")
-        handler.send_json = mock.Mock()
-        handler.send_error_json = mock.Mock()
+        handler.send_json = mock.Mock()  # type: ignore[method-assign]
+        handler.send_error_json = mock.Mock()  # type: ignore[method-assign]
         with (
             mock.patch("freegem.server.job_runner") as runner,
             mock.patch("freegem.server.GLOBAL_JOB_MANAGER") as manager,
@@ -1222,8 +1225,8 @@ class HandlerFaultMappingTests(unittest.TestCase):
 
     def test_delete_broken_pipe_is_swallowed(self) -> None:
         handler = self._stub_handler(path="/v1/jobs/job-1", command="DELETE")
-        handler.send_json = mock.Mock(side_effect=BrokenPipeError("gone"))
-        handler.send_error_json = mock.Mock()
+        handler.send_json = mock.Mock(side_effect=BrokenPipeError("gone"))  # type: ignore[method-assign]
+        handler.send_error_json = mock.Mock()  # type: ignore[method-assign]
         with mock.patch("freegem.server.job_runner") as runner:
             runner.return_value.cancel.return_value = True
             handler.do_DELETE()  # must not raise
@@ -1231,10 +1234,11 @@ class HandlerFaultMappingTests(unittest.TestCase):
 
     def test_delete_timeout_is_408(self) -> None:
         handler = self._stub_handler(path="/v1/jobs/job-1", command="DELETE")
-        handler.send_json = mock.Mock(side_effect=TimeoutError("timed out"))
-        handler.send_error_json = mock.Mock()
+        handler.send_json = mock.Mock(side_effect=TimeoutError("timed out"))  # type: ignore[method-assign]
+        handler.send_error_json = mock.Mock()  # type: ignore[method-assign]
         with mock.patch("freegem.server.job_runner") as runner:
             runner.return_value.cancel.return_value = True
             handler.do_DELETE()
         handler.send_error_json.assert_called_once()
         self.assertEqual(handler.send_error_json.call_args[0][1], 408)
+

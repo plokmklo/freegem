@@ -39,7 +39,9 @@ def _open(path: str, *, append: bool) -> _Sink:
     directory = os.path.dirname(os.path.abspath(path))
     os.makedirs(directory, exist_ok=True)
     if append:
-        handle = open(path, "a", encoding="utf-8", newline="")
+        # Long-lived by design: the writer owns the handle and closes it in
+        # close() (append mode cannot use a `with` block and keep the file open).
+        handle = open(path, "a", encoding="utf-8", newline="")  # noqa: SIM115
         # A killed run can leave a partial last line; resuming must not
         # concatenate onto it (that corrupts the first resumed record).
         if os.path.getsize(path) > 0 and not _endswith_newline(path):
@@ -170,3 +172,4 @@ def make_writer(
             columns.append("_index")
         return _CsvWriter(path, columns, append=append)
     raise ValueError(f"unknown output format {fmt!r} (jsonl|json|csv)")
+

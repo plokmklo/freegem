@@ -20,6 +20,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import TracebackType
 from typing import Any, ClassVar
 from unittest import mock
 
@@ -175,11 +176,16 @@ class WarcWriterTestCase(unittest.TestCase):
                 self.inner.__enter__()
                 self.enters += 1
 
-            def __exit__(self, *exc: object) -> None:
-                self.inner.__exit__(*exc)
+            def __exit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc_value: BaseException | None,
+                traceback: TracebackType | None,
+            ) -> None:
+                self.inner.__exit__(exc_type, exc_value, traceback)
 
         spy = _SpyLock()
-        self.writer._lock = spy
+        self.writer._lock = spy  # type: ignore[assignment]  # spy wraps the real RLock
         self.writer.response("http://site.test/", status=200, body=b"x")
         self.assertGreaterEqual(spy.enters, 1)
         self.writer.close()
@@ -749,3 +755,4 @@ class EvidenceEndToEndTests(unittest.TestCase):
         self.assertEqual(code, 0, out)
         report = verify(out_path)
         self.assertTrue(report["ok"], report["problems"])
+

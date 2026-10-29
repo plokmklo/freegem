@@ -17,7 +17,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from unittest import mock
 
 from freegem.config import BridgeConfig
@@ -762,10 +762,10 @@ class FlareSolverrResponseShapeTests(unittest.TestCase):
                 return self._payload
             return self._payload[:size]
 
-        def __enter__(self) -> "FlareSolverrResponseShapeTests._FakeFlareResponse":
+        def __enter__(self) -> FlareSolverrResponseShapeTests._FakeFlareResponse:
             return self
 
-        def __exit__(self, *exc: Any) -> bool:
+        def __exit__(self, *exc: Any) -> Literal[False]:
             return False
 
     def _cfg(self) -> BridgeConfig:
@@ -823,3 +823,4 @@ class FlareSolverrResponseShapeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

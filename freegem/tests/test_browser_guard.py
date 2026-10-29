@@ -33,7 +33,7 @@ from freegem.ssrf import (
 def _fake_getaddrinfo(host: str, *args: Any) -> list[tuple[Any, ...]]:
     """Resolver table for tests: names -> IPs (private answers = refused)."""
 
-    table = {
+    table: dict[str, list[tuple[Any, ...]]] = {
         "public.example": [("AF_INET", None, None, "", ("93.184.216.34", 0))],
         "private.example": [("AF_INET", None, None, "", ("10.1.2.3", 0))],
         "metadatahost.example": [("AF_INET", None, None, "", ("169.254.169.254", 0))],
@@ -484,3 +484,4 @@ class ResolverTaxonomyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

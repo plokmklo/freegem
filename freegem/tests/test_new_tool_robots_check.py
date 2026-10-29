@@ -13,10 +13,11 @@ robots.txt comments never leak into the report as text.
 
 from __future__ import annotations
 
+import email.message
 import json
 import unittest
 import urllib.error
-from typing import Any
+from typing import Any, Literal
 from unittest import mock
 
 from freegem.config import BridgeConfig
@@ -199,7 +200,7 @@ class UserAgentTests(RobotsCheckTestCase):
 
 class ErrorPathTests(RobotsCheckTestCase):
     def test_missing_robots_txt_allows_and_says_missing(self) -> None:
-        err = urllib.error.HTTPError(ROBOTS_URL, 404, "Not Found", {}, None)
+        err = urllib.error.HTTPError(ROBOTS_URL, 404, "Not Found", email.message.Message(), None)
         report, _ = self._check(err)
         self.assertEqual(report["status"], "missing")
         self.assertFalse(report["found"])
@@ -208,7 +209,7 @@ class ErrorPathTests(RobotsCheckTestCase):
         self.assertIn("untrusted", report["note"])
 
     def test_server_error_is_unreachable_never_silent_allow(self) -> None:
-        err = urllib.error.HTTPError(ROBOTS_URL, 503, "Service Unavailable", {}, None)
+        err = urllib.error.HTTPError(ROBOTS_URL, 503, "Service Unavailable", email.message.Message(), None)
         report, _ = self._check(err)
         self.assertEqual(report["status"], "unreachable")
         self.assertFalse(report["found"])
@@ -248,3 +249,4 @@ class ErrorPathTests(RobotsCheckTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

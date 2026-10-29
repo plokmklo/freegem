@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -236,7 +237,7 @@ def test_sqlite_sink_failed_upsert_rolls_back() -> None:
     sink.upsert("1", url="u1", title="keep", text="keep me")
     with pytest.raises(sqlite3.Error):
         # unbindable text fails mid-statement, after the replace deletes
-        sink.upsert("2", url="u2", title="bad", text=object())
+        sink.upsert("2", url="u2", title="bad", text=cast(str, object()))
     assert sink.count() == 1  # no half-written doc left behind
     assert sink.search("keep")[0]["doc_id"] == "1"
     sink.close()
@@ -252,3 +253,4 @@ def test_sqlite_sink_fallback_matches_any_term(monkeypatch: pytest.MonkeyPatch) 
     hits = sink.search("bridge manual", limit=5)
     assert {h["doc_id"] for h in hits} == {"1", "2"}
     sink.close()
+

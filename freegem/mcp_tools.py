@@ -373,9 +373,8 @@ def _robots_report_groups(text: str) -> tuple[list[dict[str, Any]], list[str]]:
             flush()
             if active is not None and active["crawl_delay"] is None:
                 active["crawl_delay"] = value
-        elif field == "sitemap":
-            if value and value not in sitemaps:
-                sitemaps.append(value)
+        elif field == "sitemap" and value and value not in sitemaps:
+            sitemaps.append(value)
     flush()
     return groups, sitemaps
 
@@ -440,7 +439,7 @@ def _run_robots_check(cfg: BridgeConfig, arguments: dict[str, Any]) -> str:
     not retain Sitemap lines at all.
     """
     from .ssrf import SSRFRefused
-    from .web_scraper import ScrapeError, _UA, _network_opener, _read_capped
+    from .web_scraper import _UA, ScrapeError, _network_opener, _read_capped
 
     url = str(arguments.get("url") or "").strip()
     if not url:
@@ -1330,3 +1329,4 @@ def _check_mcp_auth(cfg: BridgeConfig, api_key: str | None = None) -> None:
     expected_key = getattr(cfg, "api_key", None) or os.environ.get("FREEGEM_API_KEY")
     if expected_key and api_key != expected_key:
         raise PermissionError("Unauthorized: invalid or missing MCP API key")
+

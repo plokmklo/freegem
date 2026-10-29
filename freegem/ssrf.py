@@ -274,7 +274,7 @@ def _resolve_with_timeout(bare: str, timeout: float | None = None) -> list[tuple
         try:
             result["infos"] = socket.getaddrinfo(bare, None)
             result["err"] = None
-        except BaseException as exc:  # noqa: BLE001 - reported via the dict
+        except BaseException as exc:  # deliberately broad: reported via the dict
             result["infos"] = None
             result["err"] = exc
 
@@ -635,3 +635,4 @@ def build_guarded_opener(
     ):
         opener.add_handler(handler)
     return opener
+

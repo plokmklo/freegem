@@ -4,7 +4,7 @@ import sys
 import tempfile
 import types
 import unittest
-from typing import Any
+from typing import Any, Literal
 from unittest.mock import patch
 
 from freegem.config import BridgeConfig
@@ -221,7 +221,7 @@ class _FakePW:
     def __enter__(self) -> "_FakePW":
         return self
 
-    def __exit__(self, *exc: Any) -> bool:
+    def __exit__(self, *exc: Any) -> Literal[False]:
         return False
 
 
@@ -326,3 +326,4 @@ class TestPlaywrightCleanupAndCapture(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

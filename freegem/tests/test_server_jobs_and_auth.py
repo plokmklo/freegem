@@ -382,7 +382,9 @@ class JobsRestHttpTests(unittest.TestCase):
         job = GLOBAL_JOB_MANAGER.create_job("scrape", {})
         status, _ = self._req("DELETE", f"/anything/jobs/{job.id}")
         self.assertEqual(status, 400)
-        self.assertEqual(GLOBAL_JOB_MANAGER.get_job(job.id).status, "queued")
+        fetched = GLOBAL_JOB_MANAGER.get_job(job.id)
+        assert fetched is not None
+        self.assertEqual(fetched.status, "queued")
 
     def test_delete_still_works_on_canonical_path(self) -> None:
         """Backward compatibility: /v1/jobs/{id} keeps cancelling."""
@@ -408,3 +410,4 @@ class JobsRestHttpTests(unittest.TestCase):
         self.assertEqual(status, 500)
         self.assertNotIn(art.file_path, str(raw))
         self.assertIn("failed to read artifact", str(raw))
+
