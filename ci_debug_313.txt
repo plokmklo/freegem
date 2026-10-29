@@ -1,0 +1,197 @@
+........................................................................ [  4%]
+........................................................................ [  8%]
+............................. [ 10%]
+........................................................................ [ 14%]
+........................................................................ [ 19%]
+..................................................................... [ 23%]
+.................................................................... [ 27%]
+........................................................................ [ 31%]
+.................................................................. [ 35%]
+........................................................................ [ 40%]
+........................................................................ [ 44%]
+........................................................................ [ 49%]
+........................................................................ [ 53%]
+................................................................ [ 57%]
+........................................................................ [ 61%]
+............................................F............... [ 65%]
+........................................................................ [ 69%]
+............................................................. [ 73%]
+........................................................................ [ 77%]
+.....s.................................................................. [ 82%]
+.................................................................. [ 86%]
+........................................................................ [ 90%]
+........................................................................ [ 95%]
+..................................................................................                                               [100%]
+=================================== FAILURES ===================================
+____ HappyPathTests.test_disallow_first_wins_under_freegem_stdlib_semantics ____
+freegem/tests/test_new_tool_robots_check.py:152: in test_disallow_first_wins_under_freegem_stdlib_semantics
+    self.assertFalse(report["allowed"])
+E   AssertionError: True is not false
+=============================== warnings summary ===============================
+freegem/tests/test_research.py::CLIResearchTests::test_main_error_path_returns_one
+  <frozen os>:797: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x7a204df82200>
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+freegem/tests/test_watch.py::WatchCoreTests::test_first_run_creates_baseline
+  /opt/hostedtoolcache/Python/3.13.17/x64/lib/python3.13/pathlib/_local.py:277: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x7a204df81210>
+    @property
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+freegem/tests/test_watch.py::WatchCoreTests::test_first_run_creates_baseline
+  /opt/hostedtoolcache/Python/3.13.17/x64/lib/python3.13/pathlib/_local.py:277: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x7a204df83970>
+    @property
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+freegem/tests/test_watch.py::WatchCoreTests::test_first_run_creates_baseline
+  /opt/hostedtoolcache/Python/3.13.17/x64/lib/python3.13/pathlib/_local.py:277: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x7a20547e9990>
+    @property
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+freegem/tests/test_watch.py::WatchCoreTests::test_first_run_creates_baseline
+  /opt/hostedtoolcache/Python/3.13.17/x64/lib/python3.13/pathlib/_local.py:277: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x7a20544631f0>
+    @property
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+freegem/tests/test_watch.py::WatchCoreTests::test_first_run_creates_baseline
+  /opt/hostedtoolcache/Python/3.13.17/x64/lib/python3.13/pathlib/_local.py:277: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x7a204df813f0>
+    @property
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+================================ tests coverage ================================
+_______________ coverage: platform linux, python 3.13.17-final-0 _______________
+
+Name                                            Stmts   Miss  Cover   Missing
+-----------------------------------------------------------------------------
+freegem/__init__.py                                 2      0   100%
+freegem/__main__.py                                 3      3     0%   3-6
+freegem/adapters.py                               106     47    56%   33-34, 54, 71-75, 81, 86, 101-102, 110-139, 148-152, 157-175
+freegem/agent.py                                  224    224     0%   36-469
+freegem/ai_scrape.py                              284     10    96%   222, 234-236, 268, 278-279, 448, 492, 534
+freegem/article.py                                253     13    95%   93, 96, 124, 133, 172-175, 200-202, 349-350
+freegem/bench_release.py                          241    241     0%   28-456
+freegem/browser_guard.py                           76      3    96%   100-102, 200
+freegem/claim_verify.py                           634     53    92%   399, 416, 459, 499-502, 505, 509, 512, 539-542, 544, 553, 573-574, 605, 677-678, 691, 766-767, 769, 779-780, 815, 822, 824, 828, 973, 978-979, 998, 1001, 1039, 1088, 1138, 1150, 1163, 1165, 1167, 1205, 1220-1221, 1228, 1233, 1315, 1375, 1377, 1396-1397
+freegem/cli.py                                    778    112    86%   665, 694, 699-701, 725-727, 734-746, 823, 832, 849, 887, 935, 955-956, 977-980, 991-992, 999, 1013-1014, 1016-1024, 1036-1037, 1045, 1055, 1087-1092, 1106-1108, 1162-1172, 1241, 1265-1266, 1311-1313, 1333, 1336-1337, 1339, 1427-1429, 1472-1476, 1481, 1490, 1512-1513, 1585-1586, 1651, 1662-1663, 1716-1733, 1739-1746, 1749-1750, 1755-1759, 1761-1763, 1792-1794, 1867
+freegem/config.py                                 193     28    85%   250-252, 255, 263-265, 268, 272, 278, 281, 283, 287-289, 297-298, 380, 384, 388, 390, 392, 394, 453-454, 462, 483, 496
+freegem/control_plane.py                          103      4    96%   131, 142-143, 163
+freegem/crawler/__init__.py                        14      0   100%
+freegem/crawler/campaign.py                       165     50    70%   118, 129, 156-169, 221, 283, 301, 317-318, 323-328, 334-386
+freegem/crawler/discovery.py                      113      7    94%   145, 168, 178, 205-206, 269-270
+freegem/crawler/distill.py                         86      5    94%   59, 90-91, 112, 134
+freegem/crawler/extract.py                        500     52    90%   68, 153, 162, 219-220, 261, 312, 314-317, 373, 375-380, 384, 399, 402-403, 436, 443, 446, 449-452, 501, 511-514, 520, 527, 530, 533, 572, 574, 581, 627, 643-644, 654, 656, 667, 670, 677, 710, 718, 720, 724
+freegem/crawler/fetch.py                          304     71    77%   98, 169, 172-177, 180, 195, 229-237, 241, 243, 265-268, 270-274, 292-293, 295-297, 307-316, 365, 388-389, 391, 404, 408-412, 424-431, 435-437, 453-454, 473-474, 477, 484-486, 522, 524, 531
+freegem/crawler/frontier.py                       133      0   100%
+freegem/crawler/hardening.py                      175     13    93%   118, 199-200, 302-305, 309, 311-312, 356-360
+freegem/crawler/output.py                         105      1    99%   65
+freegem/crawler/receipts.py                       107     20    81%   49, 115, 128-137, 146-151, 235, 244
+freegem/crawler/resilient.py                      287     54    81%   340-342, 357, 447-449, 455-457, 468-470, 486, 517-549, 560, 582, 591, 596-597, 606-607
+freegem/crawler/runner.py                         479     80    83%   104-105, 139-141, 196, 265-266, 317, 328-330, 411, 422, 510, 515-517, 531, 533, 583-585, 587-591, 627, 642-644, 646, 674-675, 714-724, 737, 739, 746, 754-756, 770, 782-783, 785, 795, 808, 815-816, 819-821, 825-836, 855-856, 859, 864, 875-881, 925, 941, 990, 996-997
+freegem/crawler/scheduling.py                      75      2    97%   178, 222
+freegem/crawler/sources.py                        189     23    88%   70-74, 99, 114, 170-171, 179-180, 187, 195, 237-238, 241-242, 244, 273, 286, 323, 333, 352-353
+freegem/crawler/urls.py                           162     17    90%   143, 148-149, 161, 167-168, 174, 195, 259-265, 271-272, 324, 333
+freegem/crawler/warc.py                           280     18    94%   97, 109, 122, 188, 318, 321, 478, 483, 488, 494-495, 497, 503, 510, 525, 528, 555, 576
+freegem/dedup.py                                   81      2    98%   135, 150
+freegem/flaresolverr_fetcher.py                    43      5    88%   62, 78-79, 82-83
+freegem/gemini.py                                 486     39    92%   222-223, 228, 238, 563, 566, 574-575, 646, 676-683, 857, 880-890, 928-937, 945, 979-987
+freegem/grid_pool.py                              120      1    99%   121
+freegem/jobs.py                                   574    105    82%   168-170, 181-187, 224-225, 245-246, 254-255, 269-270, 312-313, 323-324, 330, 333, 451, 454, 462, 471, 478-482, 520, 536-538, 652-654, 719, 727, 745-747, 784, 789-792, 796, 808, 815, 818-819, 844, 873-875, 879-882, 918-931, 943, 947, 951, 967-976, 1011-1015, 1026-1056, 1069-1078, 1111, 1121-1122
+freegem/llm_extract.py                            224     17    92%   166, 168, 178-180, 188-190, 197-198, 229-230, 249, 342-343, 379, 396
+freegem/mcp_tools.py                              402    138    66%   235, 251-255, 260-266, 271-289, 294, 310-321, 396, 567, 571, 577, 608-609, 617, 621-626, 642-648, 669-686, 689-710, 721-765, 768-792, 797-819, 860, 875, 890, 912, 931, 940, 965, 1004, 1051, 1076, 1100, 1129, 1177, 1229, 1253, 1262, 1267, 1276, 1307
+freegem/metrics.py                                110      7    94%   214-215, 219, 222-223, 225, 227
+freegem/models.py                                  43      1    98%   62
+freegem/multimodal.py                             179     12    93%   94, 105, 107, 118, 129, 134, 175, 201, 203, 261, 265-266
+freegem/non_goals.py                               11      0   100%
+freegem/parallel_scraper.py                       224     43    81%   112-127, 148, 199-203, 282-283, 291, 329, 349, 352-353, 384-385, 417, 425-428, 459-460, 464, 484-487, 531-532, 536, 543, 548, 567-570
+freegem/playwright_fetcher.py                     152     32    79%   73, 108-109, 124, 126, 128, 137, 167-168, 177, 187, 193, 214-223, 226-229, 282-284, 291-293
+freegem/queues.py                                 188     61    68%   108, 229-231, 234-236, 239-254, 257-259, 262-265, 268-273, 276, 279, 290-296, 299-306, 312-321, 324-326, 329-331, 334-335, 338-339
+freegem/scheduler.py                               87     26    70%   147-176
+freegem/search_sinks.py                           132      6    95%   64-65, 149, 217, 253, 261
+freegem/selenium_fetcher.py                       179     15    92%   119, 121, 134-137, 150, 152, 155-156, 174-175, 328-329, 333-334
+freegem/serp.py                                    94      1    99%   70
+freegem/server.py                                 818    170    79%   74-75, 110-125, 172-173, 192, 196-197, 202-203, 242-252, 281-287, 361-362, 398, 401-402, 405, 407, 424, 432, 451, 454-456, 533-544, 547, 554, 610-614, 639, 673, 675, 685-686, 744, 749-766, 782, 788, 796-797, 816, 852, 864-865, 887-889, 934-946, 1037-1054, 1061, 1064, 1077, 1088, 1107-1108, 1113-1115, 1125-1126, 1178-1226, 1257-1271, 1275-1291, 1296, 1307, 1314, 1334-1336, 1349-1351, 1359, 1362, 1383-1384, 1406, 1438, 1551-1555, 1561-1563, 1593, 1613-1614
+freegem/session_profiles.py                        92      0   100%
+freegem/smart_fetch.py                            451     47    90%   266-267, 280-284, 323, 338, 353-356, 433-443, 462-463, 576, 767, 771, 778, 781, 806, 809, 841-842, 863-864, 880-881, 907-908, 912, 959, 995, 1058-1059, 1063-1064, 1098-1099, 1104-1105
+freegem/ssrf.py                                   246     22    91%   153, 180, 215-216, 239-240, 248, 269, 287, 292, 311, 342-343, 368, 372, 403, 478, 500-501, 503-505
+freegem/stores.py                                 244     16    93%   210-211, 233, 245, 279-282, 310, 317-320, 329, 340, 472-473
+freegem/tables.py                                 114      1    99%   59
+freegem/tests/__init__.py                           0      0   100%
+freegem/tests/conftest.py                           6      0   100%
+freegem/tests/test_adapters_and_extractors.py      74      1    99%   134
+freegem/tests/test_ai_scrape.py                   556      0   100%
+freegem/tests/test_article.py                      70      1    99%   163
+freegem/tests/test_audit_fixes.py                 344      2    99%   142, 610
+freegem/tests/test_browser_guard.py               263      6    98%   163, 177, 193, 361-362, 484
+freegem/tests/test_claim_verify.py                459      5    99%   71, 398, 977-979
+freegem/tests/test_cli.py                         386      3    99%   377-378, 453
+freegem/tests/test_cli_features.py                149      2    99%   252-253
+freegem/tests/test_config_models.py               117      1    99%   228
+freegem/tests/test_control_plane.py               112      1    99%   135
+freegem/tests/test_crawler_campaign.py            105     11    90%   54-60, 68, 104-105, 165
+freegem/tests/test_crawler_cli.py                 158      8    95%   51-57, 66
+freegem/tests/test_crawler_discovery.py            88      0   100%
+freegem/tests/test_crawler_extract.py             197      0   100%
+freegem/tests/test_crawler_frontier.py            189      0   100%
+freegem/tests/test_crawler_hardening.py           118      0   100%
+freegem/tests/test_crawler_output.py              116      0   100%
+freegem/tests/test_crawler_resilient.py           389      0   100%
+freegem/tests/test_crawler_runner.py              269     10    96%   103, 112-117, 130, 133-134, 153
+freegem/tests/test_crawler_scheduling.py           91      0   100%
+freegem/tests/test_crawler_sources.py              83      0   100%
+freegem/tests/test_crawler_urls.py                114      0   100%
+freegem/tests/test_dedup_and_sinks.py             143      0   100%
+freegem/tests/test_evidence_round.py              478      3    99%   477, 650-651
+freegem/tests/test_fetch_features.py              423      2    99%   762, 823
+freegem/tests/test_fixtures.py                    141      0   100%
+freegem/tests/test_gap_article.py                 105      1    99%   243
+freegem/tests/test_gap_models.py                   70      1    99%   120
+freegem/tests/test_gap_serp.py                     93      1    99%   158
+freegem/tests/test_gap_session_profiles.py        110      1    99%   182
+freegem/tests/test_gemini.py                      839     10    99%   61, 414-415, 417-418, 420-421, 861, 1415, 1423
+freegem/tests/test_grid_pool.py                   115      1    99%   163
+freegem/tests/test_guard_feature.py               149      1    99%   265
+freegem/tests/test_hardening_round.py             540      3    99%   226-227, 238
+freegem/tests/test_jobs.py                        311      7    98%   40-42, 46-48, 496
+freegem/tests/test_jobs_pool.py                   305      2    99%   228, 400
+freegem/tests/test_llm_extract.py                 171      0   100%
+freegem/tests/test_mcp_jobs.py                     29      1    97%   62
+freegem/tests/test_metrics.py                     123      0   100%
+freegem/tests/test_multimodal.py                  254      3    99%   276, 301, 476
+freegem/tests/test_new_tool_robots_check.py       146      3    98%   57, 154, 249
+freegem/tests/test_non_goals.py                    27      1    96%   47
+freegem/tests/test_playwright_fetcher.py          179      8    96%   127, 132, 135, 162, 165, 181-182, 328
+freegem/tests/test_queues.py                      162      2    99%   126, 143
+freegem/tests/test_research.py                    600      2    99%   55, 326
+freegem/tests/test_scheduler.py                   115      1    99%   178
+freegem/tests/test_scraper.py                    1000      5    99%   1575-1580
+freegem/tests/test_selenium_fetcher.py            197      2    99%   51, 330
+freegem/tests/test_serp.py                         71      1    99%   129
+freegem/tests/test_server.py                      693      7    99%   604, 1080, 1089, 1111-1112, 1116-1117
+freegem/tests/test_server_burst.py                 48      2    96%   75-76
+freegem/tests/test_server_compat.py               107      1    99%   174
+freegem/tests/test_server_fetchsite.py             63      0   100%
+freegem/tests/test_server_jobs_and_auth.py        235     14    94%   22-25, 29-34, 45-48, 158, 332, 341
+freegem/tests/test_session_profiles.py             59      1    98%   100
+freegem/tests/test_smart_fetch.py                 414      0   100%
+freegem/tests/test_smart_fetch_ext.py             263      5    98%   93-94, 133, 297, 341
+freegem/tests/test_stores.py                      237      7    97%   142, 150-151, 176, 179, 236, 362
+freegem/tests/test_text_pipeline.py               100      1    99%   69
+freegem/tests/test_tools.py                       286      1    99%   400
+freegem/tests/test_version_consistency.py          45      4    91%   22, 29, 43, 76
+freegem/tests/test_watch.py                       255      1    99%   436
+freegem/text_pipeline.py                          145      6    96%   103, 152, 196, 206, 216, 219
+freegem/tls_fetcher.py                             46      3    93%   68, 109-110
+freegem/tools.py                                  336     55    84%   53-54, 69, 79-82, 88, 131-150, 156-160, 189, 195-196, 254, 256-259, 278, 281, 289, 293, 356, 364, 398, 430, 438, 440, 452, 465-466, 496, 567-568
+freegem/watch.py                                  309     29    91%   100-108, 202-204, 239, 241, 243, 372, 417-420, 629, 670, 679, 686-687, 715, 732-733, 743-744
+freegem/web_research.py                           646     38    94%   163, 165, 489, 497-508, 760-761, 763, 781, 827-829, 878, 881, 890, 896, 922, 927, 1026, 1029, 1033, 1035, 1039, 1262, 1264, 1390, 1392, 1409-1410
+freegem/web_scraper.py                            741     65    91%   259-260, 328, 330, 333, 410, 415-416, 425, 428-429, 564, 567, 614, 662, 666, 675, 685-686, 736, 738, 813-815, 822, 824, 836, 840, 879, 882, 888, 899, 908, 971, 996-998, 1002-1005, 1024-1026, 1035, 1138-1139, 1186-1188, 1196, 1256-1257, 1260-1261, 1266, 1287-1288, 1438, 1697-1698, 1786-1787, 1868-1869
+-----------------------------------------------------------------------------
+TOTAL                                           27742   2271    92%
+=========================== short test summary info ============================
+FAILED freegem/tests/test_new_tool_robots_check.py::HappyPathTests::test_disallow_first_wins_under_freegem_stdlib_semantics - AssertionError: True is not false
