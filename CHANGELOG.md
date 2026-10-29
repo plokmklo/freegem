@@ -1,3 +1,24 @@
+## [Unreleased]
+
+### Fixed
+
+- **CI gates pass on this branch again**: cleared all 16 `ruff check`
+  findings (unused imports and unsorted `__all__` in
+  `parallel_scraper.py`, a nested `if` in `mcp_tools.py`, a missing
+  exception-context in `llm_extract.py`, a stale `noqa` in
+  `ssrf.py`, a loop-variable binding in `test_grid_pool.py`), brought
+  the whole tree to `ruff format` compliance, and cleared all 26 mypy
+  strict errors in the test suite (precise `__exit__` signatures, RLock
+  spy typing, deliberate monkey-patches tagged with exact `type:
+  ignore[method-assign]` codes).
+
+### Removed
+
+- Branch scratch and run artifacts that do not belong in the repo:
+  run outputs (`*.json`, `*.jsonl`, `*_err.txt`), one-off scrape
+  scripts, the corpus generator scratch, and an invalid-UTF-8 research
+  notes file that broke `ruff format` I/O.
+
 ## [2.12.0] — 2026-10-20
 
 Two research waves landed under one version. The **research wave** turned a
