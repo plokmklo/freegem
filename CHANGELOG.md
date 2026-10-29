@@ -22,6 +22,10 @@
   the live-MCP harness (ruff `B007`), and taught the
   version-consistency test to skip a leading `[Unreleased]` changelog
   section instead of reading it as version drift.
+- **Python 3.13 robots verdict**: the `freegem_robots_check` test now
+  pins agreement with the running interpreter's `robotparser` verdict
+  instead of the pre-3.13 first-matching-line semantics (3.13
+  implements RFC 9309 most-specific-match).
 
 ### Removed
 

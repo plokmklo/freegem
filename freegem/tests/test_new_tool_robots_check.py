@@ -17,6 +17,7 @@ import email.message
 import json
 import unittest
 import urllib.error
+import urllib.robotparser
 from typing import Any
 from unittest import mock
 
@@ -140,18 +141,23 @@ class HappyPathTests(RobotsCheckTestCase):
         )
         self.assertIn("untrusted", report["note"])
 
-    def test_disallow_first_wins_under_freegem_stdlib_semantics(self) -> None:
-        # CPython's RobotFileParser uses the FIRST matching rule line in
-        # file order within a group, not RFC 9309 most-specific-match.
-        # freegem's RobotsCache gate calls the same parser, so the tool's
-        # verdict must agree with the scraper: /private/public.html stays
-        # disallowed here even though an Allow line matches it.
+    def test_verdict_agrees_with_stdlib_parser_on_overlap(self) -> None:
+        # CPython's RobotFileParser decides the verdict, and its overlap
+        # semantics changed in Python 3.13 (RFC 9309 most-specific-match
+        # instead of first-matching-line). freegem's RobotsCache gate
+        # calls the same parser, so the tool's verdict must agree with
+        # whatever the running interpreter's parser says -- the agreement
+        # is the contract, not either semantics.
+        parser = urllib.robotparser.RobotFileParser()
+        parser.parse(ROBOTS_TXT.splitlines())
+        expected = parser.can_fetch(_UA, "https://example.com/private/public.html")
         report, _ = self._check(
             _FakeResponse(ROBOTS_TXT.encode()), url="https://example.com/private/public.html"
         )
-        self.assertFalse(report["allowed"])
-        # The overlapping Allow line is still reported for the caller.
+        self.assertEqual(report["allowed"], expected)
+        # Both overlapping rules are still reported for the caller.
         self.assertIn({"type": "allow", "path": "/private/public.html"}, report["matching_rules"])
+        self.assertIn({"type": "disallow", "path": "/private/"}, report["matching_rules"])
 
     def test_allow_line_before_disallow_allows(self) -> None:
         body = "User-agent: *\nAllow: /private/public.html\nDisallow: /private/\n"
