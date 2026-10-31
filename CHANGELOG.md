@@ -1,5 +1,23 @@
 ## [Unreleased]
 
+### Added
+
+- **`agent` job type (#66)**: `POST /v1/jobs` with
+  `{"type": "agent", "params": {"task": "..."}}` runs one bounded
+  single-agent research task -- a deterministic, allowlisted plan
+  (grounded search, cited research, claim verification) executed with
+  the EXISTING tools. Structural budgets (steps, pages, chars, LLM
+  calls, execution time) are checked BETWEEN steps, so work stops with
+  a recorded limitation instead of reporting an overrun after the
+  fact. The result carries `answer`, `sources`,
+  `verified_claims`, `steps`, `status`, `limitations`, and
+  `usage`. Citations cannot be fabricated: `sources` only ever
+  holds URLs a tool result actually carried -- the answer text is never
+  mined for URLs -- and missing evidence keeps its own verdict, never
+  reported as contradiction. Cancellation and timeouts ride the
+  existing bounded job runner: cooperative cancel overrides a late
+  completion; the watchdog still owns timed-out jobs.
+
 ### Fixed
 
 - **MCP `web_research` accepts `query` as an alias for `question`** (#70,
