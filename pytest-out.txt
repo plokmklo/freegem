@@ -1,0 +1,117 @@
+freegem/tests/test_adapters_and_extractors.py: 4
+freegem/tests/test_agent.py: 18
+freegem/tests/test_ai_scrape.py: 69
+freegem/tests/test_ai_wall_corpus.py: 8
+freegem/tests/test_article.py: 7
+freegem/tests/test_audit_fixes.py: 40
+freegem/tests/test_browser_guard.py: 23
+freegem/tests/test_claim_verify.py: 54
+freegem/tests/test_cli.py: 49
+freegem/tests/test_cli_features.py: 16
+freegem/tests/test_config_models.py: 29
+freegem/tests/test_control_plane.py: 7
+freegem/tests/test_crawler_campaign.py: 2
+freegem/tests/test_crawler_cli.py: 10
+freegem/tests/test_crawler_discovery.py: 14
+freegem/tests/test_crawler_extract.py: 29
+freegem/tests/test_crawler_frontier.py: 14
+freegem/tests/test_crawler_hardening.py: 25
+freegem/tests/test_crawler_output.py: 9
+freegem/tests/test_crawler_resilient.py: 35
+freegem/tests/test_crawler_runner.py: 19
+freegem/tests/test_crawler_scheduling.py: 8
+freegem/tests/test_crawler_sources.py: 14
+freegem/tests/test_crawler_urls.py: 24
+freegem/tests/test_dedup_and_sinks.py: 13
+freegem/tests/test_evidence_round.py: 37
+freegem/tests/test_feature_functions.py: 5
+freegem/tests/test_fetch_features.py: 33
+freegem/tests/test_fixtures.py: 15
+freegem/tests/test_gemini.py: 101
+freegem/tests/test_grid_pool.py: 8
+freegem/tests/test_guard_feature.py: 17
+freegem/tests/test_hardening_round.py: 63
+freegem/tests/test_jobs.py: 17
+freegem/tests/test_jobs_pool.py: 15
+freegem/tests/test_llm_extract.py: 21
+freegem/tests/test_mcp_jobs.py: 3
+freegem/tests/test_mcp_tools.py: 32
+freegem/tests/test_mediawiki_budget.py: 6
+freegem/tests/test_metrics.py: 16
+freegem/tests/test_multimodal.py: 31
+freegem/tests/test_non_goals.py: 4
+freegem/tests/test_playwright_fetcher.py: 6
+freegem/tests/test_queues.py: 8
+freegem/tests/test_research.py: 56
+freegem/tests/test_scheduler.py: 7
+freegem/tests/test_scraper.py: 125
+freegem/tests/test_selenium_fetcher.py: 10
+freegem/tests/test_serp.py: 9
+freegem/tests/test_server.py: 70
+freegem/tests/test_server_burst.py: 2
+freegem/tests/test_server_compat.py: 15
+freegem/tests/test_server_fetchsite.py: 9
+freegem/tests/test_server_jobs_and_auth.py: 10
+freegem/tests/test_session_profiles.py: 4
+freegem/tests/test_smart_fetch.py: 42
+freegem/tests/test_smart_fetch_ext.py: 24
+freegem/tests/test_stores.py: 17
+freegem/tests/test_text_pipeline.py: 15
+freegem/tests/test_tools.py: 66
+freegem/tests/test_version_consistency.py: 4
+freegem/tests/test_watch.py: 24
+freegem/tests/test_web_research_contract.py: 12
+
+collect exit=0
+...............F
+=================================== FAILURES ===================================
+___________ RunAgentContractTests.test_sources_cannot_be_fabricated ____________
+
+self = <freegem.tests.test_agent.RunAgentContractTests testMethod=test_sources_cannot_be_fabricated>
+
+    def test_sources_cannot_be_fabricated(self) -> None:
+        # The research answer mentions a URL that no tool ever fetched or
+        # returned: it must NOT leak into sources.
+        poisoned_url = "https://fabricated.example/never-fetched"
+        poisoned = _research_result(f"see {poisoned_url} for details")
+        with (
+            mock.patch("freegem.agent.run_tool", return_value=SEARCH_TEXT),
+            mock.patch("freegem.agent.research", return_value=poisoned),
+            mock.patch("freegem.agent.verify", return_value=_verify_result()) as checked,
+        ):
+            result = run_agent(CFG, TASK)
+        self.assertIn(poisoned_url, result.answer)
+        self.assertNotIn(poisoned_url, result.sources)
+        self.assertEqual(
+            result.sources,
+            ["https://a.example/framework-x", "https://b.example/framework-y"],
+        )
+        # Verification only ever sees sources that were actually carried.
+        verify_args = checked.call_args[1]
+>       self.assertEqual(verify_args["urls"], result.sources)
+E       AssertionError: Lists differ: ['htt[55 chars]rk-y', 'https://a.example/framework-x', 'https[21 chars]k-y'] != ['htt[55 chars]rk-y']
+E       
+E       First list contains 2 additional elements.
+E       First extra element 2:
+E       'https://a.example/framework-x'
+E       
+E       + ['https://a.example/framework-x', 'https://b.example/framework-y']
+E       - ['https://a.example/framework-x',
+E       -  'https://b.example/framework-y',
+E       -  'https://a.example/framework-x',
+E       -  'https://b.example/framework-y']
+
+freegem/tests/test_agent.py:199: AssertionError
+=========================== short test summary info ============================
+FAILED freegem/tests/test_agent.py::RunAgentContractTests::test_sources_cannot_be_fabricated - AssertionError: Lists differ: ['htt[55 chars]rk-y', 'https://a.example/framework-x', 'https[21 chars]k-y'] != ['htt[55 chars]rk-y']
+
+First list contains 2 additional elements.
+First extra element 2:
+'https://a.example/framework-x'
+
++ ['https://a.example/framework-x', 'https://b.example/framework-y']
+- ['https://a.example/framework-x',
+-  'https://b.example/framework-y',
+-  'https://a.example/framework-x',
+-  'https://b.example/framework-y']
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!
