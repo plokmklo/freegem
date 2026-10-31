@@ -205,6 +205,7 @@ def run_agent(cfg: BridgeConfig, task: str, limits: AgentLimits | None = None) -
     start_time = time.perf_counter()
     steps: list[AgentStep] = []
     all_sources: list[str] = []
+    seen_sources: set[str] = set()
     limitations: list[str] = []
     total_chars = 0
     total_llm_calls = 0
@@ -213,6 +214,13 @@ def run_agent(cfg: BridgeConfig, task: str, limits: AgentLimits | None = None) -
     def note(text: str) -> None:
         if text not in limitations:
             limitations.append(text)
+
+    def add_sources(urls: list[str]) -> None:
+        """Record tool-carried URLs once, in first-seen order."""
+        for url in urls:
+            if url not in seen_sources:
+                seen_sources.add(url)
+                all_sources.append(url)
 
     def budget_blocks() -> bool:
         """True when a structural budget says stop before the next step."""
@@ -259,7 +267,7 @@ def run_agent(cfg: BridgeConfig, task: str, limits: AgentLimits | None = None) -
             note(f"search step failed: {exc}")
         search_urls = list(step.sources)
         total_chars += step.chars_seen
-        all_sources.extend(step.sources)
+        add_sources(step.sources)
     steps.append(step)
 
     # Phase 2: research the pages the search actually found.
@@ -292,7 +300,7 @@ def run_agent(cfg: BridgeConfig, task: str, limits: AgentLimits | None = None) -
                 step.error = str(exc)
                 note(f"research step failed: {exc}")
             total_chars += step.chars_seen
-            all_sources.extend(step.sources)
+            add_sources(step.sources)
         steps.append(step)
 
     # Phase 3: synthesize the answer from what actually succeeded.
