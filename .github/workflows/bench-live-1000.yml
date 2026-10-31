@@ -1,0 +1,83 @@
+name: bench-live-1000
+
+# One-shot live experiment (NOT part of the test suite): scrape the top-1000
+# real sites through the shipped `freegem scrape` surface, ten parallel
+# chunks of 100, and commit a lean aggregated report back to this branch.
+# Never merge: the branch is the record.
+
+on:
+  push:
+    branches: ["bench/live-1000"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-list:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build the top-1000 target list
+        run: python bench_live1000/build_list.py --out urls.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: urls
+          path: urls.json
+
+  scrape:
+    needs: build-list
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        chunk: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install freegem
+        run: pip install -e .
+      - uses: actions/download-artifact@v4
+        with:
+          name: urls
+      - name: Scrape chunk ${{ matrix.chunk }}
+        run: |
+          python bench_live1000/scrape_chunk.py --list urls.json \
+            --chunk ${{ matrix.chunk }} --chunks 10 \
+            --out chunk_${{ matrix.chunk }}.jsonl
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chunk_${{ matrix.chunk }}
+          path: chunk_${{ matrix.chunk }}.jsonl
+          if-no-files-found: ignore
+
+  aggregate:
+    needs: scrape
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: chunk_*
+          path: chunks
+          merge-multiple: true
+      - name: Aggregate and write report
+        run: python3 bench_live1000/aggregate.py --chunks chunks --out bench_live1000/results
+      - name: Commit results back to this branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bench_live1000/results
+          git commit -m "bench: live 1000-site results [skip ci]"
+          git push
