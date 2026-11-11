@@ -551,6 +551,24 @@ def _build_parser() -> argparse.ArgumentParser:
         "request/response records with sha-256 digests; walls and dead ends "
         "carry their classification as metadata records",
     )
+    run_p.add_argument(
+        "--wacz",
+        metavar="PATH",
+        default="",
+        help="package the --warc evidence as a WACZ 1.2.0 collection when the "
+        "crawl finishes: CDXJ index, pages manifest, sha-256 digest chain -- "
+        "replayable with ReplayWeb.page and Browsertrix; requires --warc",
+    )
+    run_p.add_argument(
+        "--bloom-seen",
+        action="store_true",
+        help=(
+            "opt-in Bloom pre-filter in front of discovery inserts: probably-"
+            "seen URLs skip the frontier write at a documented false-positive "
+            "rate (Heritrix's BloomUriUniqFilter trade); default off keeps "
+            "every discovery decision exact"
+        ),
+    )
 
     status_p = crawl_sub.add_parser("status", help="show frontier stats for a state file")
     status_p.add_argument("--state", metavar="PATH", required=True, help="frontier SQLite file")
@@ -1528,6 +1546,8 @@ def _crawl_spec(args: argparse.Namespace) -> Any:
         state_path=args.state or "",
         ai_rescue=bool(getattr(args, "ai_rescue", False)),
         warc_path=getattr(args, "warc", "") or "",
+        wacz_path=getattr(args, "wacz", "") or "",
+        bloom_seen=bool(getattr(args, "bloom_seen", False)),
     )
 
 

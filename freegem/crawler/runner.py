@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..config import BridgeConfig
+from .bloom import BloomSeenSet
 from .distill import DISTILL_THRESHOLD_BYTES, distill_text
 from .extract import ExtractionStats, Field, FieldError, Schema, extract_items
 from .fetch import _BASE_HEADERS, FetchOutcome, crawl_fetch
@@ -44,7 +45,8 @@ from .hardening import HtmlDom, ResourceLimits, parse_xml, redact_secrets
 from .output import make_writer
 from .resilient import HostPacer, fetch_resilient
 from .urls import Budget, Scope, normalize_url, url_origin
-from .warc import WarcWriter
+from .wacz import WaczError, build_wacz
+from .warc import WARCError, WarcWriter
 
 __all__ = ["Counters", "CrawlSpec", "PlanReport", "load_schema", "plan", "run"]
 
@@ -91,6 +93,15 @@ class CrawlSpec:
     #: WARC 1.1 evidence file: every fetch (wins, walls, and dead ends) is
     #: recorded as request/response/metadata records with sha-256 digests.
     warc_path: str = ""
+    #: WACZ 1.2.0 collection packaged from ``warc_path`` when the crawl
+    #: finishes (requires warc_path): CDXJ index + pages manifest + sha-256
+    #: digest chain, replayable with ReplayWeb.page / Browsertrix.
+    wacz_path: str = ""
+    #: Opt-in Bloom pre-filter in front of discovery inserts (links +
+    #: sitemaps). Exactness note: at fp_rate, a small share of genuinely new
+    #: URLs is skipped without a frontier insert; default off keeps every
+    #: discovery decision exact in SQLite.
+    bloom_seen: bool = False
     #: Where spilled oversized bodies go (defaults beside the state file).
     spill_dir: str = ""
     state_path: str = ""
@@ -293,6 +304,8 @@ def run(
         else None
     )
     warc: WarcWriter | None = None
+    if spec.wacz_path and not spec.warc_path:
+        raise ValueError("wacz_path requires warc_path: a WACZ packages a WARC")
     if spec.warc_path:
         from .. import __version__
 
@@ -310,6 +323,9 @@ def run(
             }
         )
     started = time.monotonic()
+    bloom = BloomSeenSet(capacity=max(4096, spec.scope.max_pages * 8)) if spec.bloom_seen else None
+    if bloom is not None:
+        _emit(on_event, {"event": "bloom_enabled", **bloom.stats()})
 
     # Recover in-flight rows from a previous crashed/killed run.
     recovered = frontier.abandon_inflight()
@@ -320,7 +336,7 @@ def run(
     frontier.set_meta("seeds", json.dumps(list(spec.seeds)))
 
     if spec.sitemaps:
-        _seed_sitemaps(cfg, spec, frontier, counters, cancel)
+        _seed_sitemaps(cfg, spec, frontier, counters, cancel, bloom=bloom)
 
     for seed in spec.seeds:
         try:
@@ -345,6 +361,7 @@ def run(
             started,
             pacer,
             warc,
+            bloom,
         )
     finally:
         frontier.set_meta("finished_at", str(int(time.time())))
@@ -354,6 +371,21 @@ def run(
             writer.close()
         if warc is not None:
             warc.close()
+        if spec.wacz_path and warc is not None:
+            try:
+                from .. import __version__
+
+                info = build_wacz(
+                    spec.warc_path,
+                    spec.wacz_path,
+                    software=f"freegem/{__version__} (+https://github.com/plokmklo/freegem)",
+                    title=f"freegem crawl of {', '.join(spec.seeds[:3])}",
+                )
+                _emit(on_event, {"event": "wacz", **info})
+            except (WaczError, WARCError) as exc:
+                _emit(on_event, {"event": "wacz_error", "error": str(exc)})
+        if bloom is not None:
+            _emit(on_event, {"event": "bloom_stats", **bloom.stats()})
         _emit(
             on_event,
             {"event": "done", "counters": counters.as_dict(), "extraction": stats.as_dict()},
@@ -375,6 +407,7 @@ def _crawl_loop(
     started: float,
     pacer: HostPacer,
     warc: WarcWriter | None = None,
+    bloom: BloomSeenSet | None = None,
 ) -> None:
     """Claim-fetch-process loop; single or small worker pool."""
     workers = max(1, min(spec.concurrency, 8))
@@ -399,6 +432,7 @@ def _crawl_loop(
                 on_event,
                 pacer,
                 warc,
+                bloom,
             )
         return
     lock = threading.Lock()
@@ -438,6 +472,7 @@ def _crawl_loop(
                 on_event,
                 pacer,
                 warc,
+                bloom,
             )
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -501,6 +536,7 @@ def _process(
     on_event: Callable[[dict[str, Any]], None] | None,
     pacer: HostPacer,
     warc: WarcWriter | None = None,
+    bloom: BloomSeenSet | None = None,
 ) -> None:
     """Fetch one claimed URL, record every branch, queue its links."""
     url = item.url
@@ -669,7 +705,7 @@ def _process(
                 writer.write({**record, **provenance})
 
         if item.depth < spec.scope.max_depth:
-            _queue_links(spec, frontier, counters, url, item.depth + 1, dom, text)
+            _queue_links(spec, frontier, counters, url, item.depth + 1, dom, text, bloom=bloom)
         if counters.pages_ok % 10 == 0:
             frontier.checkpoint()
             _emit(
@@ -764,6 +800,7 @@ def _queue_links(
     depth: int,
     dom: HtmlDom | None,
     text: str,
+    bloom: BloomSeenSet | None = None,
 ) -> None:
     """Normalize + scope-filter the page's links; push the survivors."""
     if dom is None:
@@ -788,6 +825,11 @@ def _queue_links(
         verdict = spec.scope.admits(target, depth=depth, seed_hosts=seed_hosts)
         if not verdict.ok:
             continue
+        # The Bloom pre-filter (when enabled) saves the insert for probably-
+        # seen URLs; a false positive drops one new URL at fp_rate -- opt-in,
+        # see CrawlSpec.bloom_seen. push() stays the exact authority.
+        if bloom is not None and not bloom.add_if_absent(target):
+            continue
         if frontier.push(target, host=_host_of(target) or "", depth=depth, priority=5):
             counters.links_queued += 1
             queued += 1
@@ -801,6 +843,7 @@ def _seed_sitemaps(
     frontier: Frontier,
     counters: Counters,
     cancel: threading.Event,
+    bloom: BloomSeenSet | None = None,
 ) -> None:
     """Discover URLs from each seed origin's sitemap.xml (one index level)."""
     for origin in sorted(_seed_origins(spec)):
@@ -833,9 +876,9 @@ def _seed_sitemaps(
                     sub_root = parse_xml(sub.body or b"")
                 except ValueError:
                     continue
-                _push_sitemap_urls(spec, frontier, counters, sub_root, depth=0)
+                _push_sitemap_urls(spec, frontier, counters, sub_root, depth=0, bloom=bloom)
         else:
-            _push_sitemap_urls(spec, frontier, counters, root, depth=0)
+            _push_sitemap_urls(spec, frontier, counters, root, depth=0, bloom=bloom)
 
 
 def _push_sitemap_urls(
@@ -844,6 +887,7 @@ def _push_sitemap_urls(
     counters: Counters,
     root: Any,
     depth: int,
+    bloom: BloomSeenSet | None = None,
 ) -> None:
     seed_hosts = spec.seed_hosts()
     added = 0
@@ -856,6 +900,8 @@ def _push_sitemap_urls(
             continue
         verdict = spec.scope.admits(target, depth=depth, seed_hosts=seed_hosts)
         if not verdict.ok:
+            continue
+        if bloom is not None and not bloom.add_if_absent(target):
             continue
         if frontier.push(target, host=_host_of(target) or "", depth=depth, priority=3):
             counters.sitemap_urls += 1

@@ -52,6 +52,7 @@ __all__ = [
     "WarcRecord",
     "WarcWriter",
     "iter_records",
+    "iter_records_with_offsets",
     "summary",
     "verify",
 ]
@@ -353,9 +354,36 @@ def iter_records(path: str, *, max_block: int = _MAX_BLOCK_BYTES) -> Iterator[Wa
     Content-Length drives the block read, so a truncated tail raises
     :class:`WARCError` instead of yielding a phantom record.
     """
+    for _offset, _length, record in iter_records_with_offsets(path, max_block=max_block):
+        yield record
+
+
+def iter_records_with_offsets(
+    path: str, *, max_block: int = _MAX_BLOCK_BYTES
+) -> Iterator[tuple[int, int, WarcRecord]]:
+    """Stream ``(byte_offset, byte_length, record)`` for every WARC record.
+
+    ``byte_offset`` is the record's first byte in the file and ``byte_length``
+    counts the full serialized record (header block, payload, both CRLFs) --
+    exactly the numbers a CDX index needs to point back into the archive.
+    Content-Length drives the block read, so a truncated tail raises
+    :class:`WARCError` instead of yielding a phantom record.
+    """
     with open(path, "rb") as fh:
         offset = 0
         while True:
+            # Consume inter-record blank lines (each ISO 28500 record ends with
+            # two CRLFs; the reader below only needs one to separate records)
+            # so byte offsets point exactly at "WARC/" -- the CDX contract.
+            while True:
+                peek = fh.read(2)
+                if peek == _CRLF:
+                    offset += 2
+                    continue
+                if peek:
+                    fh.seek(-2, os.SEEK_CUR)
+                break
+            record_start = offset
             # Header block: bytes up to the first CRLF CRLF.
             header_buf = bytearray()
             while True:
@@ -397,7 +425,7 @@ def iter_records(path: str, *, max_block: int = _MAX_BLOCK_BYTES) -> Iterator[Wa
             if tail != _CRLF:
                 raise WARCError(f"{path}: record at byte {offset} is not CRLF-terminated")
             offset += 2
-            yield WarcRecord(headers=headers, payload=payload)
+            yield record_start, offset - record_start, WarcRecord(headers=headers, payload=payload)
 
 
 def verify(path: str) -> dict[str, Any]:

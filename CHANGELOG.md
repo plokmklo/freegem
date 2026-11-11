@@ -1,4 +1,35 @@
-## [Unreleased]
+## [2.13.0] — 2026-11-11
+
+The second evidence round: the crawl's WARC proof becomes a standard,
+replayable, self-verifying collection, and discovery gets an honest
+scale lever. WACZ is what turns "we hold the bytes we quote" into
+something anyone can open in ReplayWeb.page or Browsertrix and check
+without trusting us — the digest chain and the CDX offsets are checked
+against the bytes, by the bytes.
+
+### Added
+
+- **`crawl run --wacz PATH`** (`freegem/crawler/wacz.py`): when the crawl
+  finishes, the WARC evidence is packaged as a WACZ 1.2.0 collection —
+  `archive/data.warc` byte-identical (kept uncompressed so the CDX
+  `offset`/`length` fields point at exact positions; the zip provides the
+  compression), `index/index.cdx` with a CDXJ line for EVERY response
+  record (wins and walls alike — a 403 is real evidence of what the
+  server answered), `pages/pages.jsonl` with the spec's `json-pages-1.0`
+  header plus one entry per successful (2xx/3xx) response, and the
+  Frictionless `datapackage.json` + `datapackage-digest.json` sha-256
+  chain binding it all. Requires `--warc`. `verify_wacz()` re-derives the
+  whole thing without trusting the writer: digest chain, every resource
+  hash and byte count, then a seek into the archive at each CDX offset to
+  recompute the payload digest — tampering fails loudly.
+- **`crawl run --bloom-seen`** (`freegem/crawler/bloom.py`): opt-in Bloom
+  pre-filter in front of discovery inserts (links + sitemaps), the same
+  trade Heritrix's `BloomUriUniqFilter` made — probably-seen URLs skip the
+  frontier write at a documented false-positive rate instead of paying a
+  SQLite round trip per repeated discovery. Stdlib-only blake2b
+  double-hashing, design parameters reported in the crawl events
+  (`bloom_enabled`/`bloom_stats`), default OFF so the exact crawl stays
+  exact; the frontier on disk remains the authority.
 
 ### Fixed
 
@@ -24,6 +55,11 @@
 
 ### Tests
 
+- `test_wacz_round.py`: 28 contract tests — SURT vectors, the exact zip
+  layout, the digest chain, pages-vs-index honesty (walls indexed, not
+  paged), byte-identical archive copy, and the tamper matrix (stale
+  resource hash, forged datapackage digest, shifted CDX offset, missing
+  member) plus end-to-end WACZ through the real crawl loop.
 - `test_version_consistency.py` (#65): runtime version, pyproject, and
   installed metadata must agree with the changelog, or CI fails.
 - `test_web_research_contract.py` and `test_mediawiki_budget.py`: the

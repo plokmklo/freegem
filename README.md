@@ -873,6 +873,42 @@ record types, targets, truncations, and wall classes. "We hold the bytes we
 quote" becomes a checkable claim, replayable with warcio/pywb. Files are
 written uncompressed; compress externally if storage matters.
 
+### Replayable collections (`--wacz`)
+
+`crawl run --warc evidence.warc --wacz collection.wacz` packages the
+finished WARC into a **WACZ 1.2.0** zip (the Web Archive Collection Zipped
+standard that ReplayWeb.page, Browsertrix, and pywb ingest):
+
+- `archive/data.warc` — the evidence file, byte-for-byte (kept uncompressed
+  so the CDX `offset`/`length` fields point at exact positions; the zip
+  itself provides the compression);
+- `index/index.cdx` — a CDXJ line for EVERY `response` record, wins and
+  walls alike (a 403 is real evidence of what the server answered);
+- `pages/pages.jsonl` — the spec's `json-pages-1.0` header plus one entry
+  per successful (2xx/3xx) response: walls are evidence, not pages;
+- `datapackage.json` + `datapackage-digest.json` — a Frictionless manifest
+  with sha-256 hashes and byte counts for every file above.
+
+`freegem.crawler.wacz.verify_wacz(path)` re-derives the collection without
+trusting its writer: the digest chain, every resource hash and size, then a
+seek into the archive at each CDX offset to recompute the payload digest —
+a flipped byte anywhere fails verification loudly. 28 contract tests pin
+the format, including a tamper matrix.
+
+### Discovery scale lever (`--bloom-seen`)
+
+`crawl run --bloom-seen` puts an opt-in Bloom filter in front of discovery
+inserts (links + sitemaps): a URL the filter has probably seen skips the
+frontier write instead of paying a SQLite round trip per repeated
+discovery — the same trade Heritrix's `BloomUriUniqFilter` made. The cost
+is documented, not hidden: at the designed 0.1% false-positive rate, a
+small share of genuinely new URLs is quietly skipped, so the flag is OFF by
+default and the exact crawl stays exact. The filter only pre-screens
+inserts — fetching, scheduling, and politeness are untouched, the frontier
+on disk remains the source of truth, and the crawl events report the
+design parameters (`bloom_enabled`, `bloom_stats`) so receipts can show
+exactly what was delegated.
+
 ### Politeness receipts (`crawl report`)
 
 `freegem crawl report --state state.db [--delay-ms 250] [--format json]`
