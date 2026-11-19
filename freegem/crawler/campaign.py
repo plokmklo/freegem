@@ -256,6 +256,7 @@ def run_campaign(
     checkpoint_path: str = "",
     resume_checkpoint: str = "",
     keep_alive: bool = False,
+    max_attempts: int = 16,
     on_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> CampaignResult:
     """Fetch seeds (resume-aware) through the resilient ladder, persist
@@ -273,6 +274,9 @@ def run_campaign(
     :class:`~freegem.crawler.pool.KeepAlivePool` (issue #94): same-host
     fetches reuse pinned connections; the pool's honest counters (dials,
     reuses, stale drops, caps) land in the ``keep_alive`` report section.
+    ``max_attempts`` bounds the resilient ladder per seed (default 16): a
+    lower bound turns dead-domain seeds into quick honest failures instead
+    of minutes of wayback timeouts -- the knob benchmark runs want.
     """
     limits = ResourceLimits(timeout_sec=timeout_sec, max_bytes=100 * 1024 * 1024)
     spill_dir = os.path.join(os.path.dirname(os.path.abspath(state_path)) or ".", "spill")
@@ -345,6 +349,7 @@ def run_campaign(
             spill_dir=spill_dir,
             cookie_jar=jar,
             pool=pool,
+            max_attempts=max_attempts,
         )
         # The campaign keeps no artifact store: a body that spilled to a temp
         # file (> spill_bytes) is read for distillation below and must not
@@ -413,6 +418,7 @@ def run_campaign(
                     "host_delay_sec": host_delay_sec,
                     "retry_failed": retry_failed,
                     "distill": distill,
+                    "max_attempts": max_attempts,
                 },
                 counters=result.as_dict(),
                 interrupted=interrupted,
@@ -500,6 +506,13 @@ def _cli(argv: list[str] | None = None) -> int:
         action="store_true",
         help="reuse SSRF-pinned keep-alive connections across same-host fetches (issue #94)",
     )
+    run_p.add_argument(
+        "--max-attempts",
+        type=int,
+        default=16,
+        metavar="N",
+        help="bound the resilient ladder per seed (default 16); lower = faster honest failures",
+    )
     args = parser.parse_args(argv)
 
     from ..config import load_config
@@ -525,6 +538,7 @@ def _cli(argv: list[str] | None = None) -> int:
             checkpoint_path=args.checkpoint,
             resume_checkpoint=args.resume,
             keep_alive=args.keep_alive,
+            max_attempts=max(1, args.max_attempts),
             on_event=on_event,
         )
     except CheckpointError as exc:

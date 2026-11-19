@@ -161,5 +161,56 @@ class CampaignSpillCleanupTests(unittest.TestCase):
         self.assertEqual(os.listdir(spill_dir), [])
 
 
+class CampaignMaxAttemptsTests(unittest.TestCase):
+    """--max-attempts bounds the resilient ladder per seed (the benchmark
+    knob): the campaign passes it through to fetch_resilient, and the
+    checkpoint manifest records it."""
+
+    def test_max_attempts_is_passed_through(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        state = os.path.join(tmp.name, "state.db")
+        seen: dict[str, object] = {}
+
+        def fake_fetch(
+            cfg: BridgeConfig, url: str, *, max_attempts: int = 111, **kwargs: object
+        ) -> FetchOutcome:
+            seen["max_attempts"] = max_attempts
+            return FetchOutcome(url=url, kind="ok", status=200, body=b"<html>x</html>")
+
+        with mock.patch("freegem.crawler.campaign.fetch_resilient", side_effect=fake_fetch):
+            run_campaign(
+                BridgeConfig(guard=True, log_requests=False),
+                [{"url": "https://a.test/", "category": "c"}],
+                state_path=state,
+                concurrency=1,
+                host_delay_sec=0.0,
+                max_attempts=4,
+            )
+        self.assertEqual(seen.get("max_attempts"), 4)
+
+    def test_default_max_attempts_is_unchanged(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        state = os.path.join(tmp.name, "state.db")
+        seen: dict[str, object] = {}
+
+        def fake_fetch(
+            cfg: BridgeConfig, url: str, *, max_attempts: int = 111, **kwargs: object
+        ) -> FetchOutcome:
+            seen["max_attempts"] = max_attempts
+            return FetchOutcome(url=url, kind="ok", status=200, body=b"<html>x</html>")
+
+        with mock.patch("freegem.crawler.campaign.fetch_resilient", side_effect=fake_fetch):
+            run_campaign(
+                BridgeConfig(guard=True, log_requests=False),
+                [{"url": "https://a.test/", "category": "c"}],
+                state_path=state,
+                concurrency=1,
+                host_delay_sec=0.0,
+            )
+        self.assertEqual(seen.get("max_attempts"), 16, "default ladder depth changed")
+
+
 if __name__ == "__main__":
     unittest.main()

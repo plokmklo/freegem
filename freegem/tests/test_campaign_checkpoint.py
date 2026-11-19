@@ -117,6 +117,7 @@ class CheckpointWriteTests(CheckpointTestCase):
                 "host_delay_sec": 0.0,
                 "retry_failed": False,
                 "distill": False,
+                "max_attempts": 16,
             },
         )
         self.assertIn("attempted", manifest["counters"])

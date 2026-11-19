@@ -1,3 +1,16 @@
+## [2.16.0] — 2026-11-19
+
+### Added
+
+- **`campaign run --max-attempts N`**: bounds the resilient ladder per
+  seed (default 16, unchanged). A lower bound turns dead-domain seeds into
+  quick honest failures instead of minutes of wayback timeouts — found live
+  when the 1000-page benchmark crawled at 2 seeds/min because every
+  dead host walked all 16 rungs (scheme/host swaps, DoH, wayback at 20s
+  each). `run_campaign(..., max_attempts=)` in the library; the checkpoint
+  manifest records it under `params`. Two pass-through tests pin the
+  plumbing (explicit bound + unchanged default).
+
 ## [2.15.1] — 2026-11-19
 
 ### Fixed
