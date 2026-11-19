@@ -33,6 +33,12 @@ State is a SQLite file (``--state``), so a killed campaign resumes where it
 stopped and the report is reproducible from the recorded outcomes.
 ``--retry-failed`` re-runs only the seeds whose last outcome was not ``ok``
 (the upgrade path: fix the fetcher, re-try exactly what it missed).
+``--checkpoint PATH`` writes a digest-bound manifest at the end of the run
+(SIGINT included) and ``--resume MANIFEST`` continues from one: the manifest
+is verified against the seeds and the state (issue #93), then exactly the
+seeds without an ``ok`` outcome -- attempted-and-failed AND never-attempted
+-- are fetched. Never-attempted seeds carry no results row, so resume reads
+the queue with a LEFT JOIN, not the results table.
 """
 
 from __future__ import annotations
@@ -50,6 +56,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..config import BridgeConfig
+from .checkpoint import CheckpointError, read_checkpoint, verify_checkpoint, write_checkpoint
 from .distill import DISTILL_THRESHOLD_BYTES, distill_text
 from .fetch import FetchOutcome
 from .hardening import ResourceLimits
@@ -242,13 +249,22 @@ def run_campaign(
     host_delay_sec: float = 1.0,
     retry_failed: bool = False,
     distill: bool = False,
+    checkpoint_path: str = "",
+    resume_checkpoint: str = "",
     on_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> CampaignResult:
     """Fetch seeds (resume-aware) through the resilient ladder, persist
     outcomes, aggregate. ``retry_failed`` re-attempts only rows whose last
     outcome was not ``ok``; ``distill`` summarizes oversized pages (Gemini
     when a session exists, extractive otherwise) into the ``distilled``
-    table. There is deliberately NO robots.txt step."""
+    table. There is deliberately NO robots.txt step.
+
+    ``checkpoint_path`` writes a digest-bound manifest at the end of the
+    run (interrupted or not); ``resume_checkpoint`` verifies one FIRST and
+    then fetches only the seeds without an ``ok`` outcome -- resume implies
+    unfinished-only, whatever ``retry_failed`` says. Verification happens
+    before any queue insert, so a refused resume leaves the state file
+    untouched."""
     limits = ResourceLimits(timeout_sec=timeout_sec, max_bytes=100 * 1024 * 1024)
     spill_dir = os.path.join(os.path.dirname(os.path.abspath(state_path)) or ".", "spill")
     pacer = HostPacer(default_delay_sec=host_delay_sec)
@@ -257,6 +273,26 @@ def run_campaign(
     with db:
         db.executescript(_SCHEMA)
     _migrate(db)
+
+    # Resume verification runs BEFORE the queue insert: a refused resume
+    # must not mutate the state it refused (issue #93 -- "without
+    # destructive side effects"). The queue digests only match while the
+    # state is still exactly what the manifesting run left behind.
+    resumed_meta: dict[str, Any] | None = None
+    if resume_checkpoint:
+        manifest = read_checkpoint(resume_checkpoint)
+        verify_checkpoint(manifest, seeds=seeds, db=db)
+        counters_at = manifest.get("counters", {})
+        attempted_before = 0
+        if isinstance(counters_at, dict):
+            attempted_before = int(counters_at.get("attempted", 0) or 0)
+        resumed_meta = {
+            "path": resume_checkpoint,
+            "written_at": manifest.get("written_at"),
+            "interrupted_before": bool(manifest.get("interrupted")),
+            "attempted_before": attempted_before,
+        }
+        retry_failed = True  # resume implies unfinished-only
 
     queue = seeds[:limit]
     with db:
@@ -304,18 +340,70 @@ def run_campaign(
                 with contextlib.suppress(OSError):
                     os.unlink(spill_tmp)
 
-    if retry_failed:
+    if resume_checkpoint:
+        # LEFT JOIN, not the results table: a seed interrupted before its
+        # first attempt has NO results row, and a results-only query would
+        # silently drop it (issue #93: "without ... losing queued URLs").
+        rows = db.execute(
+            "SELECT q.url AS url, q.category AS category FROM queue q"
+            " LEFT JOIN results r ON r.url = q.url"
+            " WHERE r.url IS NULL OR r.kind != 'ok' ORDER BY q.url"
+        ).fetchall()
+    elif retry_failed:
         rows = db.execute(
             "SELECT url, category FROM results WHERE kind != 'ok' ORDER BY url"
         ).fetchall()
     else:
         rows = db.execute("SELECT url, category FROM queue ORDER BY url").fetchall()
+    interrupted = False
     try:
         with ThreadPoolExecutor(max_workers=max(1, min(concurrency, 16))) as pool:
             for future in [pool.submit(work, row) for row in rows]:
                 future.result()
     except KeyboardInterrupt:  # graceful: keep what finished, state is on disk
         cancel.set()
+        interrupted = True
+
+    # The manifest is written while the db is still open (its digests are
+    # derived from it), then the db closes exactly as before. A manifest
+    # write failure is loud -- an evidence product that silently skipped
+    # its checkpoint would be worse than one that raised.
+    checkpoint_summary: dict[str, Any] | None = None
+    ckpt_path = checkpoint_path or resume_checkpoint
+    try:
+        if ckpt_path:
+            manifest = write_checkpoint(
+                ckpt_path,
+                seeds=seeds,
+                db=db,
+                params={
+                    "concurrency": concurrency,
+                    "limit": limit,
+                    "timeout_sec": timeout_sec,
+                    "host_delay_sec": host_delay_sec,
+                    "retry_failed": retry_failed,
+                    "distill": distill,
+                },
+                counters=result.as_dict(),
+                interrupted=interrupted,
+                resumed_from=resumed_meta,
+            )
+            checkpoint_summary = {
+                "path": ckpt_path,
+                "interrupted": interrupted,
+                "resumed": resumed_meta is not None,
+                "seeds_digest": manifest["seeds_digest"],
+                "results_digest": manifest["state"]["results_digest"],
+            }
+            if on_event is not None:
+                on_event(
+                    {
+                        "event": "checkpoint_written",
+                        "path": ckpt_path,
+                        "interrupted": interrupted,
+                        "results_count": manifest["state"]["results_count"],
+                    }
+                )
     finally:
         db.close()
 
@@ -323,6 +411,8 @@ def run_campaign(
         payload = result.as_dict()
         if distill:
             payload["distill"] = dict(sorted(distill_counters.items()))
+        if checkpoint_summary is not None:
+            payload["checkpoint"] = checkpoint_summary
         with open(report_path, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, ensure_ascii=False, indent=2)
             fh.write("\n")
@@ -358,6 +448,19 @@ def _cli(argv: list[str] | None = None) -> int:
         action="store_true",
         help="distill oversized pages (Gemini, extractive fallback)",
     )
+    run_p.add_argument(
+        "--checkpoint",
+        default="",
+        metavar="MANIFEST",
+        help="write a digest-bound checkpoint manifest here when the run ends (SIGINT included)",
+    )
+    run_p.add_argument(
+        "--resume",
+        default="",
+        metavar="MANIFEST",
+        help="resume from a checkpoint manifest: verify seeds/queue/state digests, "
+        "then fetch only seeds without an ok outcome",
+    )
     args = parser.parse_args(argv)
 
     from ..config import load_config
@@ -368,19 +471,28 @@ def _cli(argv: list[str] | None = None) -> int:
     def on_event(payload: dict[str, Any]) -> None:
         print(json.dumps(payload, ensure_ascii=False), flush=True)
 
-    result = run_campaign(
-        cfg,
-        seeds,
-        state_path=args.state,
-        report_path=args.report,
-        concurrency=args.concurrency,
-        limit=args.limit,
-        timeout_sec=args.timeout,
-        host_delay_sec=args.host_delay,
-        retry_failed=args.retry_failed,
-        distill=args.distill,
-        on_event=on_event,
-    )
+    try:
+        result = run_campaign(
+            cfg,
+            seeds,
+            state_path=args.state,
+            report_path=args.report,
+            concurrency=args.concurrency,
+            limit=args.limit,
+            timeout_sec=args.timeout,
+            host_delay_sec=args.host_delay,
+            retry_failed=args.retry_failed,
+            distill=args.distill,
+            checkpoint_path=args.checkpoint,
+            resume_checkpoint=args.resume,
+            on_event=on_event,
+        )
+    except CheckpointError as exc:
+        # A refused resume is an operator error worth one clear line, not a
+        # traceback; the state file was never touched (verification runs
+        # before any write).
+        print(json.dumps({"error": "checkpoint_refused", "detail": str(exc)}, ensure_ascii=False))
+        return 2
     summary = result.as_dict()
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0

@@ -1,3 +1,57 @@
+## [2.14.0] — 2026-11-19
+
+The resume round: the campaign's crash-proof SQLite state finally gets the
+contract it was missing — a digest-bound checkpoint manifest that makes an
+interrupted run resumable *safely*, not just possible (roadmap item 2,
+issue #93).
+
+### Added
+
+- **Campaign checkpoint manifest** (`freegem/crawler/checkpoint.py`):
+  `campaign run --checkpoint PATH` writes a versioned
+  `freegem-campaign-checkpoint/1.0` manifest at the end of every run —
+  normal completion AND SIGINT — atomically (tmp + `os.replace`, so a
+  crash mid-write leaves the previous manifest intact). The manifest binds
+  the campaign identity: a sha-256 over the canonical seeds set
+  (order-independent), a sha-256 over the frontier (`queue` as
+  `seeds[:limit]` — a changed `--limit` is a different campaign), and the
+  per-URL outcome rows `[kind, status]` with a digest self-check, plus the
+  run parameters and the live `CampaignResult` counters.
+- **`campaign run --resume MANIFEST`**: verifies the manifest FIRST —
+  format, seeds digest, queue digest, self-integrity, and every recorded
+  outcome against the live state — before any write, so a refused resume
+  leaves the state file byte-identical. On success it fetches exactly the
+  seeds without an `ok` outcome: attempted-and-failed AND never-attempted.
+  The resume query is a queue LEFT JOIN on results, not a results-only
+  scan: an interrupted seed carries no results row, and a results-only
+  query would silently lose it. Resume implies unfinished-only, whatever
+  `--retry-failed` says; the rewritten manifest records `resumed_from`
+  (the inherited counters and interrupt state) and the report carries a
+  `checkpoint` summary.
+- **Lower-bound verification semantics**: outcomes ADDED to the state after
+  the manifest was written are accepted — they are the progress a killed
+  resume made without a manifest rewrite, and accepting them is what makes
+  an interrupt *during* resume itself resumable. Outcomes recorded in the
+  manifest that are missing, altered, or disagreeing in kind/status are
+  hard refusals (`CheckpointError`), as are unknown manifest versions,
+  corrupt files, and seeds/queue digest mismatches.
+- **CLI refusal contract**: a refused resume prints one
+  `{"error": "checkpoint_refused", "detail": ...}` JSON line and exits 2 —
+  an operator error, not a traceback.
+
+### Tests
+
+- `freegem/tests/test_campaign_checkpoint.py` — 24 contract tests: manifest
+  write contract (format, digests recomputed against the db, params,
+  atomicity with no temp leftovers), SIGINT interrupt producing a
+  recoverable manifest with the interrupted seed still queued, resume
+  re-fetching exactly the failed+missing seeds and never the completed
+  ones, the killed-resume progress (lower-bound) case, the refusal matrix
+  (different seeds, tampered state, tampered queue, corrupt file, unknown
+  format, missing manifest, fresh state, hand-edited rows), state-untouched
+  on refusal, digest determinism/order-independence, and the CLI
+  checkpoint→resume round trip with exit 2 on refusal.
+
 ## [2.13.0] — 2026-11-11
 
 The second evidence round: the crawl's WARC proof becomes a standard,

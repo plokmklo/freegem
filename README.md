@@ -922,6 +922,36 @@ its canonical JSON, so a receipt can be quoted and compared across runs.
 Most crawlers treat politeness as a private config knob; freegem emits the
 evidence.
 
+### Campaign checkpoints (`campaign run --checkpoint` / `--resume`)
+
+The bulk-fetch campaign (`python -m freegem.crawler.campaign run --seeds
+seeds.jsonl --state state.db`) persists every outcome to SQLite the moment
+it lands, so data already survives `kill -9`. What it lacked was a contract
+for *resuming*: nothing bound a seeds file to a state file, and nothing
+said how far a run got. `--checkpoint PATH` writes that contract — a
+digest-bound manifest at the end of every run, SIGINT included:
+
+- `seeds_digest` — sha-256 over the canonical seeds set, so a resume
+  refuses to mix a state file with seeds it was never run against;
+- `queue_digest` — the frontier as `seeds[:limit]`, so a changed `--limit`
+  is refused (a different limit is a different campaign identity);
+- `state.results_rows` — per-URL `[kind, status]` outcomes, with a digest
+  self-check (hand-editing the rows without recomputing fails loudly);
+- `params` + `counters` — the run configuration and the live outcome
+  histogram at manifest time; `interrupted` records why it was written.
+
+`--resume MANIFEST` verifies all of that FIRST, before any write — a
+refused resume leaves the state file byte-identical — then fetches exactly
+the seeds without an `ok` outcome: attempted-and-failed **and**
+never-attempted (the queue is read with a LEFT JOIN, so an interrupted
+seed carries no results row and is still not lost). The manifest is a
+lower bound, not an equality snapshot: outcomes added to the state after
+the manifest was written are the progress a killed resume left behind, and
+the next resume accepts them — which is what makes an interrupt *during*
+resume itself resumable. Unknown manifest formats, corrupt files, and
+edited histories all fail with named disagreements; the CLI prints one
+`checkpoint_refused` JSON line and exits 2.
+
 ---
 
 ## Change monitoring
