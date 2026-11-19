@@ -1,3 +1,51 @@
+## [2.15.0] — 2026-11-19
+
+The throughput round: campaigns stop paying a TCP+TLS handshake per fetch
+(roadmap item 3, issue #94) — without bending the SSRF dial-pinning
+invariant by a single degree.
+
+### Fixed
+
+- **A refused resume no longer leaks the state-db handle** (caught by
+  Windows CI on 8a20128): `run_campaign` raised `CheckpointError` from
+  resume verification before reaching its `finally: db.close()`, so the
+  SQLite connection stayed open. On Windows an open handle locks the file
+  (`WinError 32` on any later unlink/move); on POSIX it silently lingered.
+  The handle is now closed before the refusal propagates, and a regression
+  test proves the state file is immediately replaceable after a refusal.
+
+### Added
+
+- **Keep-alive connection pool** (`freegem/crawler/pool.py`): stdlib
+  `do_open` forces `Connection: close` and closes the socket after every
+  request, so each of a campaign's fetches paid a full handshake. The pool
+  caches the CONNECTION OBJECTS (http.client supports serial reuse) behind
+  a `(scheme, host, port)` key. A pooled connection dials through the same
+  resolve → check-all-public → pin sequence; a REUSED socket re-dials
+  nothing (the anti-rebinding window cannot reopen); a stale reuse is
+  retried once on a fresh pinned dial; redirect hops re-dispatch through
+  the same opener with their own host key.
+- **Honest pool discipline**: only fully-consumed responses re-enter the
+  pool — Content-Length satisfaction (the `_close_conn` hook) or the
+  terminal chunk of a chunked body (a `read()` returning empty with the
+  stream still open). Bodies abandoned mid-read (cap exceeded, type
+  refused, exceptions) and `Connection: close` responses never pool.
+  Per-key and total caps plus an idle TTL bound the socket budget;
+  `close()` is deterministic. The pool is bypassed for proxy mode and for
+  the ladder's DoH / relaxed-TLS rungs, so a pooled connection is always a
+  default-resolver, certificate-verified dial.
+- **`campaign run --keep-alive`**: one shared pool for the run; the
+  report's `keep_alive` section and a `keep_alive_stats` event carry the
+  counters (dials, reuses, stale drops, expiries, cap refusals). Library
+  surface: `crawl_fetch(..., pool=)` / `fetch_resilient(..., pool=)` /
+  `run_campaign(..., keep_alive=True)`.
+- 19 contract tests (`test_keep_alive_pool.py`) against a counting
+  keep-alive loopback server: the deterministic dial-count benchmark
+  (10 fetches → 1 dial), pinned-dial proof on first use and zero dials on
+  reuse, stale-retry, TTL expiry, pool-discipline matrix, chunked reuse,
+  redirect per-host keys, proxy bypass, caps, deterministic close,
+  concurrent body integrity, and campaign integration.
+
 ## [2.14.0] — 2026-11-19
 
 The resume round: the campaign's crash-proof SQLite state finally gets the

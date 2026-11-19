@@ -952,6 +952,24 @@ resume itself resumable. Unknown manifest formats, corrupt files, and
 edited histories all fail with named disagreements; the CLI prints one
 `checkpoint_refused` JSON line and exits 2.
 
+### Keep-alive connection pool (`campaign run --keep-alive`)
+
+Every plain fetch in a campaign can reuse the same pinned connection to a
+host: `--keep-alive` runs the campaign's attempts through one shared
+`KeepAlivePool` (issue #94). The SSRF posture is unchanged — a pooled
+connection is dialed through the same resolve → check-all-public → pin
+sequence, a reused socket re-dials nothing (no second resolution window to
+rebind), and a stale reuse is retried once on a fresh pinned dial. Only
+fully-consumed responses re-enter the pool (Content-Length satisfaction or
+the terminal chunk of a chunked body); a body abandoned mid-read (cap
+exceeded, type refused) never does. The ladder's exotic rungs (DNS-over-
+HTTPS resolution, relaxed-TLS retries) and proxy mode never pool, so a
+pooled connection is always a default-resolver, certificate-verified dial.
+Bounded by per-host and total caps plus an idle TTL, closed deterministically
+at the end of the run, and the report's `keep_alive` section carries the
+honest counters (dials, reuses, stale drops, expiries, cap refusals) —
+`10 fetches → 1 dial` is the contract the tests pin.
+
 ---
 
 ## Change monitoring

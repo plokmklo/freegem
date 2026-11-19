@@ -292,6 +292,26 @@ class InterruptAndResumeTests(CheckpointTestCase):
 
 
 class RefusalTests(CheckpointTestCase):
+    def test_refused_resume_does_not_lock_state_file(self) -> None:
+        """A refused resume must close the state db handle before raising:
+        an open handle locks the file on Windows (WinError 32 on any later
+        unlink/move -- caught by CI on 8a20128)."""
+        with mock.patch(
+            "freegem.crawler.campaign.fetch_resilient",
+            side_effect=lambda cfg, url, **kw: _ok(url),
+        ):
+            self._run(self.seeds, checkpoint_path=self.manifest_path)
+        with self.assertRaisesRegex(CheckpointError, "seeds digest mismatch"):
+            with mock.patch(
+                "freegem.crawler.campaign.fetch_resilient",
+                side_effect=lambda cfg, url, **kw: _ok(url),
+            ):
+                self._run(other_seeds(), resume_checkpoint=self.manifest_path)
+        # no handle is held: the state file is immediately replaceable
+        moved = self.state + ".moved"
+        os.replace(self.state, moved)
+        self.assertTrue(os.path.exists(moved))
+
     def test_resume_with_different_seeds_refused(self) -> None:
         with mock.patch(
             "freegem.crawler.campaign.fetch_resilient",

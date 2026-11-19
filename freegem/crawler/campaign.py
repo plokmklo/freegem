@@ -39,6 +39,9 @@ is verified against the seeds and the state (issue #93), then exactly the
 seeds without an ``ok`` outcome -- attempted-and-failed AND never-attempted
 -- are fetched. Never-attempted seeds carry no results row, so resume reads
 the queue with a LEFT JOIN, not the results table.
+``--keep-alive`` reuses pinned connections across same-host fetches (issue
+#94): fewer TCP+TLS handshakes, the same SSRF dial-pinning, honest pool
+stats in the events and the report.
 """
 
 from __future__ import annotations
@@ -60,6 +63,7 @@ from .checkpoint import CheckpointError, read_checkpoint, verify_checkpoint, wri
 from .distill import DISTILL_THRESHOLD_BYTES, distill_text
 from .fetch import FetchOutcome
 from .hardening import ResourceLimits
+from .pool import KeepAlivePool
 from .resilient import HostPacer, fetch_resilient
 
 __all__ = ["CampaignResult", "load_seeds", "run_campaign"]
@@ -251,6 +255,7 @@ def run_campaign(
     distill: bool = False,
     checkpoint_path: str = "",
     resume_checkpoint: str = "",
+    keep_alive: bool = False,
     on_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> CampaignResult:
     """Fetch seeds (resume-aware) through the resilient ladder, persist
@@ -264,10 +269,15 @@ def run_campaign(
     then fetches only the seeds without an ``ok`` outcome -- resume implies
     unfinished-only, whatever ``retry_failed`` says. Verification happens
     before any queue insert, so a refused resume leaves the state file
-    untouched."""
+    untouched. ``keep_alive`` runs every plain attempt through one shared
+    :class:`~freegem.crawler.pool.KeepAlivePool` (issue #94): same-host
+    fetches reuse pinned connections; the pool's honest counters (dials,
+    reuses, stale drops, caps) land in the ``keep_alive`` report section.
+    """
     limits = ResourceLimits(timeout_sec=timeout_sec, max_bytes=100 * 1024 * 1024)
     spill_dir = os.path.join(os.path.dirname(os.path.abspath(state_path)) or ".", "spill")
     pacer = HostPacer(default_delay_sec=host_delay_sec)
+    pool = KeepAlivePool() if keep_alive else None
     db = sqlite3.connect(state_path, check_same_thread=False)
     db.row_factory = sqlite3.Row
     with db:
@@ -280,8 +290,16 @@ def run_campaign(
     # state is still exactly what the manifesting run left behind.
     resumed_meta: dict[str, Any] | None = None
     if resume_checkpoint:
-        manifest = read_checkpoint(resume_checkpoint)
-        verify_checkpoint(manifest, seeds=seeds, db=db)
+        try:
+            manifest = read_checkpoint(resume_checkpoint)
+            verify_checkpoint(manifest, seeds=seeds, db=db)
+        except CheckpointError:
+            # A refused resume must not leave the state file LOCKED either:
+            # the db handle is closed before the refusal propagates (on
+            # Windows an open handle blocks any later unlink/move of the
+            # file -- caught by CI on 8a20128).
+            db.close()
+            raise
         counters_at = manifest.get("counters", {})
         attempted_before = 0
         if isinstance(counters_at, dict):
@@ -320,7 +338,13 @@ def run_campaign(
         url = str(row["url"])
         category = str(row["category"])
         outcome = fetch_resilient(
-            cfg, url, limits=limits, pacer=pacer, spill_dir=spill_dir, cookie_jar=jar
+            cfg,
+            url,
+            limits=limits,
+            pacer=pacer,
+            spill_dir=spill_dir,
+            cookie_jar=jar,
+            pool=pool,
         )
         # The campaign keeps no artifact store: a body that spilled to a temp
         # file (> spill_bytes) is read for distillation below and must not
@@ -357,8 +381,11 @@ def run_campaign(
         rows = db.execute("SELECT url, category FROM queue ORDER BY url").fetchall()
     interrupted = False
     try:
-        with ThreadPoolExecutor(max_workers=max(1, min(concurrency, 16))) as pool:
-            for future in [pool.submit(work, row) for row in rows]:
+        # NOTE: not named `pool` -- that name is the KeepAlivePool captured
+        # by work(); shadowing it here would silently hand the EXECUTOR to
+        # fetch_resilient as the connection pool.
+        with ThreadPoolExecutor(max_workers=max(1, min(concurrency, 16))) as executor:
+            for future in [executor.submit(work, row) for row in rows]:
                 future.result()
     except KeyboardInterrupt:  # graceful: keep what finished, state is on disk
         cancel.set()
@@ -370,6 +397,9 @@ def run_campaign(
     # its checkpoint would be worse than one that raised.
     checkpoint_summary: dict[str, Any] | None = None
     ckpt_path = checkpoint_path or resume_checkpoint
+    pool_stats: dict[str, int] | None = pool.snapshot() if pool is not None else None
+    if pool is not None and on_event is not None:
+        on_event({"event": "keep_alive_stats", **pool.snapshot()})
     try:
         if ckpt_path:
             manifest = write_checkpoint(
@@ -406,11 +436,15 @@ def run_campaign(
                 )
     finally:
         db.close()
+    if pool is not None:
+        pool.close()  # deterministic: every pooled socket closed
 
     if report_path:
         payload = result.as_dict()
         if distill:
             payload["distill"] = dict(sorted(distill_counters.items()))
+        if pool_stats is not None:
+            payload["keep_alive"] = pool_stats
         if checkpoint_summary is not None:
             payload["checkpoint"] = checkpoint_summary
         with open(report_path, "w", encoding="utf-8") as fh:
@@ -461,6 +495,11 @@ def _cli(argv: list[str] | None = None) -> int:
         help="resume from a checkpoint manifest: verify seeds/queue/state digests, "
         "then fetch only seeds without an ok outcome",
     )
+    run_p.add_argument(
+        "--keep-alive",
+        action="store_true",
+        help="reuse SSRF-pinned keep-alive connections across same-host fetches (issue #94)",
+    )
     args = parser.parse_args(argv)
 
     from ..config import load_config
@@ -485,6 +524,7 @@ def _cli(argv: list[str] | None = None) -> int:
             distill=args.distill,
             checkpoint_path=args.checkpoint,
             resume_checkpoint=args.resume,
+            keep_alive=args.keep_alive,
             on_event=on_event,
         )
     except CheckpointError as exc:
