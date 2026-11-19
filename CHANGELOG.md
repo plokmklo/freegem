@@ -11,6 +11,11 @@
   keeps the report honest. Default `total_cap` raised 32 -> 128 (the
   campaign's 8 workers over hundreds of hosts need headroom; idle TTL
   still prunes).
+- **Idle TTL uses `>=`** so a TTL of 0 expires within one clock tick:
+  Windows' monotonic clock ticks every ~15.6ms and a strict `>` let a
+  ttl-0 entry survive checkout when both timestamps landed inside one
+  tick — the single test that failed on every Windows CI run since the
+  pool landed (runs #116-#120, one root cause, fixed in b4f21e4).
 
 ## [2.16.0] — 2026-11-19
 
