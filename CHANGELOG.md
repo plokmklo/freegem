@@ -1,3 +1,23 @@
+## [2.15.1] — 2026-11-19
+
+### Fixed
+
+- **Bounded DNS resolution (issue #88)**: `socket.getaddrinfo` has no
+  timeout of its own, and a stalled resolver held a fetch thread FOREVER —
+  the campaign's socket timeout never engaged because the dial had not
+  started. `pick_public_ips` (the pinned-dial resolve step for every
+  direct fetch, pooled or not) now runs the lookup on a throwaway daemon
+  thread with a hard 5s wall-clock cap
+  (`DEFAULT_RESOLVE_TIMEOUT_SEC`); a stalled lookup raises
+  `SSRFRefused("cannot resolve ... stalled")`, whose marker the fetch
+  taxonomy already classifies as `network` — a dead domain, not an SSRF
+  refusal. Abandoned lookup threads are daemons bounded by in-flight
+  request count. Proxy/browser preflight paths (`host_public_or_unresolvable`,
+  `host_public_strict`) still resolve directly and remain to be swept in a
+  follow-up. 6 tests in `test_dns_timeout.py`, including the end-to-end
+  `crawl_fetch` of a stalled host returning an honest `network` outcome
+  instead of hanging.
+
 ## [2.15.0] — 2026-11-19
 
 The throughput round: campaigns stop paying a TCP+TLS handshake per fetch
