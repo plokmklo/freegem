@@ -125,7 +125,11 @@ class KeepAlivePool:
             while bucket:
                 idle_since, conn = bucket.popleft()
                 self.stats["live"] = max(0, self.stats["live"] - 1)
-                if self._idle_ttl is not None and (time.monotonic() - idle_since) > self._idle_ttl:
+                if self._idle_ttl is not None and (time.monotonic() - idle_since) >= self._idle_ttl:
+                    # >=, not >: an entry exactly AT its TTL is expired.
+                    # Windows' monotonic clock ticks every ~15.6ms, so a
+                    # ttl of 0.0 must expire immediately even when both
+                    # timestamps land inside one tick (caught by CI).
                     self._expire(conn)
                     continue
                 if conn.sock is None:  # dead entry: drop, look for another
