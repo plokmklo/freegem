@@ -64,6 +64,7 @@ from ..gemini import _ssl_ctx
 from ..ssrf import Resolver, SSRFRefused, build_guarded_opener, url_allowed
 from ..web_scraper import ScrapeError
 from .hardening import ResourceLimits, decode_body
+from .pool import KeepAlivePool, build_pooled_opener
 
 __all__ = ["FetchOutcome", "crawl_fetch", "decode_file", "read_body_stream", "text_of_outcome"]
 
@@ -207,6 +208,7 @@ def crawl_fetch(
     tls_context: ssl.SSLContext | None = None,
     resolver: Resolver | None = None,
     cookie_jar: http.cookiejar.CookieJar | None = None,
+    pool: KeepAlivePool | None = None,
 ) -> FetchOutcome:
     """Fetch one URL under the full guard stack. Never raises for fetch-level
     problems -- the outcome IS the result. Raises only on programming errors
@@ -219,6 +221,10 @@ def crawl_fetch(
     keys -- that is how browser-grade header profiles are applied upstream.
     ``resolver`` swaps the resolve-and-check step (the ladder's DoH fallback);
     ``cookie_jar`` lets origin-granted cookies ride along across attempts.
+    ``pool`` reuses keep-alive connections dialed through the SAME pinned
+    path (issue #94); it is honored only on the default verified TLS context
+    and ignored in proxy mode, where the dial cannot be pinned and every
+    request must preflight instead.
     """
     cap = limits or ResourceLimits()
     started = time.monotonic()
@@ -246,12 +252,20 @@ def crawl_fetch(
 
     request = urllib.request.Request(url, headers=headers)
     try:
-        response = build_guarded_opener(
-            cfg.proxy,
-            tls_context if tls_context is not None else _ssl_ctx(),
-            resolver,
-            cookie_jar,
-        ).open(request, timeout=cap.timeout_sec)
+        # Pool only on the default verified context: the pool key carries no
+        # TLS identity, so a relaxed-TLS dial must never enter it (the
+        # resilient layer already withholds the pool there; this is the
+        # belt-and-suspenders rule for direct callers).
+        if pool is not None and not cfg.proxy and tls_context is None:
+            opener = build_pooled_opener(_ssl_ctx(), pool, cookie_jar)
+        else:
+            opener = build_guarded_opener(
+                cfg.proxy,
+                tls_context if tls_context is not None else _ssl_ctx(),
+                resolver,
+                cookie_jar,
+            )
+        response = opener.open(request, timeout=cap.timeout_sec)
     except urllib.error.HTTPError as exc:
         outcome.kind = "http_error"
         outcome.status = exc.code

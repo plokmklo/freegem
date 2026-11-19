@@ -56,6 +56,7 @@ import http.cookiejar
 import ipaddress
 import socket
 import ssl
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -202,7 +203,46 @@ def _checked_addresses(host: str, infos: list[tuple[Any, ...]]) -> list[str]:
     return checked
 
 
-def pick_public_ips(host: str) -> list[str]:
+#: Resolve calls must never hang a fetch thread (issue #88): a stalled
+#: resolver holds the worker forever because socket.getaddrinfo has no
+#: timeout. The lookup runs on a throwaway daemon thread with a hard cap; a
+#: timed-out thread is abandoned to die with the process (the count is
+#: bounded by in-flight requests, which the campaign's concurrency cap
+#: already bounds). getaddrinfo releases the GIL, so bounded waits on other
+#: threads are not blocked by an in-flight lookup.
+DEFAULT_RESOLVE_TIMEOUT_SEC = 5.0
+
+
+def _getaddrinfo_bounded(host: str, timeout_sec: float) -> list[tuple[Any, ...]]:
+    """``socket.getaddrinfo(host, None)`` with a hard wall-clock cap.
+
+    Raises the SAME ``OSError`` the direct call would raise (callers wrap it
+    in their own error taxonomy), or ``SSRFRefused`` with the
+    "cannot resolve ... stalled" marker on a timeout -- a marker the fetch
+    taxonomy's ``_is_dns_failure`` already classifies as ``network``.
+    """
+    outcome: dict[str, Any] = {}
+
+    def _lookup() -> None:
+        try:
+            outcome["infos"] = socket.getaddrinfo(host, None)
+        except OSError as exc:
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=_lookup, daemon=True, name=f"freegem-resolve-{host[:60]}")
+    thread.start()
+    thread.join(timeout_sec)
+    if thread.is_alive():
+        raise SSRFRefused(f"cannot resolve {host!r}: resolver stalled (>{timeout_sec:.1f}s)")
+    if "error" in outcome:
+        raise outcome["error"]
+    infos = outcome.get("infos")
+    if not infos:
+        raise SSRFRefused(f"no addresses resolved for {host!r}")
+    return infos
+
+
+def pick_public_ips(host: str, *, timeout_sec: float = DEFAULT_RESOLVE_TIMEOUT_SEC) -> list[str]:
     """Resolve ``host`` and return its verified-public IPs to dial, in order.
 
     Callers must dial ONLY addresses from this list (that is the whole point)
@@ -211,12 +251,19 @@ def pick_public_ips(host: str) -> list[str]:
     entry -- mirrors what stdlib ``create_connection`` does for a hostname,
     without ever letting it re-resolve: dual-stack hosts work on IPv4-only and
     IPv6-only networks alike.
+
+    Resolution is time-bounded (issue #88): ``socket.getaddrinfo`` has no
+    timeout of its own, and a stalled resolver used to hang the fetch thread
+    FOREVER -- the campaign's socket timeout never engaged because the dial
+    had not started. A stalled resolution now raises ``SSRFRefused("cannot
+    resolve ... stalled")``, which the fetch taxonomy classifies as
+    ``network``, exactly like any other dead domain.
     """
     bare = _host_only(host)
     if not bare:
         raise SSRFRefused("refusing empty host")
     try:
-        infos = socket.getaddrinfo(bare, None)
+        infos = _getaddrinfo_bounded(bare, timeout_sec)
     except OSError as exc:
         raise SSRFRefused(f"cannot resolve {bare!r}: {exc}") from exc
     if not infos:

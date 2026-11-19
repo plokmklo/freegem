@@ -1,3 +1,152 @@
+## [2.16.1] — 2026-11-19
+
+### Fixed
+
+- **Pool eviction instead of refusal at the total cap** (tuned by the live
+  1000-page run): a plain "refuse when full" policy closed exactly the
+  connections a ladder retry wanted seconds later — 211 capped checkins
+  against 15 reuses on a 300-host slice. At the total cap the OLDEST idle
+  entry is now evicted to make room (it was closest to its TTL expiry
+  anyway); the per-key cap still refuses, and a new `evicted` counter
+  keeps the report honest. Default `total_cap` raised 32 -> 128 (the
+  campaign's 8 workers over hundreds of hosts need headroom; idle TTL
+  still prunes).
+
+## [2.16.0] — 2026-11-19
+
+### Added
+
+- **`campaign run --max-attempts N`**: bounds the resilient ladder per
+  seed (default 16, unchanged). A lower bound turns dead-domain seeds into
+  quick honest failures instead of minutes of wayback timeouts — found live
+  when the 1000-page benchmark crawled at 2 seeds/min because every
+  dead host walked all 16 rungs (scheme/host swaps, DoH, wayback at 20s
+  each). `run_campaign(..., max_attempts=)` in the library; the checkpoint
+  manifest records it under `params`. Two pass-through tests pin the
+  plumbing (explicit bound + unchanged default).
+
+## [2.15.1] — 2026-11-19
+
+### Fixed
+
+- **Bounded DNS resolution (issue #88)**: `socket.getaddrinfo` has no
+  timeout of its own, and a stalled resolver held a fetch thread FOREVER —
+  the campaign's socket timeout never engaged because the dial had not
+  started. `pick_public_ips` (the pinned-dial resolve step for every
+  direct fetch, pooled or not) now runs the lookup on a throwaway daemon
+  thread with a hard 5s wall-clock cap
+  (`DEFAULT_RESOLVE_TIMEOUT_SEC`); a stalled lookup raises
+  `SSRFRefused("cannot resolve ... stalled")`, whose marker the fetch
+  taxonomy already classifies as `network` — a dead domain, not an SSRF
+  refusal. Abandoned lookup threads are daemons bounded by in-flight
+  request count. Proxy/browser preflight paths (`host_public_or_unresolvable`,
+  `host_public_strict`) still resolve directly and remain to be swept in a
+  follow-up. 6 tests in `test_dns_timeout.py`, including the end-to-end
+  `crawl_fetch` of a stalled host returning an honest `network` outcome
+  instead of hanging.
+
+## [2.15.0] — 2026-11-19
+
+The throughput round: campaigns stop paying a TCP+TLS handshake per fetch
+(roadmap item 3, issue #94) — without bending the SSRF dial-pinning
+invariant by a single degree.
+
+### Fixed
+
+- **A refused resume no longer leaks the state-db handle** (caught by
+  Windows CI on 8a20128): `run_campaign` raised `CheckpointError` from
+  resume verification before reaching its `finally: db.close()`, so the
+  SQLite connection stayed open. On Windows an open handle locks the file
+  (`WinError 32` on any later unlink/move); on POSIX it silently lingered.
+  The handle is now closed before the refusal propagates, and a regression
+  test proves the state file is immediately replaceable after a refusal.
+
+### Added
+
+- **Keep-alive connection pool** (`freegem/crawler/pool.py`): stdlib
+  `do_open` forces `Connection: close` and closes the socket after every
+  request, so each of a campaign's fetches paid a full handshake. The pool
+  caches the CONNECTION OBJECTS (http.client supports serial reuse) behind
+  a `(scheme, host, port)` key. A pooled connection dials through the same
+  resolve → check-all-public → pin sequence; a REUSED socket re-dials
+  nothing (the anti-rebinding window cannot reopen); a stale reuse is
+  retried once on a fresh pinned dial; redirect hops re-dispatch through
+  the same opener with their own host key.
+- **Honest pool discipline**: only fully-consumed responses re-enter the
+  pool — Content-Length satisfaction (the `_close_conn` hook) or the
+  terminal chunk of a chunked body (a `read()` returning empty with the
+  stream still open). Bodies abandoned mid-read (cap exceeded, type
+  refused, exceptions) and `Connection: close` responses never pool.
+  Per-key and total caps plus an idle TTL bound the socket budget;
+  `close()` is deterministic. The pool is bypassed for proxy mode and for
+  the ladder's DoH / relaxed-TLS rungs, so a pooled connection is always a
+  default-resolver, certificate-verified dial.
+- **`campaign run --keep-alive`**: one shared pool for the run; the
+  report's `keep_alive` section and a `keep_alive_stats` event carry the
+  counters (dials, reuses, stale drops, expiries, cap refusals). Library
+  surface: `crawl_fetch(..., pool=)` / `fetch_resilient(..., pool=)` /
+  `run_campaign(..., keep_alive=True)`.
+- 19 contract tests (`test_keep_alive_pool.py`) against a counting
+  keep-alive loopback server: the deterministic dial-count benchmark
+  (10 fetches → 1 dial), pinned-dial proof on first use and zero dials on
+  reuse, stale-retry, TTL expiry, pool-discipline matrix, chunked reuse,
+  redirect per-host keys, proxy bypass, caps, deterministic close,
+  concurrent body integrity, and campaign integration.
+
+## [2.14.0] — 2026-11-19
+
+The resume round: the campaign's crash-proof SQLite state finally gets the
+contract it was missing — a digest-bound checkpoint manifest that makes an
+interrupted run resumable *safely*, not just possible (roadmap item 2,
+issue #93).
+
+### Added
+
+- **Campaign checkpoint manifest** (`freegem/crawler/checkpoint.py`):
+  `campaign run --checkpoint PATH` writes a versioned
+  `freegem-campaign-checkpoint/1.0` manifest at the end of every run —
+  normal completion AND SIGINT — atomically (tmp + `os.replace`, so a
+  crash mid-write leaves the previous manifest intact). The manifest binds
+  the campaign identity: a sha-256 over the canonical seeds set
+  (order-independent), a sha-256 over the frontier (`queue` as
+  `seeds[:limit]` — a changed `--limit` is a different campaign), and the
+  per-URL outcome rows `[kind, status]` with a digest self-check, plus the
+  run parameters and the live `CampaignResult` counters.
+- **`campaign run --resume MANIFEST`**: verifies the manifest FIRST —
+  format, seeds digest, queue digest, self-integrity, and every recorded
+  outcome against the live state — before any write, so a refused resume
+  leaves the state file byte-identical. On success it fetches exactly the
+  seeds without an `ok` outcome: attempted-and-failed AND never-attempted.
+  The resume query is a queue LEFT JOIN on results, not a results-only
+  scan: an interrupted seed carries no results row, and a results-only
+  query would silently lose it. Resume implies unfinished-only, whatever
+  `--retry-failed` says; the rewritten manifest records `resumed_from`
+  (the inherited counters and interrupt state) and the report carries a
+  `checkpoint` summary.
+- **Lower-bound verification semantics**: outcomes ADDED to the state after
+  the manifest was written are accepted — they are the progress a killed
+  resume made without a manifest rewrite, and accepting them is what makes
+  an interrupt *during* resume itself resumable. Outcomes recorded in the
+  manifest that are missing, altered, or disagreeing in kind/status are
+  hard refusals (`CheckpointError`), as are unknown manifest versions,
+  corrupt files, and seeds/queue digest mismatches.
+- **CLI refusal contract**: a refused resume prints one
+  `{"error": "checkpoint_refused", "detail": ...}` JSON line and exits 2 —
+  an operator error, not a traceback.
+
+### Tests
+
+- `freegem/tests/test_campaign_checkpoint.py` — 24 contract tests: manifest
+  write contract (format, digests recomputed against the db, params,
+  atomicity with no temp leftovers), SIGINT interrupt producing a
+  recoverable manifest with the interrupted seed still queued, resume
+  re-fetching exactly the failed+missing seeds and never the completed
+  ones, the killed-resume progress (lower-bound) case, the refusal matrix
+  (different seeds, tampered state, tampered queue, corrupt file, unknown
+  format, missing manifest, fresh state, hand-edited rows), state-untouched
+  on refusal, digest determinism/order-independence, and the CLI
+  checkpoint→resume round trip with exit 2 on refusal.
+
 ## [2.13.0] — 2026-11-11
 
 The second evidence round: the crawl's WARC proof becomes a standard,

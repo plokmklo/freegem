@@ -40,6 +40,7 @@ from ..config import BridgeConfig
 from ..ssrf import Resolver, SSRFRefused, _checked_addresses, _host_only, pick_public_ips
 from .fetch import FetchOutcome, _is_dns_failure, crawl_fetch
 from .hardening import ResourceLimits
+from .pool import KeepAlivePool
 
 __all__ = ["PROFILES", "HostPacer", "fetch_resilient"]
 
@@ -233,6 +234,7 @@ def fetch_resilient(
     max_attempts: int = 16,
     extra_headers: dict[str, str] | None = None,
     cookie_jar: http.cookiejar.CookieJar | None = None,
+    pool: KeepAlivePool | None = None,
 ) -> FetchOutcome:
     """Fetch ``url`` and, on failure, work the ladder until the action budget
     is spent. The returned outcome carries ``attempts`` (how many requests
@@ -242,7 +244,10 @@ def fetch_resilient(
     profile headers so a profile can replace identity headers but never a
     caller's validators. ``cookie_jar`` (share one per campaign) keeps
     origin-granted cookies across attempts so anonymous-entitlement loops
-    resolve the way a browser resolves them. Never raises for fetch-level
+    resolve the way a browser resolves them. ``pool`` reuses keep-alive
+    connections for the PLAIN attempts only (issue #94): DoH-resolved and
+    TLS-relaxed rungs dial fresh, so a pooled connection never mixes
+    resolver or verification postures. Never raises for fetch-level
     problems.
     """
     base = limits or ResourceLimits()
@@ -260,7 +265,7 @@ def fetch_resilient(
         max_sleeps=max(1, min(base.max_retries, 4)),
         caller_headers=extra_headers or {},
     )
-    outcome = _attempt(cfg, url, base, state, pacer, spill_dir, cookie_jar=cookie_jar)
+    outcome = _attempt(cfg, url, base, state, pacer, spill_dir, cookie_jar=cookie_jar, pool=pool)
 
     while not _happy(outcome) and state.attempts < max_attempts:
         nxt = _next_action(url, outcome, state, host, pacer)
@@ -270,7 +275,7 @@ def fetch_resilient(
         if action == "sleep":
             time.sleep(_sleep_backoff(state.attempts))
             outcome = _attempt(
-                cfg, target_url, base, state, pacer, spill_dir, cookie_jar=cookie_jar
+                cfg, target_url, base, state, pacer, spill_dir, cookie_jar=cookie_jar, pool=pool
             )
             continue
         state.actions.append(action)
@@ -281,6 +286,9 @@ def fetch_resilient(
         resolver: Resolver | None = None
         if action == "doh":
             resolver = _doh_resolver_for(host)
+        # Exotic rungs (DoH resolver, relaxed TLS) never touch the pool: a
+        # pooled connection must always be a default-resolver, verified dial.
+        plain_attempt = resolver is None and not relaxed_tls
         if action.startswith("profile_") or action in (
             "tls_unverified",
             "origin_root",
@@ -300,10 +308,11 @@ def fetch_resilient(
                 relaxed_tls=relaxed_tls,
                 resolver=resolver,
                 cookie_jar=cookie_jar,
+                pool=pool if plain_attempt else None,
             )
         else:  # plain retry (429 waited out, timeout escalated, 5xx backed off)
             outcome = _attempt(
-                cfg, target_url, base, state, pacer, spill_dir, cookie_jar=cookie_jar
+                cfg, target_url, base, state, pacer, spill_dir, cookie_jar=cookie_jar, pool=pool
             )
         if action == "wayback" and outcome.ok:
             outcome.via = "wayback"
@@ -328,6 +337,7 @@ def _attempt(
     relaxed_tls: bool = False,
     resolver: Resolver | None = None,
     cookie_jar: http.cookiejar.CookieJar | None = None,
+    pool: KeepAlivePool | None = None,
 ) -> FetchOutcome:
     """One paced attempt at ``url`` with the ladder's current knobs."""
     wait = pacer.reserve(_host_of(url) or "")
@@ -352,6 +362,7 @@ def _attempt(
         tls_context=tls_context,
         resolver=resolver,
         cookie_jar=cookie_jar,
+        pool=pool,
     )
     if relaxed_tls:
         outcome.tls_unverified = True
