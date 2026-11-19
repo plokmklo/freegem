@@ -78,7 +78,7 @@ class KeepAlivePool:
         self,
         *,
         per_key_cap: int = 2,
-        total_cap: int = 32,
+        total_cap: int = 128,
         idle_ttl_sec: float | None = 30.0,
         resolver: Resolver | None = None,
     ) -> None:
@@ -99,7 +99,8 @@ class KeepAlivePool:
             "stale_drops": 0,  # reuses that failed and were replaced
             "checkins": 0,  # responses fully consumed and pooled again
             "expired": 0,  # idle entries dropped at checkout (TTL)
-            "capped": 0,  # checkins refused by the caps (closed instead)
+            "capped": 0,  # checkins refused by the PER-KEY cap (closed instead)
+            "evicted": 0,  # idle entries evicted to make room when total-full
             "live": 0,  # entries currently pooled
         }
 
@@ -146,16 +147,42 @@ class KeepAlivePool:
         return conn, False
 
     def checkin(self, key: tuple[str, str, int], conn: http.client.HTTPConnection) -> None:
-        """Return a fully-consumed connection to the pool (or close it)."""
+        """Return a fully-consumed connection to the pool (or close it).
+
+        When the pool is at its total cap, the OLDEST idle entry is evicted
+        to make room (closest to its idle-TTL expiry anyway) instead of
+        refusing the checkin: a live 1000-host campaign found that a plain
+        "refuse when full" policy closed exactly the connections a ladder
+        retry wanted seconds later (211 capped vs 15 reuses live). The
+        per-key cap still refuses -- a host flooding its own bucket is
+        churn, not reuse.
+        """
         with self._lock:
             bucket = self._entries.setdefault(key, deque())
-            if len(bucket) >= self._per_key_cap or self._stats_live() >= self._total_cap:
+            if len(bucket) >= self._per_key_cap:
                 self.stats["capped"] += 1
                 self._close_quietly(conn)
                 return
+            while self._stats_live() >= self._total_cap:
+                self._evict_oldest()
             bucket.append((time.monotonic(), conn))
             self.stats["live"] += 1
             self.stats["checkins"] += 1
+
+    def _evict_oldest(self) -> None:
+        """Close the idle entry with the oldest timestamp (lock held)."""
+        oldest_bucket: deque[tuple[float, http.client.HTTPConnection]] | None = None
+        oldest_ts = float("inf")
+        for bucket in self._entries.values():
+            if bucket and bucket[0][0] < oldest_ts:
+                oldest_ts = bucket[0][0]
+                oldest_bucket = bucket
+        if oldest_bucket is None:
+            return  # nothing pooled: total cap unreachable, defensive
+        _ts, conn = oldest_bucket.popleft()
+        self.stats["live"] = max(0, self.stats["live"] - 1)
+        self.stats["evicted"] += 1
+        self._close_quietly(conn)
 
     def discard(self, conn: http.client.HTTPConnection) -> None:
         """An abandoned/errored connection: close it, pool nothing."""

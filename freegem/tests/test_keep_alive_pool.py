@@ -332,10 +332,37 @@ class BoundAndConcurrencyTests(KeepAlivePoolTestCase):
         pool = self._pool(total_cap=1, per_key_cap=1)
         # one entry pooled
         self._fetch(f"{self.base}/a", pool=pool)
-        # a second live connection checked in over the cap gets closed
+        # a DIFFERENT key checked in over the total cap EVICTS the oldest
+        # idle entry to make room (the live-run lesson: refusing when full
+        # closed exactly the conns a retry wanted seconds later)
         conn = type("FakeConn", (), {"close": staticmethod(lambda: None)})()
-        pool.checkin(("http", _FAKE_HOST, self.server.server_port), conn)
+        pool.checkin(("http", _FAKE_HOST, self.server.server_port + 1), conn)
         self.assertEqual(pool.snapshot()["live"], 1)
+        self.assertEqual(pool.snapshot()["evicted"], 1)
+
+    def test_eviction_keeps_the_freshest_connection_reusable(self) -> None:
+        """total_cap=1 across two ports: the newest entry survives eviction
+        and is reusable; the evicted key dials fresh."""
+        second = ThreadingHTTPServer(("127.0.0.1", 0), _CountingHandler)
+        self.addCleanup(second.server_close)
+        self.addCleanup(second.shutdown)
+        threading.Thread(target=second.serve_forever, daemon=True).start()
+        pool = self._pool(total_cap=1, per_key_cap=1)
+        first_url = f"{self.base}/a"
+        second_url = f"http://{_FAKE_HOST}:{second.server_port}/a"
+        self._fetch(first_url, pool=pool)  # dials, checked in, live=1
+        self._fetch(second_url, pool=pool)  # dials, evicts the first, live=1
+        stats = pool.snapshot()
+        self.assertEqual(stats["live"], 1)
+        self.assertEqual(stats["evicted"], 1)
+        # the FRESH entry is the pooled one: a same-key fetch reuses it
+        self._fetch(second_url, pool=pool)
+        self.assertEqual(pool.snapshot()["reuses"], 1, "freshest connection was not reusable")
+        # the EVICTED key must dial fresh, not resurrect a closed socket
+        before_dials = len(self.dials.dials)
+        outcome = self._fetch(first_url, pool=pool)
+        self.assertTrue(outcome.ok, outcome.error)
+        self.assertEqual(len(self.dials.dials), before_dials + 1)
 
     def test_close_is_deterministic(self) -> None:
         pool = KeepAlivePool()

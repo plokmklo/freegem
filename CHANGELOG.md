@@ -1,3 +1,17 @@
+## [2.16.1] — 2026-11-19
+
+### Fixed
+
+- **Pool eviction instead of refusal at the total cap** (tuned by the live
+  1000-page run): a plain "refuse when full" policy closed exactly the
+  connections a ladder retry wanted seconds later — 211 capped checkins
+  against 15 reuses on a 300-host slice. At the total cap the OLDEST idle
+  entry is now evicted to make room (it was closest to its TTL expiry
+  anyway); the per-key cap still refuses, and a new `evicted` counter
+  keeps the report honest. Default `total_cap` raised 32 -> 128 (the
+  campaign's 8 workers over hundreds of hosts need headroom; idle TTL
+  still prunes).
+
 ## [2.16.0] — 2026-11-19
 
 ### Added
