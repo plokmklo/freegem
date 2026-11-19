@@ -25,8 +25,10 @@ The contract, pinned hermetically against a loopback keep-alive server:
 from __future__ import annotations
 
 import os
+import shutil
 import socket
 import sqlite3
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -409,6 +411,106 @@ class ReadBodyStreamTests(KeepAlivePoolTestCase):
         outcome = self._fetch(f"{self.base}/s", pool=pool)
         self.assertTrue(outcome.ok)
         self.assertEqual(pool.snapshot()["live"], 1, "fully-read response was not pooled")
+
+
+class HttpsConstructionTests(unittest.TestCase):
+    """The MRO regression: stdlib HTTPSConnection.__init__ calls
+    super().__init__(host, port, timeout, source_address, blocksize)
+    POSITIONALLY, so a non-trivial __init__ on a class between
+    HTTPSConnection and HTTPConnection broke EVERY https dial with a
+    TypeError. Caught live by the 1000-page run, not by the http-only
+    loopback server. Construction alone pins the contract, no TLS needed."""
+
+    def test_https_connection_class_constructs(self) -> None:
+        import ssl
+
+        from freegem.crawler.pool import _pooled_https_class
+
+        pool = KeepAlivePool()
+        self.addCleanup(pool.close)
+        # the bound class swaps in its own context; passing one satisfies
+        # the base signature (it is popped and replaced by the bound value)
+        conn_class = _pooled_https_class(ssl.create_default_context())
+        conn = conn_class(
+            "example.test:443", pool, context=ssl.create_default_context(), timeout=10.0
+        )
+        self.assertEqual(conn.host, "example.test")
+        self.assertEqual(conn.port, 443)
+        self.assertIsNone(conn.sock)
+        self.assertEqual(conn.key, ("https", "example.test", 443))
+        self.assertIs(conn._pool, pool)
+
+
+@unittest.skipIf(
+    shutil.which("openssl") is None,
+    "openssl CLI not available for the self-signed test certificate",
+)
+class HttpsE2ETests(KeepAlivePoolTestCase):
+    """Full TLS round trip through the pool: self-signed loopback server,
+    a client context that trusts only that CA (patched over _ssl_ctx so
+    crawl_fetch's verified-context rule still applies), pinned dials."""
+
+    def _cert_paths(self) -> tuple[str, str]:
+        base = os.path.join(self.tmp.name, "tls")
+        os.makedirs(base, exist_ok=True)
+        key, cert = os.path.join(base, "key.pem"), os.path.join(base, "cert.pem")
+        subprocess.run(
+            [
+                "openssl",
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-keyout",
+                key,
+                "-out",
+                cert,
+                "-days",
+                "2",
+                "-subj",
+                "/CN=keepalive.test",
+                "-addext",
+                "subjectAltName=DNS:keepalive.test",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        return key, cert
+
+    def _https_server(self, certfile: str, keyfile: str) -> ThreadingHTTPServer:
+        import ssl as ssl_mod
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _CountingHandler)
+        ctx = ssl_mod.SSLContext(ssl_mod.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(certfile, keyfile)
+        server.socket = ctx.wrap_socket(server.socket, server_side=True)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server
+
+    def test_https_fetch_reuses_pooled_connection(self) -> None:
+        import ssl as ssl_mod
+
+        keyfile, certfile = self._cert_paths()
+        server = self._https_server(certfile, keyfile)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        base = f"https://{_FAKE_HOST}:{server.server_port}"
+
+        trust = ssl_mod.create_default_context(cafile=certfile)
+        pool = self._pool()
+        _CountingHandler.reset()
+        with mock.patch("freegem.crawler.fetch._ssl_ctx", return_value=trust):
+            for i in range(3):
+                outcome = self._fetch(f"{base}/a", pool=pool)
+                self.assertTrue(outcome.ok, f"fetch {i}: {outcome.error}")
+                self.assertIn(b"ok", outcome.body or b"")
+        self.assertEqual(
+            len(self.dials.dials), 1, "https fetches did not reuse the pooled TLS connection"
+        )
+        stats = pool.snapshot()
+        self.assertEqual(stats["dials"], 1)
+        self.assertGreaterEqual(stats["reuses"], 2)
 
 
 if __name__ == "__main__":

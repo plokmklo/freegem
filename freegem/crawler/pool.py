@@ -214,7 +214,7 @@ class _PooledHTTPResponse(http.client.HTTPResponse):
     """
 
     _pool: KeepAlivePool | None = None
-    _ka_conn: _PooledConnection | None = None
+    _ka_conn: _PooledConnectionBase | None = None
 
     def _release(self, *, consumed: bool) -> None:
         pool, conn = self._pool, self._ka_conn
@@ -253,10 +253,40 @@ class _PooledHTTPResponse(http.client.HTTPResponse):
             self._release(consumed=False)
 
 
-class _PooledConnection(http.client.HTTPConnection):
-    """HTTP connection whose dial goes through resolve -> check -> pin."""
+class _PooledConnectionBase(http.client.HTTPConnection):
+    """Base for pooled connections: pinned dial + pooled response wiring.
+
+    ``__init__`` is a pure PASS-THROUGH. That is load-bearing: the HTTPS
+    subclass sits between :class:`http.client.HTTPSConnection` and this
+    class in the MRO, and stdlib ``HTTPSConnection.__init__`` calls
+    ``super().__init__(host, port, timeout, source_address, blocksize)``
+    POSITIONALLY -- a ``__init__(host, pool, ...)`` signature here broke
+    every https dial with a TypeError (caught live by the 1000-page run,
+    not by the http-only test server). Subclasses set ``_pool``/``key``
+    AFTER their own ``super().__init__`` chain completes.
+    """
 
     response_class = _PooledHTTPResponse
+    #: set by the concrete subclasses after their super().__init__ chain
+    _pool: KeepAlivePool
+    #: the (scheme, host, port) pool key, set by the concrete subclasses
+    key: tuple[str, str, int]
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+
+    def getresponse(self) -> http.client.HTTPResponse:
+        response = super().getresponse()
+        if isinstance(response, _PooledHTTPResponse):
+            # response_class IS _PooledHTTPResponse; the isinstance also
+            # narrows the type so the attribute writes type-check
+            response._pool = self._pool
+            response._ka_conn = self
+        return response
+
+
+class _PooledConnection(_PooledConnectionBase):
+    """HTTP flavor: dial only pre-checked public IPs, in order."""
 
     def __init__(self, host: str, pool: KeepAlivePool, **kwargs: Any) -> None:
         super().__init__(host, **kwargs)
@@ -282,17 +312,8 @@ class _PooledConnection(http.client.HTTPConnection):
             raise last_error
         raise OSError("no checked addresses to dial")
 
-    def getresponse(self) -> http.client.HTTPResponse:
-        response = super().getresponse()
-        if isinstance(response, _PooledHTTPResponse):
-            # response_class IS _PooledHTTPResponse; the isinstance also
-            # narrows the type so the attribute writes type-check
-            response._pool = self._pool
-            response._ka_conn = self
-        return response
 
-
-class _PooledHTTPSConnection(http.client.HTTPSConnection, _PooledConnection):
+class _PooledHTTPSConnection(http.client.HTTPSConnection, _PooledConnectionBase):
     """HTTPS flavor: SNI + certificate verification stay on the hostname."""
 
     #: bound by :func:`_pooled_https_class` (the handler constructs only
@@ -328,13 +349,6 @@ class _PooledHTTPSConnection(http.client.HTTPSConnection, _PooledConnection):
         # SNI and verification on the ORIGINAL hostname, exactly like
         # ssrf._pinned_https_class: pinning cannot downgrade TLS.
         self.sock = self._pool_tls.wrap_socket(sock, server_hostname=self.host)
-
-    def getresponse(self) -> http.client.HTTPResponse:
-        response = super().getresponse()
-        if isinstance(response, _PooledHTTPResponse):
-            response._pool = self._pool
-            response._ka_conn = self
-        return response
 
 
 def _pooled_https_class(context: ssl.SSLContext) -> type[_PooledHTTPSConnection]:
