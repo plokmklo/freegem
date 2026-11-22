@@ -9,6 +9,6 @@ One bridge, three faces:
 Backed by the same free Gemini web session your browser uses.
 """
 
-__version__ = "2.16.1"
+__version__ = "2.16.2"
 
 __all__ = ["__version__"]

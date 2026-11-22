@@ -1,3 +1,22 @@
+## [2.16.2] — 2026-11-23
+
+### Added
+
+- **Per-seed wall-clock budget** (`campaign run --seed-budget SECONDS`,
+  `run_campaign(..., seed_budget_sec=)`, default 0 = off): `max_attempts`
+  bounds how many rungs the ladder walks, not how LONG they take — and a
+  host whose A records all silently drop SYNs costs
+  `attempts x A-records x timeout`. Live from the 10k-site run
+  (quantcount.com, tracked in #103): six blackhole IPs x 2 rungs x 20s =
+  ~10 minutes for ONE seed, and the campaign's executor join waited on it,
+  so a single parked domain stalled an entire slice at 499/500 forever.
+  The budget cuts the walk at the deadline; the LAST attempt's honest
+  outcome stands with "(seed budget)" appended to its error — kind/status
+  untouched, taxonomy buckets do not move, the checkpoint manifest records
+  the setting under `params`. 6 contract tests in `test_seed_budget.py`
+  (cut + marker, default-off parity, happy-first-attempt never marked,
+  plumbing to ladder + manifest + state row).
+
 ## [2.16.1] — 2026-11-19
 
 ### Fixed

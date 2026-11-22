@@ -257,6 +257,7 @@ def run_campaign(
     resume_checkpoint: str = "",
     keep_alive: bool = False,
     max_attempts: int = 16,
+    seed_budget_sec: float = 0.0,
     on_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> CampaignResult:
     """Fetch seeds (resume-aware) through the resilient ladder, persist
@@ -350,6 +351,7 @@ def run_campaign(
             cookie_jar=jar,
             pool=pool,
             max_attempts=max_attempts,
+            seed_budget_sec=seed_budget_sec,
         )
         # The campaign keeps no artifact store: a body that spilled to a temp
         # file (> spill_bytes) is read for distillation below and must not
@@ -419,6 +421,7 @@ def run_campaign(
                     "retry_failed": retry_failed,
                     "distill": distill,
                     "max_attempts": max_attempts,
+                    "seed_budget_sec": seed_budget_sec,
                 },
                 counters=result.as_dict(),
                 interrupted=interrupted,
@@ -513,6 +516,14 @@ def _cli(argv: list[str] | None = None) -> int:
         metavar="N",
         help="bound the resilient ladder per seed (default 16); lower = faster honest failures",
     )
+    run_p.add_argument(
+        "--seed-budget",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help="wall-clock cap per seed's ladder walk (0 = off); bounds blackhole hosts "
+        "whose A records multiply the per-dial timeout into minutes",
+    )
     args = parser.parse_args(argv)
 
     from ..config import load_config
@@ -539,6 +550,7 @@ def _cli(argv: list[str] | None = None) -> int:
             resume_checkpoint=args.resume,
             keep_alive=args.keep_alive,
             max_attempts=max(1, args.max_attempts),
+            seed_budget_sec=max(0.0, args.seed_budget),
             on_event=on_event,
         )
     except CheckpointError as exc:

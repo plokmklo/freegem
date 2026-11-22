@@ -118,6 +118,7 @@ class CheckpointWriteTests(CheckpointTestCase):
                 "retry_failed": False,
                 "distill": False,
                 "max_attempts": 16,
+                "seed_budget_sec": 0.0,
             },
         )
         self.assertIn("attempted", manifest["counters"])
