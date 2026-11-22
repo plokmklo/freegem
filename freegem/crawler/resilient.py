@@ -235,6 +235,7 @@ def fetch_resilient(
     extra_headers: dict[str, str] | None = None,
     cookie_jar: http.cookiejar.CookieJar | None = None,
     pool: KeepAlivePool | None = None,
+    seed_budget_sec: float = 0.0,
 ) -> FetchOutcome:
     """Fetch ``url`` and, on failure, work the ladder until the action budget
     is spent. The returned outcome carries ``attempts`` (how many requests
@@ -249,9 +250,20 @@ def fetch_resilient(
     TLS-relaxed rungs dial fresh, so a pooled connection never mixes
     resolver or verification postures. Never raises for fetch-level
     problems.
+
+    ``seed_budget_sec`` (0 = off, the default) is a WALL-CLOCK cap for the
+    whole ladder walk of this one seed. ``max_attempts`` bounds how many
+    rungs run but not how LONG they take, and a host whose A records all
+    silently drop SYNs costs ``attempts x A-records x timeout`` -- a parked
+    domain with six blackhole IPs measured ~10 minutes per seed at a 20s
+    socket timeout (found live on the 10k-site run; tracked in #103). When
+    the budget is spent the LAST attempt's honest outcome is returned with
+    "(seed budget)" appended to its error; kind/status stay untouched so
+    the taxonomy keeps grouping the seed the same way.
     """
     base = limits or ResourceLimits()
     pacer = pacer or HostPacer()
+    seed_started = time.monotonic()
     host = _host_of(url)
     # A browser always carries a cookie jar, so the ladder does too: a 302
     # that grants an anonymous-entitlement cookie and loops back must resolve
@@ -268,6 +280,12 @@ def fetch_resilient(
     outcome = _attempt(cfg, url, base, state, pacer, spill_dir, cookie_jar=cookie_jar, pool=pool)
 
     while not _happy(outcome) and state.attempts < max_attempts:
+        if seed_budget_sec > 0.0 and (time.monotonic() - seed_started) >= seed_budget_sec:
+            # Wall-clock budget spent: keep the last attempt's honest
+            # outcome (kind/status decide the taxonomy bucket), just mark
+            # that the ladder was cut short rather than exhausted.
+            outcome.error = f"{outcome.error or 'ladder stopped'} (seed budget)"
+            break
         nxt = _next_action(url, outcome, state, host, pacer)
         if nxt is None:
             break

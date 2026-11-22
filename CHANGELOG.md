@@ -1,3 +1,22 @@
+## [2.16.2] — 2026-11-23
+
+### Added
+
+- **Per-seed wall-clock budget** (`campaign run --seed-budget SECONDS`,
+  `run_campaign(..., seed_budget_sec=)`, default 0 = off): `max_attempts`
+  bounds how many rungs the ladder walks, not how LONG they take — and a
+  host whose A records all silently drop SYNs costs
+  `attempts x A-records x timeout`. Live from the 10k-site run
+  (quantcount.com, tracked in #103): six blackhole IPs x 2 rungs x 20s =
+  ~10 minutes for ONE seed, and the campaign's executor join waited on it,
+  so a single parked domain stalled an entire slice at 499/500 forever.
+  The budget cuts the walk at the deadline; the LAST attempt's honest
+  outcome stands with "(seed budget)" appended to its error — kind/status
+  untouched, taxonomy buckets do not move, the checkpoint manifest records
+  the setting under `params`. 6 contract tests in `test_seed_budget.py`
+  (cut + marker, default-off parity, happy-first-attempt never marked,
+  plumbing to ladder + manifest + state row).
+
 ## [2.16.1] — 2026-11-19
 
 ### Fixed
@@ -11,6 +30,11 @@
   keeps the report honest. Default `total_cap` raised 32 -> 128 (the
   campaign's 8 workers over hundreds of hosts need headroom; idle TTL
   still prunes).
+- **Idle TTL uses `>=`** so a TTL of 0 expires within one clock tick:
+  Windows' monotonic clock ticks every ~15.6ms and a strict `>` let a
+  ttl-0 entry survive checkout when both timestamps landed inside one
+  tick — the single test that failed on every Windows CI run since the
+  pool landed (runs #116-#120, one root cause, fixed in b4f21e4).
 
 ## [2.16.0] — 2026-11-19
 
