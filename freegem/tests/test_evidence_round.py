@@ -301,11 +301,20 @@ class RetryAfterTests(unittest.TestCase):
 
 
 class _FakeBrotli:
-    """Duck-typed brotlicffi: Decompressor().decompress must exist."""
+    """Duck-typed brotli/brotlicffi: Decompressor().process must exist.
+
+    This fake mirrors the REAL backend API (``process``/``is_finished``),
+    not the zlib-style ``decompress()`` the reader speaks -- the shim in
+    fetch.py translates. The pre-2.16.3 fake implemented ``decompress()``
+    and thereby validated the very bug the 10k run exposed.
+    """
 
     class Decompressor:
-        def decompress(self, data: bytes) -> bytes:
+        def process(self, data: bytes) -> bytes:
             return data.replace(b"BR~", b"")
+
+        def is_finished(self) -> bool:
+            return True
 
 
 class EncodingTests(unittest.TestCase):

@@ -1,3 +1,23 @@
+## [2.16.3] — 2026-11-23
+
+### Fixed
+
+- **Brotli bodies decoded again** (found live on the 10k run): the streaming
+  reader speaks the zlib ``decompressobj`` API (``decompress()``), but both
+  brotli backends (``brotli``, ``brotlicffi``) expose only ``process()`` /
+  ``is_finished()``. Every ``Content-Encoding: br`` response therefore raised
+  ``'brotli.Decompressor' object has no attribute 'decompress'`` and was
+  classified ``network`` while the bytes had arrived fine — **1,936 rows on
+  the 10k run (19.4% of the corpus)**, cloudflare.com (#2), facebook.com
+  (#4), instagram.com (#13), bing.com (#45). Worse, the duck-typed test fake
+  implemented ``decompress()`` and validated the bug. ``_BrotliStream`` is a
+  zlib-shaped shim over ``process()``; the fake now mirrors the real API and
+  ``test_brotli_decode.py`` pins the round trip against the REAL backend
+  (one-shot, multi-chunk reassembly, corrupt bytes -> ScrapeError, and a
+  tripwire that retires the shim if the backend ever grows ``decompress``).
+  Live spot-check: re-running the 500-seed top-1k slice lifted ``ok`` from
+  392 to 500-minus-refusals (see campaign-10k report).
+
 ## [2.16.2] — 2026-11-23
 
 ### Added
