@@ -411,6 +411,38 @@ def read_body_stream(
     return b"".join(chunks), None, total
 
 
+class _BrotliStream:
+    """zlib-``decompressobj``-shaped shim over ``brotli.Decompressor``.
+
+    Both brotli backends (``brotli`` and ``brotlicffi``) expose an
+    incremental ``process()`` API plus ``is_finished()`` -- NOT the zlib
+    style ``decompress()`` the streaming reader speaks. Returning the raw
+    Decompressor made every brotli-encoded body raise
+    ``'brotli.Decompressor' object has no attribute 'decompress'`` and be
+    classified ``network`` while the response was actually fetched fine:
+    1,936 rows on the live 10k run, cloudflare.com/facebook.com included.
+    The old duck-typed test fake implemented ``decompress()``, so the suite
+    validated the bug instead of the real backend API.
+    """
+
+    def __init__(self) -> None:
+        if _brotli is None:  # unreachable: _optional_decoder guards first
+            raise RuntimeError("brotli extra is not installed")
+        self._dec = _brotli.Decompressor()
+
+    def decompress(self, data: bytes) -> bytes:
+        return self._dec.process(data)
+
+    @property
+    def eof(self) -> bool:
+        return self._dec.is_finished()
+
+    @property
+    def unused_data(self) -> bytes:
+        # parity with zlib.decompressobj: brotli streams are self-terminating
+        return b""
+
+
 def _optional_decoder(encoding: str) -> Any:
     """Decoder object for an optional codec, or an honest ScrapeError."""
     if encoding == "br":
@@ -418,7 +450,7 @@ def _optional_decoder(encoding: str) -> Any:
             raise ScrapeError(
                 "body is brotli-encoded but no decoder is installed (pip install 'freegem[brotli]')"
             )
-        return _brotli.Decompressor()
+        return _BrotliStream()
     if _zstandard is None:
         raise ScrapeError(
             "body is zstd-encoded but no decoder is installed (pip install 'freegem[zstd]')"
