@@ -1,0 +1,36 @@
+{
+  "total": 1000,
+  "ok": 915,
+  "failed": 85,
+  "success_rate": 0.915,
+  "chunk_files": [
+    "chunk_0.jsonl",
+    "chunk_1.jsonl",
+    "chunk_2.jsonl",
+    "chunk_3.jsonl",
+    "chunk_4.jsonl",
+    "chunk_5.jsonl",
+    "chunk_6.jsonl",
+    "chunk_7.jsonl",
+    "chunk_8.jsonl",
+    "chunk_9.jsonl"
+  ],
+  "via_counts": {
+    "html": 732,
+    "reader": 168,
+    "wayback": 9,
+    "ai-search": 6
+  },
+  "chars": {
+    "mean": 7464,
+    "p50": 3666,
+    "p90": 19658,
+    "max": 50000
+  },
+  "thin_ok_lt_200_chars": 95,
+  "failure_buckets": {
+    "refused": 78,
+    "other": 6,
+    "timeout": 1
+  }
+}
