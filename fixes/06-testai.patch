@@ -1,0 +1,33 @@
+diff --git a/freegem/tests/test_ai_scrape.py b/freegem/tests/test_ai_scrape.py
+index 98ae160..4ad27cb 100644
+--- a/freegem/tests/test_ai_scrape.py
++++ b/freegem/tests/test_ai_scrape.py
+@@ -20,6 +20,7 @@ import urllib.parse
+ from contextlib import redirect_stderr, redirect_stdout
+ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+ from pathlib import Path
++from types import SimpleNamespace
+ from unittest import mock
+ 
+ from freegem.ai_scrape import (
+@@ -444,9 +445,17 @@ class AiScrapeManyTests(_SiteCase):
+         self.assertTrue(results[2].ai_used)
+         self.assertTrue(results[3].ok)
+ 
+-    def test_batch_over_cap_raises(self) -> None:
+-        with self.assertRaises(ValueError):
+-            ai_scrape_many(self.cfg, ["http://x.test/p"] * 101, per_host_delay=0)
++    def test_batch_over_cap_chunks_instead_of_refusing(self) -> None:
++        # #89: ai batches chunk transparently — no ValueError at 101.
++        fake = mock.patch(
++            "freegem.ai_scrape.ai_scrape",
++            side_effect=lambda cfg, u, **kw: SimpleNamespace(url=u, ok=True),
++        )
++        urls = [f"http://x.test/p{i}" for i in range(150)]
++        with fake:
++            results = ai_scrape_many(self.cfg, urls, per_host_delay=0)
++        self.assertEqual(len(results), 150)
++        self.assertEqual([r.url for r in results], urls)
+ 
+     def test_hostile_exception_becomes_an_honest_item(self) -> None:
+         boom = mock.patch(
