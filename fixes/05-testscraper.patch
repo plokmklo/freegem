@@ -1,0 +1,25 @@
+diff --git a/freegem/tests/test_scraper.py b/freegem/tests/test_scraper.py
+index e8a726d..77a4868 100644
+--- a/freegem/tests/test_scraper.py
++++ b/freegem/tests/test_scraper.py
+@@ -1216,11 +1216,15 @@ class BatchScrapeTests(_FakeSiteTestCase):
+         self.assertFalse(items[1].ok)
+         self.assertIn("abandoned", items[1].error)
+ 
+-    def test_batch_over_cap_refused(self) -> None:
+-        from freegem.web_scraper import scrape_many
+-
+-        with self.assertRaises(ValueError):
+-            scrape_many(self.cfg, [f"{self.base}/page"] * 101)
++    def test_batch_over_cap_chunks_instead_of_refusing(self) -> None:
++        # #89: the hard 100-URL refusal became transparent chunking; the
++        # bounded pool still runs <=100 per slice, order and rows unchanged.
++        from freegem.web_scraper import _SCRAPE_MANY_MAX, scrape_many
++
++        self.assertEqual(_SCRAPE_MANY_MAX, 100)
++        items = scrape_many(self.cfg, [f"{self.base}/page"] * 101, concurrency=4)
++        self.assertEqual(len(items), 101)
++        self.assertTrue(all(it.ok for it in items))
+ 
+     def _record_pool(self) -> Any:
+         """Patch concurrent.futures.ThreadPoolExecutor to record max_workers.
