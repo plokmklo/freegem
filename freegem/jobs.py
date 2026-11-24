@@ -52,7 +52,7 @@ class Job:
     """A background job record."""
 
     id: str
-    type: str  # "scrape", "research", "playwright", "document", "extract", "selenium"
+    type: str  # "scrape", "research", "playwright", "document", "extract", "selenium", "agent"
     status: str  # queued | processing | completed | failed | cancelled | timed_out | interrupted
     params: dict[str, Any] = field(default_factory=dict)
     result: dict[str, Any] | None = None
@@ -1059,6 +1059,22 @@ def execute_job(job: Job, cfg: Any) -> None:
                 "artifact_ids": art_ids,
             },
             error=sel_res.error,
+        )
+    elif job.type == "agent":
+        from .agent import run_agent, validate_agent_params
+
+        try:
+            task, limits = validate_agent_params(job.params)
+        except ValueError as exc:
+            GLOBAL_JOB_MANAGER.update_job_status(job.id, "failed", error=str(exc))
+            return
+
+        result = run_agent(cfg, task, limits)
+        GLOBAL_JOB_MANAGER.update_job_status(
+            job.id,
+            result.status,
+            result=result.to_dict() if result.status == "completed" else None,
+            error=None if result.status == "completed" else "; ".join(result.limitations),
         )
     else:
         GLOBAL_JOB_MANAGER.update_job_status(
