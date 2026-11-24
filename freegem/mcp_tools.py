@@ -574,7 +574,10 @@ def build_server(cfg: BridgeConfig, name: str = "freegem") -> Any:
     def freegem_submit_job(
         job_type: str, params: dict | None = None, api_key: str | None = None
     ) -> str:
-        """Submit a background processing job (scrape, research, playwright, document)."""
+        """Submit a background processing job. Pass `job_type` ('scrape',
+        'research', 'playwright', 'document', 'extract', 'selenium') and a
+        `params` dict; poll the returned job id with freegem_get_job.
+        """
         return run_tool(
             cfg,
             "freegem_submit_job",
@@ -583,12 +586,12 @@ def build_server(cfg: BridgeConfig, name: str = "freegem") -> Any:
 
     @server.tool()
     def freegem_get_job(job_id: str, api_key: str | None = None) -> str:
-        """Get status and results for a background job."""
+        """Get status and results for a background job by its `job_id`."""
         return run_tool(cfg, "freegem_get_job", {"job_id": job_id, "api_key": api_key})
 
     @server.tool()
     def freegem_get_artifact(artifact_id: str, api_key: str | None = None) -> str:
-        """Retrieve artifact metadata and file path."""
+        """Retrieve a job artifact's metadata and file path by its `artifact_id`."""
         return run_tool(
             cfg, "freegem_get_artifact", {"artifact_id": artifact_id, "api_key": api_key}
         )
