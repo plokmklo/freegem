@@ -1,0 +1,43 @@
+diff --git a/freegem/web_scraper.py b/freegem/web_scraper.py
+index 469d21b..bfe482f 100644
+--- a/freegem/web_scraper.py
++++ b/freegem/web_scraper.py
+@@ -1743,7 +1743,7 @@ class BatchItem:
+         return data
+ 
+ 
+-def scrape_many(
++def _scrape_many_chunk(
+     cfg: BridgeConfig,
+     urls: list[str],
+     *,
+@@ -1891,3 +1891,29 @@ def run_scrape_tool(cfg: BridgeConfig, arguments: dict[str, Any]) -> str:
+         ignore_robots=True,
+         smart=arguments.get("smart", True) is not False,
+     )
++
++
++def scrape_many(
++    cfg: BridgeConfig,
++    urls: list[str],
++    *,
++    chunk_size: int = 0,
++    **kwargs: Any,
++) -> list[BatchItem]:
++    """Batch scrape WITHOUT the old hard 100-URL refusal (#89).
++
++    Unbounded inputs run as sequential chunks of at most
++    ``_SCRAPE_MANY_MAX`` URLs through the bounded pool -- order, per-host
++    politeness and the failure-row taxonomy are exactly what one call would
++    give per chunk; refusing 101 URLs outright only pushed the slicing into
++    every caller's shell script (the 1k and 10k harnesses both
++    reimplemented this loop by hand).
++    """
++    size = int(chunk_size) if chunk_size else _SCRAPE_MANY_MAX
++    size = max(1, min(size, _SCRAPE_MANY_MAX))
++    if len(urls) <= size:
++        return _scrape_many_chunk(cfg, urls, **kwargs)
++    items: list[BatchItem] = []
++    for start in range(0, len(urls), size):
++        items.extend(_scrape_many_chunk(cfg, urls[start : start + size], **kwargs))
++    return items
