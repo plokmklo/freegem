@@ -29,6 +29,7 @@ import http.cookiejar
 import ipaddress
 import json
 import random
+import re
 import ssl
 import threading
 import time
@@ -334,6 +335,7 @@ def fetch_resilient(
             )
         if action == "wayback" and outcome.ok:
             outcome.via = "wayback"
+            strip_wayback_chrome(outcome)
 
     outcome.attempts = max(1, state.attempts)
     outcome.fallback = _fallback_of(state.actions)
@@ -634,3 +636,41 @@ def _host_of(url: str) -> str:
         return (urllib.parse.urlsplit(url).hostname or "").lower()
     except ValueError:
         return ""
+
+
+# (#86) Wayback chrome that leaked into corpus rows: the classic toolbar
+# INSERT comment block and the modern wm-ipp-base div (banners inside
+# CAPTURED legacy markup, or replay-served toolbars on non-id_ reads).
+_WB_TOOLBAR_RE = re.compile(
+    rb"<!--\s*BEGIN WAYBACK TOOLBAR INSERT\s*-->.*?<!--\s*END WAYBACK TOOLBAR INSERT\s*-->",
+    re.S,
+)
+_WB_IPP_RE = re.compile(rb"<div[^>]+id=.?wm-ipp-base", re.I)
+
+
+def strip_wayback_chrome(outcome: FetchOutcome) -> None:
+    """Remove injected archive.org chrome from a wayback-rung body.
+
+    In-memory bodies only; spilled bodies are read by callers through the
+    same extraction chain, and the ladder's cap already keeps wayback reads
+    small enough to matter in practice.
+    """
+    if outcome.body is None:
+        return
+    cleaned: bytes = _WB_TOOLBAR_RE.sub(b"", outcome.body)
+    match = _WB_IPP_RE.search(cleaned)
+    if match:
+        cut = match.start()
+        depth, i = 0, cleaned.find(b"<", cut)
+        while i != -1:
+            if cleaned[i : i + 4] == b"<div":
+                depth += 1
+            elif cleaned[i : i + 6] == b"</div>":
+                depth -= 1
+                if depth == 0:
+                    cleaned = cleaned[:cut] + cleaned[i + 6 :]
+                    break
+            i = cleaned.find(b"<", i + 1)
+    if cleaned != outcome.body:
+        outcome.body = cleaned
+        outcome.body_size = len(cleaned)

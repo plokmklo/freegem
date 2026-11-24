@@ -301,6 +301,14 @@ def url_allowed(url: str) -> str:
     return url
 
 
+def _preflight_infos_bounded(bare: str) -> list[tuple[Any, ...]]:
+    """(#102) Proxy preflight lookups inherit the resolver cap introduced
+    for the direct path in #88: a vanished or black-holing host yields the
+    honest ``resolver stalled`` network-class refusal instead of hanging a
+    proxied fetch thread on an untimed getaddrinfo."""
+    return _getaddrinfo_bounded(bare, DEFAULT_RESOLVE_TIMEOUT_SEC)
+
+
 def host_public_or_unresolvable(host: str) -> str:
     """Proxy-mode preflight: refuse hosts that RESOLVE non-public, allow the rest.
 
@@ -325,7 +333,7 @@ def host_public_or_unresolvable(host: str) -> str:
     except ValueError:
         pass
     try:
-        infos = socket.getaddrinfo(bare, None)
+        infos = _preflight_infos_bounded(bare)
     except OSError:
         return bare  # local DNS silent -> the proxy resolves; allowed here
     _checked_addresses(bare, infos)  # raises on ANY non-public address

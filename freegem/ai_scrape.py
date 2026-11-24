@@ -676,7 +676,7 @@ def ai_scrape(
     return result
 
 
-def ai_scrape_many(
+def _ai_scrape_many_chunk(
     cfg: BridgeConfig,
     urls: list[str],
     *,
@@ -719,3 +719,23 @@ def ai_scrape_many(
         for fut in as_completed(futures):
             results[futures[fut]] = fut.result()
     return [r for r in results if r is not None]
+
+
+def ai_scrape_many(
+    cfg: BridgeConfig,
+    urls: list[str],
+    *,
+    chunk_size: int = 0,
+    **kwargs: Any,
+) -> list[AiScrapeResult]:
+    """Batch ai-scrape without the 100-URL refusal (#89) -- chunked exactly
+    like :func:`freegem.web_scraper.scrape_many`: sequential slices through
+    the bounded pool, caller order, one honest row per URL."""
+    size = int(chunk_size) if chunk_size else _SCRAPE_MANY_MAX
+    size = max(1, min(size, _SCRAPE_MANY_MAX))
+    if len(urls) <= size:
+        return _ai_scrape_many_chunk(cfg, urls, **kwargs)
+    out: list[AiScrapeResult] = []
+    for start in range(0, len(urls), size):
+        out.extend(_ai_scrape_many_chunk(cfg, urls[start : start + size], **kwargs))
+    return out
