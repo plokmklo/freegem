@@ -116,9 +116,7 @@ def wall_class(status: int | None, text: str = "", error: str = "") -> str:
     if status is not None and status >= 500:
         return "server_error"
     low_err = (error or "").lower()
-    if any(
-        w in low_err for w in ("timed out", "timeout", "reset", "resolve", "refused")
-    ):
+    if any(w in low_err for w in ("timed out", "timeout", "reset", "resolve", "refused")):
         return "network"
     if len((text or "").strip()) < 400:
         return "thin"
@@ -227,9 +225,7 @@ class AdaptiveLadder:
             }
             directory = os.path.dirname(self.path) or "."
             os.makedirs(directory, exist_ok=True)
-            fd, tmp = tempfile.mkstemp(
-                dir=directory, prefix=".adaptive-", suffix=".tmp"
-            )
+            fd, tmp = tempfile.mkstemp(dir=directory, prefix=".adaptive-", suffix=".tmp")
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as fh:
                     json.dump(payload, fh)
@@ -252,9 +248,7 @@ class AdaptiveLadder:
     def _key(host: str, wall: str, rung: str) -> str:
         return f"{host.lower()}|{wall}|{rung}"
 
-    def _decayed(
-        self, host: str, wall: str, rung: str, now: float
-    ) -> tuple[float, float]:
+    def _decayed(self, host: str, wall: str, rung: str, now: float) -> tuple[float, float]:
         s = self._stats.get(self._key(host, wall, rung))
         if s is None:
             return 0.0, 0.0
@@ -283,9 +277,7 @@ class AdaptiveLadder:
                     s.wins *= f
                     s.losses *= f
                 s.last = now
-                s.ema_sec = (
-                    seconds if s.ema_sec == 0 else 0.7 * s.ema_sec + 0.3 * seconds
-                )
+                s.ema_sec = seconds if s.ema_sec == 0 else 0.7 * s.ema_sec + 0.3 * seconds
                 if win:
                     s.wins += 1
                 else:
@@ -352,9 +344,7 @@ class AdaptiveLadder:
             return []  # 402/451: never bypassed, ladder must not engage
         off = set(gated_off)
         avail = set(available) if available is not None else None
-        cands = [
-            r for r in self.order if r not in off and (avail is None or r in avail)
-        ]
+        cands = [r for r in self.order if r not in off and (avail is None or r in avail)]
         if not cands:
             return []
         now = self.clock()
@@ -362,10 +352,7 @@ class AdaptiveLadder:
             active = [
                 r
                 for r in cands
-                if getattr(
-                    self._stats.get(self._key(host, wall, r)), "cooldown_until", 0.0
-                )
-                <= now
+                if getattr(self._stats.get(self._key(host, wall, r)), "cooldown_until", 0.0) <= now
             ]
             pool = active or cands  # cooldown demotes; it never empties the ladder
             ranked = self._rank(host, wall, pool, now)
