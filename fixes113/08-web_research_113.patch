@@ -111,7 +111,7 @@ index 7016449..9fda341 100644
 +                        text,
 +                        page.last_modified,
 +                        etag=getattr(page, "etag", None),
-+                        )
++                    )
              fetched += source.chars
              sources[position] = source
              material.append((source, text))
