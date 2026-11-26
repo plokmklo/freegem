@@ -1,4 +1,4 @@
-"The smart fetch: a fallback ladder for pages that refuse the first request.
+"""Smart fetch: a fallback ladder for pages that refuse the first request.
 
 The first attempt is always the honest one: a self-identifying freegem
 client, GET, no tricks. When the origin answers with 403 / 405 / 401 / 407 /

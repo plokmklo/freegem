@@ -33,6 +33,15 @@ def make(**kw: Any) -> AdaptiveLadder:
 HOST, WALL = "example.com", "forbidden"
 
 
+def test_clear_drops_every_statistic() -> None:
+    a = make()
+    a.record(HOST, WALL, "reader", True)
+    a.record(HOST, WALL, "reader", False)
+    a.clear()
+    assert a.stats(HOST, WALL) == {}
+    assert a.plan(HOST, WALL) == list(DEFAULT_ORDER)
+
+
 def test_cold_start_reproduces_default_order() -> None:
     assert make().plan(HOST, WALL) == list(DEFAULT_ORDER)
 
