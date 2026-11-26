@@ -15,7 +15,10 @@ from freegem.config import BridgeConfig
 from freegem.smart_fetch import (
     STRATEGIES,
     StrategyMemory,
+    _strategy_order,
+    _wall_from_first_error,
     classify_failure,
+    clear_adaptive,
     clear_memory,
     default_memory_path,
     fallback_scrape,
@@ -71,9 +74,11 @@ class MemoryTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.path = Path(self.tmp.name) / "smart_fetch_memory.json"
         clear_memory()
+        clear_adaptive()
 
     def tearDown(self) -> None:
         clear_memory()
+        clear_adaptive()
 
     def test_remember_and_get_roundtrip(self) -> None:
         memory = StrategyMemory(self.path)
@@ -106,9 +111,11 @@ class FallbackLadderTests(unittest.TestCase):
     def setUp(self) -> None:
         self.cfg = BridgeConfig(guard=True, log_requests=False)
         clear_memory()
+        clear_adaptive()
 
     def tearDown(self) -> None:
         clear_memory()
+        clear_adaptive()
 
     def _ladder(
         self,
@@ -708,6 +715,124 @@ class SmartIntegrationTests(unittest.TestCase):
             )
         self.assertIn("Mozilla/5.0", fetch.call_args.kwargs["headers"]["User-Agent"])
         self.assertEqual(result.text, "behind a UA wall")
+
+
+class AdaptivePolicyTests(unittest.TestCase):
+    """The adaptive layer orders the ladder and learns from verified outcomes
+    (#57/#60/#25); the honesty rules and the fixed cold-start order hold."""
+
+    def setUp(self) -> None:
+        self.cfg = BridgeConfig(guard=True, log_requests=False)
+        clear_memory()
+        clear_adaptive()
+
+    def tearDown(self) -> None:
+        clear_memory()
+        clear_adaptive()
+
+    def _ladder(self, results: Mapping[str, object]) -> Any:
+        """Patch _try_strategy with a scripted outcome per strategy."""
+
+        def try_strategy(
+            cfg: Any,
+            url: str,
+            strategy: str,
+            max_chars: int,
+            ignore_robots: bool,
+            budget: float | None = None,
+        ) -> object:
+            outcome = results[strategy]
+            if isinstance(outcome, ScrapeError):
+                raise outcome
+            return outcome
+
+        return try_strategy
+
+    def test_first_error_maps_to_the_policy_wall_class(self) -> None:
+        self.assertEqual(_wall_from_first_error("HTTP 403 fetching 'x'"), "forbidden")
+        self.assertEqual(_wall_from_first_error("HTTP 429 fetching 'x'"), "rate_limited")
+        self.assertEqual(_wall_from_first_error("HTTP 451 fetching 'x'"), "no_bypass")
+        self.assertEqual(_wall_from_first_error("connection timed out"), "network")
+        self.assertEqual(_wall_from_first_error("connection reset by peer"), "network")
+
+    def test_cold_start_reproduces_the_fixed_ladder(self) -> None:
+        gated = [s for s in STRATEGIES if s not in {"tls-browser", "browser-render", "flaresolverr"}]
+        self.assertEqual(_strategy_order("cold.example", self.cfg, "forbidden"), gated)
+
+    def test_three_losses_cool_a_rung_down_for_the_next_walk(self) -> None:
+        from freegem import smart_fetch as sf
+
+        for _ in range(3):
+            sf._ADAPTIVE.record("learn.example", "forbidden", "browser-headers", False)
+        plan = _strategy_order("learn.example", self.cfg, "forbidden")
+        self.assertNotIn("browser-headers", plan)
+        gated = [s for s in STRATEGIES if s not in {"tls-browser", "browser-render", "flaresolverr"}]
+        self.assertEqual(sorted(plan), sorted(s for s in gated if s != "browser-headers"))
+
+    def test_failed_and_verified_walks_are_learned(self) -> None:
+        from freegem import smart_fetch as sf
+
+        refused = {
+            s: ScrapeError("HTTP 403 fetching 'x'")
+            for s in ("browser-headers", "reader", "wayback", "ai-search")
+        }
+        with (
+            mock.patch("freegem.smart_fetch._try_strategy", side_effect=self._ladder(refused)),
+            mock.patch("freegem.smart_fetch.time.sleep"),
+        ):
+            with self.assertRaises(ScrapeError):
+                fallback_scrape(
+                    self.cfg,
+                    "https://learned.example/a",
+                    max_chars=1000,
+                    first_error="HTTP 403 fetching 'https://learned.example/a'",
+                )
+        st = sf._ADAPTIVE.stats("learned.example", "forbidden")
+        self.assertGreater(st.get("browser-headers", {}).get("losses", 0), 0)
+
+        ok_page = ScrapeResult(url="https://learned.example/", title="T", text="real content")
+        won = {"browser-headers": ok_page}
+        with (
+            mock.patch("freegem.smart_fetch._try_strategy", side_effect=self._ladder(won)),
+            mock.patch("freegem.smart_fetch.time.sleep"),
+        ):
+            result = fallback_scrape(
+                self.cfg,
+                "https://learned.example/b",
+                max_chars=1000,
+                first_error="HTTP 403 fetching 'https://learned.example/b'",
+            )
+        self.assertEqual(result.text, "real content")
+        st = sf._ADAPTIVE.stats("learned.example", "forbidden")
+        self.assertEqual(st["browser-headers"]["wins"], 1.0)
+        self.assertEqual(st["browser-headers"]["streak"], 0)
+
+    def test_a_challenge_shaped_fetch_counts_as_a_loss(self) -> None:
+        from freegem import smart_fetch as sf
+
+        wall_page = ScrapeResult(
+            url="https://poison.example/",
+            title="T",
+            text="Just a moment... Checking your browser before accessing",
+        )
+        ok_page = ScrapeResult(url="https://poison.example/", title="T", text="real content")
+        scripted = {"browser-headers": wall_page, "reader": ok_page}
+        with (
+            mock.patch("freegem.smart_fetch._try_strategy", side_effect=self._ladder(scripted)),
+            mock.patch("freegem.smart_fetch.time.sleep"),
+        ):
+            result = fallback_scrape(
+                self.cfg,
+                "https://poison.example/",
+                max_chars=1000,
+                first_error="HTTP 403 fetching 'https://poison.example/'",
+            )
+        # The ladder walks past the wall-shaped page and the policy learns a
+        # LOSS for it -- never a win (issue #57's poisoned memory).
+        st = sf._ADAPTIVE.stats("poison.example", "forbidden")
+        self.assertEqual(st["browser-headers"]["wins"], 0)
+        self.assertEqual(st["browser-headers"]["losses"], 1.0)
+        self.assertEqual(result.text, "real content")
 
 
 if __name__ == "__main__":  # pragma: no cover

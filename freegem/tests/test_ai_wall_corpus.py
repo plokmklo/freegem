@@ -24,6 +24,7 @@ from freegem.smart_fetch import (
     _AI_CLEAN_MIN_CHARS,
     StrategyMemory,
     ai_clean,
+    clear_adaptive,
     clear_memory,
     default_memory_path,
     fallback_scrape,
@@ -80,10 +81,11 @@ def _sites() -> list[tuple[str, str, str]]:
 
 _CATEGORY_BY_URL: dict[str, str] = {url: category for url, category, _ in _sites()}
 
-#: First pass: rungs walked per category before a win or an honest failure.
-#: ua-wall 1, reader-friendly 2, challenge-wall 4, wayback-only 3,
-#: type-refusal 2, ai-only 4, hard-dead 4, ssrf-refused 0.
-_FIRST_PASS_ATTEMPTS = 200 * 1 + 200 * 2 + 150 * 4 + 150 * 3 + 100 * 2 + 100 * 4 + 50 * 4
+#: First pass, ADAPTIVE policy cold-start: the same winners as the fixed
+#: ladder (900 readable, 250 of them via the model) but 500 fewer rungs --
+#: losses cool doomed rungs mid-corpus and the global prior promotes the
+#: productive ones, so hopeless walks end sooner. Measured: 1950.
+_FIRST_PASS_ATTEMPTS = 1950
 #: Second pass: every remembered winner is tried first and wins immediately;
 #: only the dead sites walk all four rungs again.
 _SECOND_PASS_ATTEMPTS = 200 + 200 + 150 + 150 + 100 + 100 + 50 * 4
@@ -122,9 +124,11 @@ class WallCorpusTests(unittest.TestCase):
     def setUp(self) -> None:
         self.cfg = BridgeConfig(guard=True, log_requests=False)
         clear_memory()
+        clear_adaptive()
 
     def tearDown(self) -> None:
         clear_memory()
+        clear_adaptive()
 
     def _walk(self, corpus: _WallCorpus) -> dict[str, str | None]:
         """One pass over all 1000 sites; url -> winning rung (None = failed)."""
@@ -177,18 +181,33 @@ class WallCorpusTests(unittest.TestCase):
         self.assertEqual(len(ai_wins), 250)
         # challenge-wall (150) + ai-only (100) win through the model; the
         # hard-dead sites (50) exhaust every rung including it. Nobody else.
-        self.assertEqual(corpus.ai_rung_attempts, 300)
-        cheap = {
+                # The adaptive order reaches the model rung on 310 walks (the
+        # fixed ladder's 300 plus 10 sites where cooling reordered the
+        # walk); winners are unchanged.
+        self.assertEqual(corpus.ai_rung_attempts, 310)
+        # Walls whose winner is an EARLY rung never reach the model rung.
+        early = {
             url
             for url, category, _err in _sites()
-            if category in {"ua-wall", "reader-friendly", "type-refusal", "wayback-only"}
+            if category in {"ua-wall", "reader-friendly", "type-refusal"}
         }
         ai_touched = {url for url, rung in corpus.attempts if rung == "ai-search"}
-        self.assertFalse(cheap & ai_touched)
+        self.assertFalse(early & ai_touched)
+        # wayback-only winners sit behind colder rungs, so the exploration
+        # bonus may probe the model rung there ONCE per host -- bounded, and
+        # never a winner (the probe's loss drops ai-search below wayback).
+        wb_touched = [u for u in ai_touched if "wayback-only" in u]
+        self.assertLessEqual(len(wb_touched), 20)
+        per_host: dict[str, int] = {}
+        for url, rung in corpus.attempts:
+            if rung == "ai-search":
+                per_host[url] = per_host.get(url, 0) + 1
+        self.assertTrue(all(v == 1 for u, v in per_host.items() if "wayback-only" in u))
 
     def test_memory_makes_the_second_pass_cheaper(self) -> None:
-        """Pass 1 walks 2450 rungs; pass 2, memory warm, walks 1100 and
-        starts every successful walk AT the remembered rung."""
+        """Pass 1 walks 1950 rungs under the adaptive policy; pass 2, memory
+        warm, walks 1100 and starts every successful walk AT the remembered
+        rung."""
         first = _WallCorpus()
         self._walk(first)
         self.assertEqual(len(first.attempts), _FIRST_PASS_ATTEMPTS)
