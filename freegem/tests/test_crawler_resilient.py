@@ -137,6 +137,9 @@ class LadderTestCase(unittest.TestCase):
         # branch with a zero floor, and Retry-After comes back as a sleep
         # bounded by the pacer penalty cap.
         self.pacer = HostPacer(default_delay_sec=0.0)
+        # Hermetic policy state: cold-start statistics, breaker closed.
+        resilient.clear_adaptive()
+        resilient._ARCHIVE_BREAKER.reset()
 
     def fetch(self, url: str, **kwargs: Any) -> FetchOutcome:
         return fetch_resilient(
@@ -188,6 +191,48 @@ class BrowserProfileTests(LadderTestCase):
         self.assertTrue(outcome.ok, outcome.error)
         self.assertEqual(outcome.fallback, "wayback")
         self.assertEqual(outcome.via, "wayback")
+
+    def test_open_breaker_skips_the_archive_dial_and_says_so(self) -> None:
+        """Three blackholed archive dials open the breaker: the next seed's
+        wayback rung is skipped WITHOUT dialing and the taxonomy says why."""
+        for _ in range(resilient._BREAKER_OPEN_AFTER):
+            resilient._ARCHIVE_BREAKER.record_connect_failure()
+        _LadderSite.script["/w2"] = [(403, b"walled", "text/plain")] * 9
+        before = len([r for r in _LadderSite.requests if "/wb2id_/" in r[0]])
+        outcome = self.fetch(f"{self.base}/w2")
+        self.assertFalse(outcome.ok)
+        self.assertIn("breaker open", outcome.error or "")
+        self.assertNotIn("wayback", outcome.fallback or "")
+        after = len([r for r in _LadderSite.requests if "/wb2id_/" in r[0]])
+        self.assertEqual(before, after)
+
+    def test_archive_answers_keep_the_breaker_closed(self) -> None:
+        """A 404 snapshot miss is an ANSWER: the path lives, breaker stays shut."""
+        _LadderSite.script["/w3"] = [(403, b"walled", "text/plain")] * 9
+        # The root is scripted too: after the archive 404 the ladder's
+        # origin-root branch (written for origin 404s) dials "/" -- a wall
+        # there keeps the walk honest instead of accepting the homepage.
+        _LadderSite.script["/"] = [(403, b"walled root", "text/plain")] * 9
+        _LadderSite.script[f"/wb2id_/{self.base}/w3"] = [
+            (404, b"no snapshot", "text/plain")
+        ] * 9
+        outcome = self.fetch(f"{self.base}/w3")
+        self.assertFalse(outcome.ok)
+        self.assertEqual(resilient._ARCHIVE_BREAKER._consecutive, 0)
+        self.assertIsNone(resilient._ARCHIVE_BREAKER._opened_at)
+
+    def test_the_ladder_learns_from_its_walk(self) -> None:
+        """Every recorded attempt lands in the policy: losses for the refused
+        profiles, a win for the rung that actually read the page."""
+        _LadderSite.script["/w4"] = [(403, b"walled", "text/plain")] * 9
+        _LadderSite.script[f"/wb2id_/{self.base}/w4"] = [
+            (200, b"archived copy", "text/html")
+        ] * 9
+        outcome = self.fetch(f"{self.base}/w4")
+        self.assertTrue(outcome.ok, outcome.error)
+        st = resilient._ADAPTIVE.stats(_FAKE_HOST, "forbidden")
+        self.assertGreater(st.get("profile_1", {}).get("losses", 0), 0)
+        self.assertGreater(st.get("wayback", {}).get("wins", 0), 0)
 
     def test_451_stays_refused_when_archive_refuses_too(self) -> None:
         _LadderSite.script["/legal"] = [(451, b"blocked by law", "text/plain")] * 9

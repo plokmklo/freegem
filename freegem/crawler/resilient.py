@@ -25,17 +25,24 @@ every single attempt.
 
 from __future__ import annotations
 
+import contextlib
 import http.cookiejar
 import ipaddress
 import json
+import os
 import random
 import ssl
 import threading
 import time
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 
+from ..adaptive import AdaptiveLadder
+from ..adaptive import default_path as _adaptive_default_path
+from ..adaptive import wall_class as _adaptive_wall_class
 from ..config import BridgeConfig
 from ..ssrf import Resolver, SSRFRefused, _checked_addresses, _host_only, pick_public_ips
 from .fetch import FetchOutcome, _is_dns_failure, crawl_fetch
@@ -131,6 +138,90 @@ _DOH_ENDPOINTS = (
     "https://dns.google/resolve?name={host}&type={rtype}",
     "https://cloudflare-dns.com/dns-query?name={host}&type={rtype}",
 )
+
+#: The adaptive policy layer for the CRAWLER ladder: the same learner as the
+#: smart-fetch face, a different rung vocabulary (crawler actions, not the
+#: server-side strategies), so each keeps its own statistics file and neither
+#: pollutes the other's priors. Costs are monotone in escalation severity so
+#: a cold start reproduces the fixed ladder order exactly.
+_CRAWLER_COSTS: dict[str, float] = {
+    "origin": 1.0,
+    "retry": 1.5,
+    "timeout_up": 2.0,
+    "origin_root": 2.0,
+    **{f"profile_{i}": 2.0 + 0.5 * i for i in range(1, len(PROFILES) + 1)},
+    "scheme_swap": 3.0,
+    "host_swap": 3.0,
+    "tls_unverified": 4.0,
+    "doh": 4.0,
+    "wayback": 5.0,
+}
+_ADAPTIVE = AdaptiveLadder(
+    path=str(Path(_adaptive_default_path()).parent / "adaptive_ladder_crawler.json"),
+    order=tuple(_CRAWLER_COSTS),
+    costs=_CRAWLER_COSTS,
+)
+
+
+def clear_adaptive() -> None:
+    """Drop learned rung statistics (tests, --refresh paths)."""
+    _ADAPTIVE.clear()
+    with contextlib.suppress(OSError):
+        os.unlink(_ADAPTIVE.path or "")
+
+
+_BREAKER_OPEN_AFTER = 3
+_BREAKER_COOLDOWN_SEC = 900.0
+
+
+class _ArchiveBreaker:
+    """Stop paying the dead-archive tax on every seed.
+
+    When web.archive.org blackholes (TCP SYN drops, measured live on the 10k
+    re-pass: 471 seeds x 20s timeout = ~2.6h of ladder wall-clock spent for
+    nothing), every seed's last-resort rung burns its dial anyway. The
+    breaker opens after consecutive CONNECT-phase failures -- an HTTP answer
+    (even a 404 snapshot miss) proves the path lives and keeps it closed --
+    and half-opens after a cooldown for one probe. The skip lands in the
+    taxonomy honestly, so reports can tell "archive down" from "no snapshot".
+    """
+
+    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._consecutive = 0
+        self._opened_at: float | None = None
+
+    def allow(self) -> bool:
+        """True when a wayback dial may run (closed, or half-open probe)."""
+        now = self._clock()
+        with self._lock:
+            if self._opened_at is None:
+                return True
+            if now - self._opened_at >= _BREAKER_COOLDOWN_SEC:
+                self._opened_at = None  # half-open: exactly one probe gets through
+                return True
+            return False
+
+    def record_success(self) -> None:
+        """The archive answered (any HTTP status): the path lives."""
+        with self._lock:
+            self._consecutive = 0
+            self._opened_at = None
+
+    def record_connect_failure(self) -> None:
+        with self._lock:
+            self._consecutive += 1
+            if self._consecutive >= _BREAKER_OPEN_AFTER:
+                self._opened_at = self._clock()
+
+    def reset(self) -> None:
+        with self._lock:
+            self._consecutive = 0
+            self._opened_at = None
+
+
+_ARCHIVE_BREAKER = _ArchiveBreaker()
 # The ladder owns the SHORT retry horizon; the frontier's own retry
 # schedule owns the long one (across resume). Sleep budgets are capped so
 # a hopeless origin costs seconds per URL, not minutes.
@@ -277,7 +368,15 @@ def fetch_resilient(
         max_sleeps=max(1, min(base.max_retries, 4)),
         caller_headers=extra_headers or {},
     )
+    _t0 = time.monotonic()
     outcome = _attempt(cfg, url, base, state, pacer, spill_dir, cookie_jar=cookie_jar, pool=pool)
+    if not _happy(outcome):
+        # The wall the ladder is about to work on, as the policy classes it;
+        # a plain first-try success carries no ladder information to learn.
+        wall = _adaptive_wall_class(outcome.status, error=outcome.error or "")
+        _ADAPTIVE.record(host, wall, "origin", False, time.monotonic() - _t0)
+    else:
+        wall = ""
 
     while not _happy(outcome) and state.attempts < max_attempts:
         if seed_budget_sec > 0.0 and (time.monotonic() - seed_started) >= seed_budget_sec:
@@ -290,17 +389,34 @@ def fetch_resilient(
         if nxt is None:
             break
         action, target_url, extra_headers, relaxed_tls = nxt
+        # The wall THIS attempt works against is the one the previous
+        # outcome established; every attempt is recorded, wins and losses.
+        wall = _adaptive_wall_class(outcome.status, error=outcome.error or "")
         if action == "sleep":
             time.sleep(_sleep_backoff(state.attempts))
+            _t0 = time.monotonic()
             outcome = _attempt(
                 cfg, target_url, base, state, pacer, spill_dir, cookie_jar=cookie_jar, pool=pool
             )
+            _ADAPTIVE.record(host, wall, "retry", _happy(outcome), time.monotonic() - _t0)
             continue
         state.actions.append(action)
         if action == "wayback":
             # A dead-wall read of the archive must not inherit a 90s timeout:
             # unresponsive networks cost seconds, not minutes.
             state.timeout_sec = min(state.timeout_sec or _WAYBACK_TIMEOUT_SEC, _WAYBACK_TIMEOUT_SEC)
+            if not _ARCHIVE_BREAKER.allow():
+                # The breaker is open: the dial is known-dead. The actions
+                # list must not claim a rung that never dialed.
+                state.actions.pop()
+                outcome.error = (
+                    f"{outcome.error or 'ladder stopped'}; wayback skipped: "
+                    "archive unreachable (breaker open, probe in "
+                    f"{_BREAKER_COOLDOWN_SEC / 60:.0f} min)"
+                )
+                outcome.attempts = max(1, state.attempts)
+                outcome.fallback = _fallback_of(state.actions)
+                return outcome
         resolver: Resolver | None = None
         if action == "doh":
             resolver = _doh_resolver_for(host)
@@ -315,6 +431,7 @@ def fetch_resilient(
             "wayback",
             "doh",
         ):
+            _t0 = time.monotonic()
             outcome = _attempt(
                 cfg,
                 target_url,
@@ -329,12 +446,28 @@ def fetch_resilient(
                 pool=pool if plain_attempt else None,
             )
         else:  # plain retry (429 waited out, timeout escalated, 5xx backed off)
+            _t0 = time.monotonic()
             outcome = _attempt(
                 cfg, target_url, base, state, pacer, spill_dir, cookie_jar=cookie_jar, pool=pool
             )
+        if action == "wayback":
+            # Any HTTP answer (even a 404 snapshot miss) proves the path
+            # lives; only connect-phase death opens the breaker.
+            if outcome.ok or outcome.kind not in ("network", "timeout"):
+                _ARCHIVE_BREAKER.record_success()
+            else:
+                _ARCHIVE_BREAKER.record_connect_failure()
+        _ADAPTIVE.record(
+            host,
+            wall,
+            action if action != "wait_429" else "retry",
+            _happy(outcome),
+            time.monotonic() - _t0,
+        )
         if action == "wayback" and outcome.ok:
             outcome.via = "wayback"
 
+    _ADAPTIVE.flush()
     outcome.attempts = max(1, state.attempts)
     outcome.fallback = _fallback_of(state.actions)
     return outcome
@@ -456,7 +589,10 @@ def _next_action(
         return ("doh", original_url, None, False)
 
     if kind == "network" and _is_transient_net(outcome):
-        if not state.tried_scheme_swap and _scheme_swap(original_url):
+        # A scheme change cannot repair name resolution: the swapped URL
+        # still carries the dead hostname. Host swap may (www. vs apex).
+        dns_dead = _is_dns_failure(outcome.error or "")
+        if not state.tried_scheme_swap and not dns_dead and _scheme_swap(original_url):
             state.tried_scheme_swap = True
             return ("scheme_swap", _scheme_swap(original_url) or "", None, False)
         if not state.tried_host_swap and _host_swap(original_url):
