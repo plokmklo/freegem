@@ -1,0 +1,117 @@
+diff --git a/freegem/web_research.py b/freegem/web_research.py
+index 7016449..9fda341 100644
+--- a/freegem/web_research.py
++++ b/freegem/web_research.py
+@@ -179,16 +179,80 @@ class ResearchCache:
+             "last_modified": modified if isinstance(modified, str) else None,
+         }
+ 
+-    def put(self, url: str, title: str, text: str, last_modified: str | None = None) -> None:
++    def entry(self, url: str) -> dict[str, Any] | None:
++        """(#113) The raw entry, ignoring the TTL; None when absent or damaged.
++
++        A stale-but-intact entry is exactly what a conditional GET needs:
++        its validators, and its body as the fallback if the origin answers
++        304. The digest check still runs -- a truncated body is never sent
++        anywhere, fresh or stale.
++        """
++        with self._lock:
++            entry = self._load().get(url)
++        if not isinstance(entry, dict) or not isinstance(entry.get("text"), str):
++            return None
++        digest = entry.get("hash")
++        if (
++            not isinstance(digest, str)
++            or hashlib.sha256(entry["text"].encode()).hexdigest() != digest
++        ):
++            return None
++        if not isinstance(entry.get("fetched_at"), (int, float)):
++            return None
++        return entry
++
++    def touch_validated(
++        self, url: str, etag: str | None = None, last_modified: str | None = None
++    ) -> None:
++        """(#113) Re-stamp a stale entry after a 304: it is fresh again now.
++
++        Validators are refreshed when the answering server supplied them
++        (a 304 may carry its own ETag); the body, title, and hash never
++        change, so the digest check that guarded the file still holds.
++        """
++        with self._lock:
++            data = self._load()
++            entry = data.get(url)
++            if not isinstance(entry, dict):
++                return
++            entry["fetched_at"] = time.time()
++            if etag is not None:
++                entry["etag"] = etag
++            if last_modified is not None:
++                entry["last_modified"] = last_modified
++            try:
++                self.path.parent.mkdir(parents=True, exist_ok=True)
++                tmp = self.path.with_suffix(".tmp")
++                tmp.write_text(json.dumps(data), encoding="utf-8")
++                tmp.replace(self.path)
++            except OSError as exc:
++                if self.on_error is not None:
++                    self.on_error(f"cache write failed ({exc}); continuing without persistence")
++
++    def put(
++        self,
++        url: str,
++        title: str,
++        text: str,
++        last_modified: str | None = None,
++        etag: str | None = None,
++    ) -> None:
+         with self._lock:
+             data = self._load()
+-            data[url] = {
++            entry: dict[str, Any] = {
+                 "title": title,
+                 "text": text,
+                 "fetched_at": time.time(),
+                 "hash": hashlib.sha256(text.encode()).hexdigest(),
+                 "last_modified": last_modified,
+             }
++            # (#113) The ETag rides along when the origin sent one: this is
++            # what lets a later stale read ask "still this?" instead of
++            # re-transferring the body. Entries saved without one (old cache
++            # files, servers that do not send ETag) simply re-fetch.
++            if etag:
++                entry["etag"] = etag
++            data[url] = entry
+             # Evict the oldest entries when the cache outgrows its cap.
+             if len(data) > _CACHE_MAX_ENTRIES:
+ 
+@@ -461,7 +525,13 @@ def _collect_sources(
+                 if cache is not None:
+                     stored = cache.get(url)
+                     if stored is None or not stored["text"].startswith(page.text):
+-                        cache.put(url, page.title, page.text, page.last_modified)
++                        cache.put(
++                            url,
++                            page.title,
++                            page.text,
++                            page.last_modified,
++                            etag=getattr(page, "etag", None),
++                        )
+             fetched += source.chars
+             sources[position] = source
+             material.append((source, text))
+@@ -547,7 +617,13 @@ def _collect_sources(
+             if cache is not None:
+                 stored = cache.get(urls[position])
+                 if stored is None or not stored["text"].startswith(text):
+-                    cache.put(urls[position], page.title, text, page.last_modified)
++                    cache.put(
++                        urls[position],
++                        page.title,
++                        text,
++                        page.last_modified,
++                        etag=getattr(page, "etag", None),
++                        )
+             fetched += source.chars
+             sources[position] = source
+             material.append((source, text))
