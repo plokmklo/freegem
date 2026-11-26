@@ -17,6 +17,13 @@ publicly archived copy of a published page attacks no one. Those outcomes
 carry ``via="wayback"`` and ``fallback="wayback"`` so reports can count them
 honestly -- they are reads of a copy, not of the live origin.
 
+When a 403/406 wall outlasts every browser profile, the ladder makes ONE
+read attempt through r.jina.ai's public reader service before the archive
+(``via="reader"``): the page is fetched by a service the site can see and
+rate-limit like any client -- no bypass of 402/451, no identity tricks --
+and a reader answer that says it could not read the page is an honest
+loss, never content.
+
 Nothing here attacks an origin: no authentication bypass, no captcha or
 JS-challenge solving, no forgery beyond standard browser-grade request
 headers and origin-granted cookies, and per-host pacing is honored before
@@ -134,6 +141,10 @@ _MAX_TIMEOUT_ESCALATIONS = 2
 #: newest snapshot, ``id_`` serves the original bytes without the toolbar.
 _WAYBACK_PREFIX = "https://web.archive.org/web/2id_/"
 _WAYBACK_TIMEOUT_SEC = 20.0
+#: r.jina.ai's public reader: it fetches the page itself and returns
+#: markdown -- a service the site can see and rate-limit like any client.
+_READER_PREFIX = "https://r.jina.ai/"
+_READER_TIMEOUT_SEC = 30.0
 _DOH_ENDPOINTS = (
     "https://dns.google/resolve?name={host}&type={rtype}",
     "https://cloudflare-dns.com/dns-query?name={host}&type={rtype}",
@@ -152,6 +163,7 @@ _CRAWLER_COSTS: dict[str, float] = {
     **{f"profile_{i}": 2.0 + 0.5 * i for i in range(1, len(PROFILES) + 1)},
     "scheme_swap": 3.0,
     "host_swap": 3.0,
+    "reader": 3.75,
     "tls_unverified": 4.0,
     "doh": 4.0,
     "wayback": 5.0,
@@ -289,6 +301,7 @@ class _LadderState:
     tried_tls_relax: bool = False
     tried_doh: bool = False
     tried_wayback: bool = False
+    tried_reader: bool = False
     actions: list[str] = field(default_factory=list)
     attempts: int = 0
     #: Backoff sleeps used so far / allowed (from the caller's max_retries).
@@ -417,6 +430,10 @@ def fetch_resilient(
                 outcome.attempts = max(1, state.attempts)
                 outcome.fallback = _fallback_of(state.actions)
                 return outcome
+        if action == "reader":
+            # The reader fetches the origin itself: a bounded, generous dial
+            # that never inherits a 90s timeout escalation.
+            state.timeout_sec = min(state.timeout_sec or _READER_TIMEOUT_SEC, _READER_TIMEOUT_SEC)
         resolver: Resolver | None = None
         if action == "doh":
             resolver = _doh_resolver_for(host)
@@ -457,6 +474,17 @@ def fetch_resilient(
                 _ARCHIVE_BREAKER.record_success()
             else:
                 _ARCHIVE_BREAKER.record_connect_failure()
+        if action == "reader":
+            # A 200 that says the reader could not read the page is an
+            # HONEST non-answer (#57 discipline), never content: mark the
+            # attempt failed and keep walking.
+            body = outcome.body or b""
+            body_len = outcome.body_size or len(body)
+            if outcome.ok and (
+                b"Warning: Target URL returned error" in body[:600] or body_len < 40
+            ):
+                outcome.kind = "http_error"
+                outcome.error = "reader could not read the page (honest non-answer)"
         _ADAPTIVE.record(
             host,
             wall,
@@ -466,6 +494,8 @@ def fetch_resilient(
         )
         if action == "wayback" and outcome.ok:
             outcome.via = "wayback"
+        if action == "reader" and outcome.ok:
+            outcome.via = "reader"
 
     _ADAPTIVE.flush()
     outcome.attempts = max(1, state.attempts)
@@ -550,6 +580,11 @@ def _next_action(
         profile = state.next_profile()
         if profile is not None:
             return (f"profile_{state.profiles_tried}", original_url, profile, False)
+        if not state.tried_reader:
+            # One honest read through the public reader before the archive:
+            # a FRESH reader beats an OLD archive snapshot.
+            state.tried_reader = True
+            return ("reader", _READER_PREFIX + original_url, None, False)
 
     if status in (500, 502, 503, 504):
         # A path-specific origin error often leaves the origin root healthy
@@ -655,7 +690,15 @@ def _sleep_step(state: _LadderState, url: str) -> tuple[str, str, None, bool] | 
 
 def _fallback_of(actions: list[str]) -> str:
     """The escalation that produced the final content ('' = none needed)."""
-    for name in ("origin_root", "scheme_swap", "host_swap", "tls_unverified", "doh", "wayback"):
+    for name in (
+        "origin_root",
+        "scheme_swap",
+        "host_swap",
+        "tls_unverified",
+        "doh",
+        "wayback",
+        "reader",
+    ):
         if name in actions:
             return name
     for name in actions:

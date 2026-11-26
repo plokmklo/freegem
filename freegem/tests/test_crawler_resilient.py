@@ -132,6 +132,11 @@ class LadderTestCase(unittest.TestCase):
         )
         self.wayback_patch.start()
         self.addCleanup(self.wayback_patch.stop)
+        self.reader_patch = mock.patch.object(
+            resilient, "_READER_PREFIX", f"http://{_FAKE_HOST}:{self.server.server_port}/rdr/"
+        )
+        self.reader_patch.start()
+        self.addCleanup(self.reader_patch.stop)
         self.cfg = BridgeConfig(guard=True, log_requests=False)
         # Real delays would slow the suite; the ladder still exercises every
         # branch with a zero floor, and Retry-After comes back as a sleep
@@ -198,6 +203,7 @@ class BrowserProfileTests(LadderTestCase):
         for _ in range(resilient._BREAKER_OPEN_AFTER):
             resilient._ARCHIVE_BREAKER.record_connect_failure()
         _LadderSite.script["/w2"] = [(403, b"walled", "text/plain")] * 9
+        _LadderSite.script[f"/rdr/{self.base}/w2"] = [(403, b"walled", "text/plain")] * 9
         before = len([r for r in _LadderSite.requests if "/wb2id_/" in r[0]])
         outcome = self.fetch(f"{self.base}/w2")
         self.assertFalse(outcome.ok)
@@ -209,6 +215,7 @@ class BrowserProfileTests(LadderTestCase):
     def test_archive_answers_keep_the_breaker_closed(self) -> None:
         """A 404 snapshot miss is an ANSWER: the path lives, breaker stays shut."""
         _LadderSite.script["/w3"] = [(403, b"walled", "text/plain")] * 9
+        _LadderSite.script[f"/rdr/{self.base}/w3"] = [(403, b"walled", "text/plain")] * 9
         # The root is scripted too: after the archive 404 the ladder's
         # origin-root branch (written for origin 404s) dials "/" -- a wall
         # there keeps the walk honest instead of accepting the homepage.
@@ -225,6 +232,7 @@ class BrowserProfileTests(LadderTestCase):
         """Every recorded attempt lands in the policy: losses for the refused
         profiles, a win for the rung that actually read the page."""
         _LadderSite.script["/w4"] = [(403, b"walled", "text/plain")] * 9
+        _LadderSite.script[f"/rdr/{self.base}/w4"] = [(403, b"walled", "text/plain")] * 9
         _LadderSite.script[f"/wb2id_/{self.base}/w4"] = [
             (200, b"archived copy", "text/html")
         ] * 9
@@ -232,6 +240,7 @@ class BrowserProfileTests(LadderTestCase):
         self.assertTrue(outcome.ok, outcome.error)
         st = resilient._ADAPTIVE.stats(_FAKE_HOST, "forbidden")
         self.assertGreater(st.get("profile_1", {}).get("losses", 0), 0)
+        self.assertGreater(st.get("reader", {}).get("losses", 0), 0)
         self.assertGreater(st.get("wayback", {}).get("wins", 0), 0)
 
     def test_451_stays_refused_when_archive_refuses_too(self) -> None:
@@ -291,6 +300,48 @@ class BrowserProfileTests(LadderTestCase):
         self.assertEqual(outcome.attempts, 4)
         self.assertEqual(len(dials), 4)
         self.assertIn("/wb2id_/", dials[-1])
+
+    def test_403_wall_gets_one_reader_rescue_before_the_archive(self) -> None:
+        """A 403 that outlasts every browser profile gets ONE public-reader
+        read before the archive: a FRESH reader beats an OLD snapshot."""
+        _LadderSite.script["/w5"] = [(403, b"walled", "text/plain")] * 9
+        _LadderSite.script[f"/rdr/{self.base}/w5"] = [
+            (200, b"# The Article\n\nReadable markdown body. " * 8, "text/plain")
+        ] * 9
+        outcome = self.fetch(f"{self.base}/w5")
+        self.assertTrue(outcome.ok, outcome.error)
+        self.assertEqual(outcome.via, "reader")
+        self.assertEqual(outcome.fallback, "reader")
+        reader_dials = [r for r in _LadderSite.requests if r[0].startswith("/rdr/")]
+        self.assertEqual(len(reader_dials), 1, "the reader is a one-shot rung")
+
+    def test_reader_nonanswer_200_is_an_honest_loss(self) -> None:
+        """A reader 200 that says it could not read the page is recorded as
+        a loss and the ladder keeps walking -- never presented as content."""
+        _LadderSite.script["/w6"] = [(403, b"walled", "text/plain")] * 9
+        _LadderSite.script[f"/rdr/{self.base}/w6"] = [
+            (200, b"Warning: Target URL returned error 403 (bot wall).", "text/plain")
+        ] * 9
+        _LadderSite.script[f"/wb2id_/{self.base}/w6"] = [
+            (404, b"no snapshot", "text/plain")
+        ] * 9
+        _LadderSite.script["/"] = [(403, b"walled root", "text/plain")] * 9
+        outcome = self.fetch(f"{self.base}/w6")
+        self.assertFalse(outcome.ok)
+        self.assertNotIn("reader", outcome.fallback or "")
+        st = resilient._ADAPTIVE.stats(_FAKE_HOST, "forbidden")
+        self.assertGreater(st.get("reader", {}).get("losses", 0), 0)
+
+    def test_451_never_dials_the_reader(self) -> None:
+        """402/451 are never bypassed: the reader rung does not engage."""
+        _LadderSite.script["/legal2"] = [(451, b"blocked by law", "text/plain")] * 9
+        _LadderSite.script[f"/wb2id_/{self.base}/legal2"] = [
+            (451, b"also blocked", "text/plain")
+        ] * 9
+        outcome = self.fetch(f"{self.base}/legal2")
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.status, 451)
+        self.assertNotIn("/rdr/", " ".join(r[0] for r in _LadderSite.requests))
 
 
 class LadderUnitTests(unittest.TestCase):
