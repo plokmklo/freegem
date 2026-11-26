@@ -240,6 +240,12 @@ class AdaptiveLadder:
                 return
             self._dirty = False
 
+    def clear(self) -> None:
+        """Drop every learned statistic (tests, --refresh paths)."""
+        with self._lock:
+            self._stats.clear()
+            self._dirty = False
+
     # ---- statistics ------------------------------------------------------
 
     @staticmethod

@@ -1,4 +1,4 @@
-"""Smart fetch: a fallback ladder for pages that refuse the first request.
+"The smart fetch: a fallback ladder for pages that refuse the first request.
 
 The first attempt is always the honest one: a self-identifying freegem
 client, GET, no tricks. When the origin answers with 403 / 405 / 401 / 407 /
@@ -74,6 +74,9 @@ from pathlib import Path
 from typing import Any
 
 from . import flaresolverr_fetcher, tls_fetcher
+from .adaptive import AdaptiveLadder
+from .adaptive import default_path as _adaptive_default_path
+from .adaptive import wall_class as _adaptive_wall_class
 from .config import BridgeConfig
 from .web_scraper import ScrapeError, ScrapeResult, scrape_page
 
@@ -355,8 +358,21 @@ def clear_memory() -> None:
     """Drop every remembered host strategy (tests, --refresh paths)."""
     with StrategyMemory._shared_lock:
         StrategyMemory._shared = {}
+
+
+#: The adaptive policy layer (#57/#60/#25): orders the rungs per
+#: (host, wall class) from learned, VERIFIED outcomes and keeps the honesty
+#: rules -- it adds no new ways around a wall. Shares the cache directory
+#: with the per-host memory; a missing or corrupt file just means
+#: cold-start statistics, which reproduce the fixed ladder exactly.
+_ADAPTIVE = AdaptiveLadder(path=_adaptive_default_path())
+
+
+def clear_adaptive() -> None:
+    """Drop learned rung statistics (tests, --refresh paths)."""
+    _ADAPTIVE.clear()
     with contextlib.suppress(OSError):
-        _MEMORY.path.unlink()
+        os.unlink(_adaptive_default_path())
 
 
 # ─── per-host serialization ──────────────────────────────────────────────────
@@ -396,15 +412,27 @@ def _gated_off(cfg: BridgeConfig) -> set[str]:
     return off
 
 
-def _strategy_order(host: str, cfg: BridgeConfig) -> list[str]:
-    """The ladder with gated-off rungs dropped and any remembered winning
-    step (among the rungs still allowed) moved to the front."""
-    order = [s for s in STRATEGIES if s not in _gated_off(cfg)]
+def _strategy_order(host: str, cfg: BridgeConfig, wall: str = "other") -> list[str]:
+    """The ladder, ordered by the adaptive policy: gated-off rungs dropped,
+    per-(host, wall) learned ranking with an exploration bonus and cost
+    weighting, the remembered winning step still jumping the queue. Falls
+    back to the fixed order whenever the policy has nothing to say: a cold
+    start reproduces it exactly, and a 402/451 wall ("no_bypass") keeps the
+    historical ladder behavior instead of refusing to engage."""
+    order = _ADAPTIVE.plan(host, wall, gated_off=_gated_off(cfg), available=STRATEGIES)
+    if not order:
+        order = [s for s in STRATEGIES if s not in _gated_off(cfg)]
     remembered = _MEMORY.get(host)
     if remembered in order:
         order.remove(remembered)
         order.insert(0, remembered)
     return order
+
+
+def _wall_from_first_error(first_error: str) -> str:
+    """The adaptive policy's coarse class for the DIRECT fetch's failure."""
+    m = _HTTP_STATUS_RE.search(first_error)
+    return _adaptive_wall_class(int(m.group(1)) if m else None, error=first_error)
 
 
 def _try_strategy(
@@ -904,8 +932,9 @@ def fallback_scrape(
 
     with _ladder_lock(host):
         attempts: list[str] = [f"direct: {first_error}"]
+        wall = _wall_from_first_error(first_error)
         deadline = time.monotonic() + _LADDER_BUDGET_SEC
-        for strategy in _strategy_order(host, cfg):
+        for strategy in _strategy_order(host, cfg, wall):
             if time.monotonic() >= deadline:
                 # (#25) The budget exists so four slow rungs cannot stack
                 # into minutes of silence. Skipped rungs are recorded just
@@ -916,6 +945,7 @@ def fallback_scrape(
                 continue
             if progress is not None:
                 progress(f"smart-fetch: direct failed ({first_error}); trying {strategy}")
+            t0 = time.monotonic()
             time.sleep(_PAUSE_SEC)
             try:
                 result = _try_strategy(
@@ -930,21 +960,32 @@ def fallback_scrape(
                     budget=max(0.0, deadline - time.monotonic()),
                 )
             except ScrapeError as exc:
+                # Learned as a plain loss: the rung ran and refused.
+                _ADAPTIVE.record(host, wall, strategy, False, time.monotonic() - t0)
                 attempts.append(f"{strategy}: {exc}")
                 continue
+            dt = time.monotonic() - t0
             if not result.text.strip():
+                # Fetched-but-empty counts as a LOSS in the policy (#57):
+                # remembering it as a win would front-rank a useless rung.
+                _ADAPTIVE.record(host, wall, strategy, True, dt, verified=False)
                 attempts.append(f"{strategy}: fetched but extracted zero readable text")
                 continue
             if _looks_like_challenge(result.text):
+                _ADAPTIVE.record(host, wall, strategy, True, dt, verified=False)
                 attempts.append(f"{strategy}: got a bot-challenge page, not content")
                 continue
             if strategy == "ai-search" and _looks_like_ai_nonanswer(result.text):
+                _ADAPTIVE.record(host, wall, strategy, True, dt, verified=False)
                 attempts.append(f"{strategy}: the bridge could not read the page either")
                 continue
+            _ADAPTIVE.record(host, wall, strategy, True, dt, verified=True)
             _MEMORY.remember(host, strategy)
             if progress is not None:
                 progress(f"smart-fetch: {strategy} read {host or url} ({len(result.text)} chars)")
+            _ADAPTIVE.flush()
             return result
+        _ADAPTIVE.flush()
     taxonomy = "; ".join(attempts)
     raise ScrapeError(
         f"every read path refused {url!r} — honest failure taxonomy [{kind}]: {taxonomy}"
