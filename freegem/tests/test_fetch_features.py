@@ -21,7 +21,7 @@ from typing import Any
 from unittest import mock
 
 from freegem.config import BridgeConfig
-from freegem.smart_fetch import STRATEGIES, clear_memory
+from freegem.smart_fetch import STRATEGIES, clear_adaptive, clear_memory
 from freegem.web_scraper import (
     ScrapeError,
     ScrapeResult,
@@ -430,9 +430,11 @@ class BrowserRenderRungTests(unittest.TestCase):
     def setUp(self) -> None:
         self.cfg = BridgeConfig(guard=True, log_requests=False, smart_fetch_browser_render=True)
         clear_memory()
+        clear_adaptive()
 
     def tearDown(self) -> None:
         clear_memory()
+        clear_adaptive()
 
     def _ok_render(self) -> Any:
         from freegem.playwright_fetcher import PlaywrightResult

@@ -36,6 +36,7 @@ from freegem.smart_fetch import (
     _looks_like_challenge,
     _strategy_order,
     ai_clean,
+    clear_adaptive,
     clear_memory,
     default_memory_path,
 )
@@ -501,6 +502,13 @@ class Fix58RenderSlotTests(_StateDirTestCase):
 
 
 class Fix59BudgetSizingTests(_StateDirTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        clear_adaptive()
+
+    def tearDown(self) -> None:
+        clear_adaptive()
+
     def test_sub_second_budget_skips_ai_search(self) -> None:
         from freegem.smart_fetch import _ai_search_answer
 
